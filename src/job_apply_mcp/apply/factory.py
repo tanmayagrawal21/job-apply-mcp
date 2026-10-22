@@ -68,5 +68,7 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
             control = importlib.import_module("job_apply_mcp.control").ControlAgent(settings)
         except ImportError:
             control = None
-    return ApplyEngine(settings, resolve_adapter=resolve_adapter or adapter_resolver(settings), profile=profile,
+    from .approvals import ApprovalBook
+    book = ApprovalBook(settings.paths.data_dir, ttl_s=settings.apply.approval_ttl_s)
+    return ApplyEngine(settings, approvals=book, resolve_adapter=resolve_adapter or adapter_resolver(settings), profile=profile,
                        router=router, gates=gates, store=store, driver_factory=driver_factory, control=control)

@@ -1,4 +1,4 @@
-"""Apply engine (ADR-0011): plan -> approve (hash-bound token) -> submit, plus a bounded-parallel batch.
+"""Apply engine (ADR-0011, ADR-0021): plan -> server-held approval -> submit (state machine), plus a batch.
 
 Collaborators are injected and typed by the Protocols in ports.py / core/interfaces.py, so the engine is
 testable with small fakes and independent of how profile, router, gates and store are implemented.
@@ -6,11 +6,10 @@ testable with small fakes and independent of how profile, router, gates and stor
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +30,7 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
+from .approvals import ApprovalBook, evidence_path
 from .mapper import (
     best_option,
     canonical_key,
@@ -72,7 +72,7 @@ _GENERIC = {"experience", "years", "year", "have", "you", "with", "any", "work",
 class PlanOut(BaseModel):
     plan: ApplicationPlan
     client_tasks: list[dict[str, Any]] = Field(default_factory=list)
-    token: str | None = None
+    approval_id: str | None = None
     timings: dict[str, int] = Field(default_factory=dict)
 
     def compact(self) -> dict[str, Any]:
@@ -88,21 +88,18 @@ class PlanOut(BaseModel):
             d["unresolved"] = self.plan.unresolved
         if self.client_tasks:
             d["client_tasks"] = self.client_tasks
-        if self.token:
-            d["token"] = self.token
+        if self.approval_id:
+            d["approval_id"] = self.approval_id
         if self.timings:
             d["t"] = self.timings
         return d
 
 
-def canonical_digest(ref: str, answers: dict[str, Any]) -> str:
-    blob = json.dumps({"ref": ref, "answers": answers}, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(blob.encode()).hexdigest()
+Approver = Callable[[dict[str, Any]], Awaitable[bool | None]]   # True approve, False deny, None unavailable
 
 
 @dataclass
 class _Cached:
-    token: str
     answers: dict[str, Any]
     unresolved: list[str]
     posting: Posting
@@ -125,7 +122,7 @@ class ApplyEngine:
     def __init__(self, settings: Settings, *, resolve_adapter: Callable[[str], PlatformAdapter],
                  profile: ProfileLike, router: RouterLike | None, gates: GatesLike, store: Store,
                  driver_factory: Callable[[str], BrowserDriver] | None = None,
-                 control: ControlLike | None = None):
+                 control: ControlLike | None = None, approvals: ApprovalBook | None = None):
         self.s = settings
         self._resolve = resolve_adapter
         self.profile, self.router, self.gates, self.store = profile, router, gates, store
@@ -134,6 +131,7 @@ class ApplyEngine:
         self._plans: dict[str, _Cached] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self.control = control
+        self.approvals = approvals or ApprovalBook(":memory:", ttl_s=settings.apply.approval_ttl_s)
         self._browser_sem = asyncio.Semaphore(max(1, settings.concurrency.browser_workers))
         self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
         self.timings: dict[str, dict[str, int]] = {}
@@ -257,12 +255,15 @@ class ApplyEngine:
             tasks.append(self._task(f, ctx))
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
         planned = {a.key: a.value for a in answers}
-        token = canonical_digest(ref, planned)
-        self._plans[ref] = _Cached(token, planned, unresolved_keys, ctx.posting, ctx.form,
+        self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
                                    time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary)
+        _, files = self._split(ctx.form, planned)
+        aid = self.approvals.issue(ref, self._url(ctx), ctx.posting.company, ctx.posting.title, planned, files)
+        self.approvals.set_state(ref, "planned", company=ctx.posting.company, title=ctx.posting.title,
+                                 approval_id=aid, url=self._url(ctx), only_from=("planned", "approved", "failed", "handoff"))
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
-                       client_tasks=tasks, token=token, timings=self.timings.get(ref, {}))
+                       client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}))
 
     def _skip_cover(self, f: FormField) -> bool:
         """Cover letters only when the form requires one (writing.cover_letter_policy, ADR-0023)."""
@@ -438,18 +439,64 @@ class ApplyEngine:
             return None
         return c
 
-    def _approve(self, ref: str, supplied: dict[str, Any], token: str | None) -> tuple[dict[str, Any] | None, str]:
-        """Return (effective answers, error). The token binds the server-generated answers; text the client
-        writes for `unresolved` keys is free, but it can never override an approved answer."""
-        cached = self._cached(ref)
-        if token and cached and token == cached.token:
-            for k, v in supplied.items():
-                if k in cached.answers and cached.answers[k] != v:
-                    return None, f"answer '{k}' differs from the approved plan; re-plan"
-            return {**cached.answers, **supplied}, ""
-        if token and token == canonical_digest(ref, supplied):
-            return dict(supplied), ""
-        return None, "missing or invalid approval token; call plan_application and pass its token"
+    @staticmethod
+    def _url(ctx: _Ctx) -> str:
+        return ctx.posting.apply_url or ctx.posting.url
+
+    @staticmethod
+    def _split(form: ApplicationForm, eff: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        kinds = {f.key: f.kind for f in form.fields}
+        files = {k: str(v) for k, v in eff.items() if kinds.get(k) == FieldKind.file}
+        return {k: v for k, v in eff.items() if k not in files}, files
+
+    def _resolve_dry(self, dry_run: bool | None) -> bool:
+        """A per-call dry_run can only make things safer (ADR-0021)."""
+        if dry_run is False and self.s.dry_run:
+            raise PermissionError("per-call dry_run=false refused: global dry_run is on; "
+                                  "set dry_run=false in the user config to allow live submits")
+        return self.s.dry_run if dry_run is None else dry_run
+
+    def _state_block(self, ref: str) -> SubmitResult | None:
+        cur = self.approvals.state(ref)
+        if cur and cur["state"] in ("submitting", "unknown", "submitted"):
+            ev = cur.get("evidence") or evidence_path(self.s.paths.data_dir, ref)
+            return SubmitResult(ref=ref, status="needs_human" if cur["state"] != "submitted" else "duplicate",
+                                detail=(f"submission state={cur['state']} (never auto-resubmitted); "
+                                        f"detail={cur.get('detail')}; evidence={ev}; "
+                                        "verify manually then call resolve_submission")[:300])
+        return None
+
+    async def _authorize(self, ref: str, ctx: _Ctx, eff: dict[str, Any], approval_id: str | None,
+                         approver: Approver | None, cached: bool) -> tuple[str | None, str, str]:
+        """Return (approval_id, error, approved_by). Server-held records only; nothing client-computable."""
+        auto = self.s.apply.auto_approve_active
+        company, title = ctx.posting.company, ctx.posting.title
+        _, files = self._split(ctx.form, eff)
+        rec, err = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
+        if rec is None and auto:
+            aid = self.approvals.issue(ref, self._url(ctx), company, title, eff, files)
+            self.approvals.approve(aid, "auto_approve")
+            return aid, "", "auto_approve"
+        if rec is None:
+            return None, err or "missing approval_id; call plan_application and pass its approval_id", ""
+        if not self.approvals.matches(rec, eff, files):
+            if not cached:
+                return None, "answers do not match the approved plan (no cached plan); re-plan", ""
+            rec = self.approvals.rebind(rec, company, title, eff, files)
+        if self.s.apply.approval_mode == "agent":
+            self.approvals.approve(rec.approval_id, "agent")
+            return rec.approval_id, "", "agent"
+        if rec.status != "approved":                    # human mode: needs a separate human channel
+            verdict = await approver(rec.summary) if approver else None
+            if verdict is True:
+                self.approvals.approve(rec.approval_id, "human:elicit")
+            elif verdict is False:
+                self.approvals.deny(rec.approval_id, "human:elicit")
+                return None, "human denied the submission", ""
+            else:
+                return None, (f"awaiting human approval: run `job-apply-mcp approve {rec.approval_id}` "
+                              f"(then retry with the same answers)"), ""
+        return rec.approval_id, "", self.approvals.get(rec.approval_id).approved_by or "human"  # type: ignore[union-attr]
 
     async def _control(self, action: str, ctx: _Ctx, dry: bool, eff: dict[str, Any] | None = None) -> str | None:
         """Optional control layer (ADR-0014). Returns a block reason, or None when allowed."""
@@ -470,29 +517,41 @@ class ApplyEngine:
         reasons = res.get("reasons") if isinstance(res, dict) else getattr(res, "reasons", None)
         return f"control: {v}" + (f" ({'; '.join(map(str, reasons))[:120]})" if reasons else "")
 
-    async def submit(self, ref: str, answers: dict[str, Any] | None = None, token: str | None = None,
-                     dry_run: bool | None = None) -> SubmitResult:
-        dry = self.s.dry_run if dry_run is None else dry_run
+    async def submit(self, ref: str, answers: dict[str, Any] | None = None, approval_id: str | None = None,
+                     dry_run: bool | None = None, approver: Approver | None = None) -> SubmitResult:
+        try:
+            dry = self._resolve_dry(dry_run)
+        except PermissionError as e:
+            return SubmitResult(ref=ref, status="error", detail=str(e))
         supplied = dict(answers or {})
         try:
+            if not dry:
+                blocked = self._state_block(ref)
+                if blocked:
+                    return blocked
             cached = self._cached(ref)
             if cached and cached.adapter is not None:
                 ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)  # no refetch
             else:
                 ctx = await self._context(ref)
-            if self.s.apply.auto_approve or dry:
-                if cached:
-                    eff = {**cached.answers, **supplied}
-                else:
-                    plan = await self._plan_ctx(ref, ctx)
-                    if plan.plan.gate.decision != Decision.submit:
-                        return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
-                                            else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
-                    eff = {**{a.key: a.value for a in plan.plan.answers}, **supplied}
-            else:
-                eff, err = self._approve(ref, supplied, token)
-                if eff is None:
+            if not dry and not self.s.apply.auto_approve_active:
+                _, err = self.approvals.check(approval_id, ref, self._url(ctx))
+                if err:
                     return SubmitResult(ref=ref, status="error", detail=err)
+            if cached:
+                for k, v in supplied.items():
+                    if k in cached.answers and cached.answers[k] != v and not dry:
+                        return SubmitResult(ref=ref, status="error",
+                                            detail=f"answer '{k}' differs from the approved plan; re-plan")
+                eff = {**cached.answers, **supplied}
+            elif dry or self.s.apply.auto_approve_active:
+                plan = await self._plan_ctx(ref, ctx)
+                if plan.plan.gate.decision != Decision.submit:
+                    return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
+                                        else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
+                eff = {**{a.key: a.value for a in plan.plan.answers}, **supplied}
+            else:
+                eff = supplied                      # stateless: must hash-match the server-held record
             hits = self._stop_hits(ctx.form)
             if hits:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
@@ -502,13 +561,39 @@ class ApplyEngine:
             blocked = await self._control("submit", ctx, dry, eff)
             if blocked:
                 return SubmitResult(ref=ref, status="needs_human", detail=blocked)
+            by = ""
+            if not dry:
+                approval_id, err, by = await self._authorize(ref, ctx, eff, approval_id, approver, bool(cached))
+                if err:
+                    return SubmitResult(ref=ref, status="needs_human" if err.startswith("awaiting") else "error",
+                                        detail=err)
             async with self._lock(ctx.posting.company):
                 if await self.store.seen(ctx.posting.company, ctx.posting.title,
                                          within_days=self.s.policy.dedupe_days, ref=ref,
                                          url=ctx.posting.apply_url or ctx.posting.url):
                     return SubmitResult(ref=ref, status="duplicate", detail="already applied")
-                with self._stage(ref, "submit"):
-                    result = await self._dispatch(ctx, eff, dry)
+                if not dry:
+                    self.approvals.audit("submit_attempt", ref=ref, approval_id=approval_id, actor=by,
+                                         detail=f"{ctx.posting.company} | {ctx.posting.title}")
+                    ok, st = self.approvals.begin_submit(ref, approval_id)   # durable BEFORE the click
+                    if not ok:
+                        return self._state_block(ref) or SubmitResult(ref=ref, status="needs_human", detail=st)
+                try:
+                    with self._stage(ref, "submit"):
+                        result = await self._dispatch(ctx, eff, dry)
+                except BaseException as e:  # incl. cancellation: the click may have happened
+                    if not dry:
+                        st = "unknown" if ctx.meta.get("dispatched") else "failed"   # pre-dispatch is safe to retry
+                        self.approvals.finish(ref, st, f"{type(e).__name__}: {e}"[:200],
+                                              evidence_path(self.s.paths.data_dir, ref))
+                    raise
+                if not dry:
+                    st = {"submitted": "submitted", "roadblock": "failed", "needs_human": "handoff",
+                          "duplicate": "failed"}.get(result.status, "unknown")
+                    if result.status == "error" and not ctx.meta.get("dispatched"):
+                        st = "failed"
+                    self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
+                                          evidence_path(self.s.paths.data_dir, ref))
                 if result.status in ("submitted", "needs_human", "roadblock"):
                     await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title,
                                             url=ctx.posting.apply_url or ctx.posting.url)
@@ -520,14 +605,38 @@ class ApplyEngine:
         except Exception as e:  # noqa: BLE001
             return SubmitResult(ref=ref, status="error", detail=f"{type(e).__name__}: {e}"[:200])
 
+    async def resolve_submission(self, ref: str, outcome: str = "", note: str = "",
+                                 actor: str = "agent", evidence: str = "") -> dict[str, Any]:
+        """Inspect (no outcome) or resolve a ref stuck in submitting/unknown. Never auto-called.
+        The agent path exists only in approval_mode="agent" and must cite the ref's evidence folder."""
+        if outcome and actor == "agent":
+            ev = evidence_path(self.s.paths.data_dir, ref)
+            if self.s.apply.approval_mode != "agent":
+                self.approvals.audit("resolve_refused", ref=ref, actor="agent", detail="human mode")
+                return {"ref": ref, "error": "resolve_submission is human-only (CLI) in approval_mode=human"}
+            if not ev or evidence != ev:
+                self.approvals.audit("resolve_refused", ref=ref, actor="agent", detail=f"bad evidence {evidence!r}")
+                return {"ref": ref, "error": "evidence must be the ref's evidence folder", "evidence": ev}
+            note = f"{note} [evidence={evidence}]"
+        if outcome:
+            ok, msg = self.approvals.resolve(ref, outcome, note, actor)
+            cur = self.approvals.state(ref)
+            if ok and outcome == "submitted" and cur:
+                await self.store.record(SubmitResult(ref=ref, status="submitted", detail=f"resolved by {actor}"),
+                                        company=cur["company"], title=cur["title"])
+            if not ok:
+                return {"ref": ref, "error": msg}
+        cur = self.approvals.state(ref) or {}
+        return {"ref": ref, "state": cur.get("state"), "detail": cur.get("detail"), "idem": cur.get("idem_key"),
+                "evidence": cur.get("evidence") or evidence_path(self.s.paths.data_dir, ref)}
+
     async def _dispatch(self, ctx: _Ctx, eff: dict[str, Any], dry: bool) -> SubmitResult:
         form, ref = ctx.form, ctx.form.ref
-        kinds = {f.key: f.kind for f in form.fields}
-        files = {k: str(v) for k, v in eff.items() if kinds.get(k) == FieldKind.file}
-        values = {k: v for k, v in eff.items() if k not in files}
+        values, files = self._split(form, eff)
         last = SubmitResult(ref=ref, status="needs_human", detail="no submission path available")
         for path in form.submit_via or ["api", "browser"]:
             if path == "api":
+                ctx.meta["dispatched"] = True
                 res = await ctx.adapter.submit(form, values, files, dry_run=dry)
                 if res.status != "needs_browser":
                     return res
@@ -547,6 +656,7 @@ class ApplyEngine:
             if drv is None:
                 continue
             async with self._browser_sem:
+                ctx.meta["dispatched"] = True
                 last = await drv.fill_and_submit(url, ctx.form, values, files, dry_run=dry)
             if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
                 return last
@@ -558,7 +668,10 @@ class ApplyEngine:
                           max_parallel: int | None = None) -> list[dict[str, Any]]:
         """Pipelined: planning workers (apply.plan_workers) and browser workers (concurrency.browser_workers)
         are separate pools, so job N+1 is planned (and its prose written) while job N is in the browser."""
-        dry = self.s.dry_run if dry_run is None else dry_run
+        try:
+            dry = self._resolve_dry(dry_run)
+        except PermissionError as e:
+            return [{"ref": r, "status": "error", "detail": str(e)} for r in refs]
         browser_cap = asyncio.Semaphore(max_parallel or self.s.concurrency.browser_workers)
 
         async def one(ref: str) -> dict[str, Any]:
@@ -569,11 +682,11 @@ class ApplyEngine:
             if out.plan.unresolved:
                 human = any(t.get("needs_human") for t in out.client_tasks)
                 return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,
-                        "client_tasks": out.client_tasks, "token": out.token, "t": out.timings}
-            if not dry and not self.s.apply.auto_approve:
-                return {"ref": ref, "status": "awaiting_approval", "token": out.token, "t": out.timings}
+                        "client_tasks": out.client_tasks, "approval_id": out.approval_id, "t": out.timings}
+            if not dry and not self.s.apply.auto_approve_active:
+                return {"ref": ref, "status": "awaiting_approval", "approval_id": out.approval_id, "t": out.timings}
             async with browser_cap:
-                r = await self.submit(ref, {}, out.token, dry)
+                r = await self.submit(ref, {}, out.approval_id, dry)
             row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail,
                    "t": self.timings.get(ref, {})}
             return {k: v for k, v in row.items() if v}
