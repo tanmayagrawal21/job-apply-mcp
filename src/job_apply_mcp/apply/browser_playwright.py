@@ -39,6 +39,7 @@ from .mapper import (
     normalize,
     pick_degree,
     pick_school,
+    privacy_ack_value,
 )
 from .verification import VerificationMixin
 
@@ -244,6 +245,30 @@ def _bare_url(u: str) -> str:
     return re.sub(r"^(https?://)?(www\.)?", "", u.strip().lower()).rstrip("/")
 
 
+_COUNTRY_ALIASES = {"us": "United States", "usa": "United States", "u s": "United States", "u s a": "United States",
+                    "united states of america": "United States", "america": "United States",
+                    "uk": "United Kingdom", "gb": "United Kingdom", "great britain": "United Kingdom",
+                    "england": "United Kingdom", "uae": "United Arab Emirates"}
+
+
+def phone_country_name(country: str) -> str:
+    """The profile's country as phone widgets list it ('' when none is configured: the widget is left alone)."""
+    c = (country or "").strip()
+    return _COUNTRY_ALIASES.get(normalize(c), c)
+
+
+def country_option(name: str, options: list[str]) -> str | None:
+    """The option that IS `name` once a trailing dial code ('+1', '(+44)') is removed; never a near miss
+    (no 'United States Minor Outlying Islands' for 'United States')."""
+    want = normalize(name)
+    if not want:
+        return None
+    for o in options:
+        if normalize(re.sub(r"\(?\+\d[\d\s-]*\)?\s*$", "", o)) == want:
+            return o
+    return None
+
+
 # ---- evidence + network signal (pure, unit-tested)
 
 _ERR_WORDS = re.compile(r"error|invalid|failed|required|captcha|spam|denied|not allowed", re.IGNORECASE)
@@ -324,31 +349,86 @@ _MARK_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-scope]').forEach
   c.setAttribute('data-jam-scope', '1'); return true; }"""
 _COUNTRY_JS = """() => { const ids = ['country', 'phone-country', 'phone_country'];
   for (const i of ids) { const e = document.getElementById(i); if (e && e.offsetParent !== null) return i; } return ''; }"""
+# The field's own container, for read-backs that must never match ANOTHER field's value (ADR-0037).
+_COMMIT_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-commit]').forEach(x => x.removeAttribute('data-jam-commit'));
+  const ctl = e.closest('[class*=select__control]');
+  let c = ctl ? (ctl.closest('[class*=select-shell], [class*=select__container]') || ctl.parentElement || ctl)
+              : e.closest('[data-field-path], fieldset, [role=group], [role=radiogroup], .field-wrapper, .application-question');
+  if (!c) c = e.parentElement; if (!c) return false;
+  c.setAttribute('data-jam-commit', '1'); return true; }"""
+# Server-rendered forms (Greenhouse job-boards is Remix) show inputs before the JS app hydrates; typing or clicking
+# before that is silently lost (ADR-0037). Ready = document complete and, on an SSR page, the first form control
+# carries React's own property keys.
+_HYDRATED_JS = """() => { if (document.readyState !== 'complete') return false;
+  const ssr = !!(window.__remixContext || window.__reactRouterContext || window.__NEXT_DATA__ || document.querySelector('[data-reactroot]'));
+  if (!ssr) return true;
+  const e = document.querySelector('form input:not([type=hidden]), form textarea, form select');
+  return !!e && Object.keys(e).some(k => k.startsWith('__react')); }"""
+_CHOICE = "input[type=checkbox], input[type=radio]"
+_IS_GROUP_JS = """e => !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tagName)
+  && !!e.querySelector('input[type=checkbox], input[type=radio]')"""
+_OPT_TEXTS_JS = """els => els.map(e => ((e.labels && e.labels[0] ? e.labels[0].innerText : '')
+  || (e.closest('label') || {}).innerText || e.getAttribute('aria-label') || e.value || '').replace(/\\s+/g, ' ').trim())"""
+# Every visible required control that is still empty, CHECKBOX AND RADIO GROUPS INCLUDED (ADR-0037). A group is a
+# fieldset / role=group / role=radiogroup / consent block holding choice inputs; it is required when the group or a
+# member says so (required, aria-required) or its legend/heading carries an asterisk or a "required" class; an
+# unanswered consent radio group always counts. Custom-drawn boxes hide the real input, so visibility is the group's.
 _EMPTY_REQUIRED_JS = """() => {
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
-  const clean = t => (t || '').replace(/\\*/g, '').replace(/\\s+/g, ' ').trim();
+  const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
   const labelOf = e => { let t = '';
     const lb = e.getAttribute('aria-labelledby'); if (lb) t = lb.split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
     if (!t && e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
     if (!t) { const l = e.closest('label'); if (l) t = (l.querySelector('.application-label') || l).textContent.split('✱')[0]; }
     if (!t) t = e.getAttribute('aria-label') || e.name || e.id || ''; return t; };
   const req = e => e.required || e.getAttribute('aria-required') === 'true' || /\\*\\s*$/.test(labelOf(e).trim());
-  const out = [], seen = new Set();
+  const CH = 'input[type=checkbox], input[type=radio]';
+  const GS = 'fieldset, [role=group], [role=radiogroup], [class*=consentRadioGroup i], [class*=consent-radio i]';
+  const out = [], seen = new Set(), done = new Set();
+  document.querySelectorAll('[data-jam-group]').forEach(x => x.removeAttribute('data-jam-group'));
+  let gi = 0;
+  for (const g of document.querySelectorAll(GS)) {
+    const members = [...g.querySelectorAll(CH)].filter(m => m.closest(GS) === g && !m.disabled);
+    if (!members.length || !vis(g)) continue;
+    members.forEach(m => done.add(m));
+    const ids = new Set(members.map(m => m.id).filter(Boolean));
+    let head = null; const lb = g.getAttribute('aria-labelledby');
+    if (lb) head = document.getElementById(lb.split(' ')[0]);
+    head = head || g.querySelector(':scope > legend') || g.querySelector('[class*=question-title], .application-label')
+      || [...g.querySelectorAll('label')].find(l => !l.querySelector(CH) && !ids.has(l.htmlFor));
+    const consent = members.every(m => m.type === 'radio') && (/consent/i.test(g.className + ' ' + members.map(m => m.name).join(' ')));
+    let text = head ? head.textContent : (g.getAttribute('aria-label') || '');
+    if (consent && !clean(text)) { const d = g.parentElement && g.parentElement.querySelector('[class*=consent i]:not(input)');
+      text = d && d !== g ? d.textContent : members.map(m => (m.closest('label') || {}).textContent || '').join(' / '); }
+    const required = g.getAttribute('aria-required') === 'true' || g.hasAttribute('required')
+      || members.some(m => m.required || m.getAttribute('aria-required') === 'true')
+      || /[*✱]/.test(text || '') || !!(head && (/required/i.test(head.className) || head.querySelector('[class*=required i]')))
+      || consent;
+    if (!required || members.some(m => m.checked)) continue;
+    const fp = g.closest('[data-field-path]');
+    const id = g.id || (fp && !consent && fp.getAttribute('data-field-path')) || members[0].name || '';
+    if (seen.has('g:' + id + gi)) continue; seen.add('g:' + id + gi);
+    g.setAttribute('data-jam-group', String(gi));
+    const opts = members.map(m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '')).slice(0, 12);
+    out.push({id, label: clean(text).slice(0, 80), text: clean(text).slice(0, 1500), rs: false, group: String(gi), kind: members[0].type, consent, opts});
+    gi++;
+  }
   for (const e of document.querySelectorAll('input, textarea, select')) {
+    if (done.has(e)) continue;
     const type = (e.type || '').toLowerCase();
     if (['hidden', 'submit', 'button', 'file', 'search'].includes(type) || e.disabled || e.readOnly) continue;
     if (e.closest('.iti__dropdown-content') || e.getAttribute('aria-hidden') === 'true') continue;
-    if (!vis(e) && !(e.getAttribute('role') === 'combobox')) continue;
+    const choice = type === 'checkbox' || type === 'radio';
     const rs = e.getAttribute('role') === 'combobox' && e.closest('[class*=select__control]');
-    if (!vis(e) && !rs) continue;
+    if (!vis(e) && !rs && !(choice && vis(e.closest('label') || e.parentElement || e))) continue;
     if (!req(e)) continue;
     let empty = false, grp = '';
     if (rs) { const sh = e.closest('[class*=select__control]').parentElement;
       empty = !sh.querySelector('[class*=select__single-value], [class*=select__multi-value]'); }
-    else if (type === 'checkbox' || type === 'radio') {       // a required GROUP needs one checked member
+    else if (choice) {                                          // a required GROUP needs one checked member
       const same = [...document.querySelectorAll('input[type=' + type + ']')].filter(x => x.name === e.name);
       empty = !same.some(x => x.checked); grp = e.name;
-      const q = e.closest('.application-question, fieldset, [role=group]');
+      const q = e.closest('.application-question');
       const h = q && q.querySelector('.application-label, legend, [class*=label]');
       if (h) grp = clean(h.textContent.split('✱')[0]) || grp; }
     else if (e.tagName === 'SELECT') empty = !e.value;
@@ -441,6 +521,7 @@ class PlaywrightDriver(VerificationMixin):
                                          timeout=self.b.timeout_s * 1000)
         except Exception:
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail="form did not render")
+        await self._await_hydration(page)
         scope = await self._form_text(page)
         if (blk := detect_blocker(scope)) in ("captcha", "verification", "login"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} before filling")
@@ -452,7 +533,8 @@ class PlaywrightDriver(VerificationMixin):
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
         failed: list[str] = []
         has_phone = any(canonical_key(f.label) == "phone" or "phone" in normalize(f.label) for f, _ in texty)
-        if has_phone and not await self._ensure_phone_country(page):
+        country = phone_country_name(str(answers.get("contact:country") or ""))
+        if has_phone and not await self._ensure_phone_country(page, country):
             failed.append("phone_country")
         for f, v in texty:
             if not await self._fill(page, ats, f, v):
@@ -468,7 +550,7 @@ class PlaywrightDriver(VerificationMixin):
                         failed.append(f.key)
         bad = await self._verify(page, texty, ats)
         if bad:                                     # uploads/parsers can wipe fields: one refill pass
-            if "phone_country" in failed and await self._ensure_phone_country(page):
+            if "phone_country" in failed and await self._ensure_phone_country(page, country):
                 failed.remove("phone_country")
             for f, v in texty:
                 if f.key in bad:
@@ -484,6 +566,7 @@ class PlaywrightDriver(VerificationMixin):
                                 detail=f"could not fill/verify: {problems[:8]}{ev}")
         await self._fill_demographics(page, answers)
         await self._fill_education(page, answers)
+        await self._fill_privacy_groups(page, answers)
         empty = await self._empty_required(page)
         if empty:                                   # late re-renders (resume parse) can wipe a field: refill once
             ids = {e["id"] for e in empty}
@@ -693,6 +776,42 @@ class PlaywrightDriver(VerificationMixin):
             return ""
 
     # -- field operations -----------------------------------------------------------------------
+    async def _await_hydration(self, page) -> bool:
+        """Wait (cap browser.hydrate_wait_s) until a server-rendered form is live; input typed or clicked before
+        hydration is silently dropped by React (relativity fill failures, ADR-0037). False = cap reached; the run
+        continues and the read-back / required-field scan still judge the result."""
+        deadline = time.monotonic() + max(0.0, self.b.hydrate_wait_s)
+        while True:
+            try:
+                if await page.evaluate(_HYDRATED_JS):
+                    return True
+            except Exception:
+                pass                                   # navigation in progress: poll again
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.2)
+
+    async def _fill_privacy_groups(self, page, answers: dict[str, Any]) -> None:
+        """Required radio/checkbox groups that exist only in the DOM (not in the job API), e.g. Ashby's consent block
+        under the phone field. Answered ONLY when the owner opted in (pref:acknowledge_privacy_notices) AND the group
+        is a plain privacy-notice acknowledgement with exactly one affirmative option (ADR-0034 rules, options
+        included). Anything else (SMS / marketing consent, terms, attestations) stays empty -> `incomplete`."""
+        if answers.get("pref:acknowledge_privacy_notices") is not True:
+            return
+        for row in await self._empty_required(page):
+            if not row.get("group"):
+                continue
+            # the FULL question text is judged (the 80-char label could cut off an excluded topic such as SMS)
+            ff = FormField(key=row["id"] or "dom-group", label=row.get("text") or row["label"], kind=FieldKind.select,
+                           options=[o for o in row.get("opts") or [] if o])
+            want = privacy_ack_value(ff, self.s.policy.stop_phrases)
+            if want is None:
+                continue
+            try:
+                await self._check_in_group(page.locator(f'[data-jam-group="{row["group"]}"]').first, str(want))
+            except Exception:
+                pass
+
     async def _form_text(self, page) -> str:
         loc = page.locator("form")
         try:
@@ -705,9 +824,14 @@ class PlaywrightDriver(VerificationMixin):
     async def _locate(self, page, f: FormField):
         key = f.key
         cands = [page.locator(f'[id="{key}"]'), page.locator(f'[name="{key}"]')]
+        # Ashby wraps each question in [data-field-path=<key>]; radio/checkbox members carry entry-scoped names
+        # (or the option text), so the group container is the only stable handle (ADR-0037).
+        fp = f'[data-field-path="{key}"]'
+        cands += [page.locator(f"{fp} fieldset, {fp} [role=radiogroup], {fp} [role=group]")]
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
         cands.append(page.get_by_label(re.compile(rf"^\s*{re.escape(label)}\s*\*?\s*$", re.IGNORECASE)))
         cands.append(page.get_by_label(re.compile(re.escape(label), re.IGNORECASE)))
+        cands.append(page.locator(fp))
         for c in cands:
             try:
                 n = await c.count()
@@ -798,7 +922,7 @@ class PlaywrightDriver(VerificationMixin):
                 except Exception:
                     continue
             return False
-        if tag == "FIELDSET":                                   # checkbox / radio group (Greenhouse multi_value_*)
+        if await self._is_group(loc):            # checkbox / radio group (Greenhouse multi_value_*, Ashby fieldsets)
             return await self._check_in_group(loc, value)
         marked = False
         try:
@@ -848,7 +972,7 @@ class PlaywrightDriver(VerificationMixin):
             return False
         if f.kind == FieldKind.multiselect:
             await page.keyboard.press("Escape")
-        committed = await self._committed(page, scope if marked else None, pick)
+        committed = await self._committed(page, loc, pick)
         if not committed:
             await self._close_menu(page)
         return committed
@@ -873,20 +997,41 @@ class PlaywrightDriver(VerificationMixin):
         return None
 
     @staticmethod
+    async def _is_group(loc) -> bool:
+        """A container (fieldset, role=group, Ashby field entry ...) whose answer is a ticked radio / checkbox."""
+        try:
+            return bool(loc is not None and await loc.evaluate(_IS_GROUP_JS))
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _group_texts(group) -> list[str]:
+        """Each member's own option text (its <label for>, wrapping label, aria-label, else value); the question
+        heading is never a candidate."""
+        return list(await group.locator(_CHOICE).evaluate_all(_OPT_TEXTS_JS))
+
+    @staticmethod
     async def _check_in_group(group, value: str) -> bool:
-        """Tick the box whose label snaps to `value` (best_option: never a different answer), then read it back."""
-        boxes = group.locator("input[type=checkbox], input[type=radio]")
-        labels = [t.strip() for t in await group.locator("label").all_inner_texts()]
-        pick = best_option(value, labels) if labels else None
+        """Tick the member whose option text snaps to `value` (best_option: never a different answer), then read it
+        back. Custom-drawn boxes cover the real input, so the click falls back to the option's label."""
+        boxes = group.locator(_CHOICE)
+        texts = await PlaywrightDriver._group_texts(group)
+        pick = best_option(value, [t for t in texts if t]) if texts else None
         if pick is None:
             return False
-        for i in range(await boxes.count()):
-            box = boxes.nth(i)
-            text = (await box.evaluate("e => (e.labels && e.labels[0] ? e.labels[0].innerText : '')")).strip()
-            if text == pick:
-                if not await box.is_checked():
-                    await box.check(timeout=3000)
-                return await box.is_checked()
+        box = boxes.nth(texts.index(pick))
+        if await box.is_checked():
+            return True
+        bid = await box.get_attribute("id")
+        label = group.locator(f'label[for="{bid}"]') if bid else box.locator("xpath=ancestor::label[1]")
+        for act in (lambda: box.check(timeout=2000), lambda: label.first.click(timeout=2000),
+                    lambda: box.check(force=True, timeout=2000)):
+            try:
+                await act()
+            except Exception:
+                pass
+            if await box.is_checked():
+                return True
         return False
 
     async def _is_empty(self, page, f: FormField) -> bool:
@@ -900,9 +1045,9 @@ class PlaywrightDriver(VerificationMixin):
                 await loc.evaluate(_MARK_SCOPE_JS)
                 chips = await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).count()
                 return chips == 0 and not (await loc.input_value()).strip()
-            kind = await loc.evaluate("e => (e.type || e.tagName).toLowerCase()")
-            if kind == "fieldset":
+            if await self._is_group(loc):
                 return await loc.locator("input:checked").count() == 0
+            kind = await loc.evaluate("e => (e.type || e.tagName).toLowerCase()")
             if kind in ("checkbox", "radio"):
                 name = await loc.get_attribute("name")
                 if not name:
@@ -922,11 +1067,14 @@ class PlaywrightDriver(VerificationMixin):
             pass
 
     @staticmethod
-    async def _committed(page, scope, pick: str) -> bool:
-        """The choice is only real once it shows as the select's single-value / multi-value chip."""
+    async def _committed(page, loc, pick: str) -> bool:
+        """The choice is only real once it shows as THIS select's single-value / multi-value chip. The read-back is
+        always scoped to the field's own container; no container -> not committed (never another select's chip)."""
         for _ in range(8):
             try:
-                root = scope if scope is not None else page
+                if loc is None or not await loc.evaluate(_COMMIT_SCOPE_JS):
+                    return False
+                root = page.locator("[data-jam-commit]")
                 got = [normalize(t) for t in await root.locator(_SELECT_VALUES).all_inner_texts()]
                 np = normalize(pick)
                 if any(g and (g == np or g in np or np in g) for g in got):
@@ -967,7 +1115,7 @@ class PlaywrightDriver(VerificationMixin):
                     await self._close_menu(page)
                     continue
                 await opts.nth(texts.index(pick)).click(timeout=3000)
-                if not await self._committed(page, page.locator("[data-jam-scope]") if marked else None, pick):
+                if not await self._committed(page, loc, pick):
                     await self._close_menu(page)
             except Exception:
                 await self._close_menu(page)
@@ -999,7 +1147,7 @@ class PlaywrightDriver(VerificationMixin):
                 if pick is None or pick not in texts:
                     continue
                 await opts.nth(texts.index(pick)).click(timeout=3000)
-                if await self._committed(page, scope, pick):
+                if await self._committed(page, loc, pick):
                     return pick
             except Exception:
                 pass
@@ -1059,47 +1207,54 @@ class PlaywrightDriver(VerificationMixin):
             if not await has_value(el_id):
                 await self._rs_pick(page, el_id, [name], lambda t, n=name: next((o for o in t if normalize(o) == normalize(n)), None))
 
-    async def _ensure_phone_country(self, page) -> bool:
-        """Intl-tel widgets reset the number when the country changes: pick United States (+1) BEFORE typing the phone."""
+    async def _ensure_phone_country(self, page, country: str) -> bool:
+        """Intl-tel widgets reset the number when the country changes: pick the PROFILE's country BEFORE typing the
+        phone. No configured country -> the widget is left as the site set it (a required empty one is reported by
+        the required-field scan); the tool never guesses a country (ADR-0037)."""
+        if not country:
+            return True
+        want = normalize(country)
         try:
             cid = await page.evaluate(_COUNTRY_JS)
         except Exception:
             cid = ""
         if cid:
             loc = page.locator(f'[id="{cid}"]').first
-            try:
-                marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
-                if marked:
-                    cur = " ".join(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).all_inner_texts())
-                    if "united states" in cur.lower() or "+1" in cur:
-                        return True
-            except Exception:
-                pass
-            ff = FormField(key=cid, label="Country", kind=FieldKind.select)
-            for _ in range(2):
-                if await self._choose(page, ff, loc, "United States"):
-                    return True
-                await asyncio.sleep(0.5)
-                try:                                  # the pick may have landed even if the first read-back raced
-                    cur = " ".join(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).all_inner_texts())
-                    if "united states" in cur.lower() or "+1" in cur:
-                        return True
+
+            async def current() -> str:
+                try:
+                    if await loc.evaluate(_COMMIT_SCOPE_JS):
+                        return normalize(" ".join(await page.locator("[data-jam-commit]").locator(_SELECT_VALUES)
+                                                  .all_inner_texts()))
                 except Exception:
                     pass
+                return ""
+            if want in await current():
+                return True
+            for _ in range(2):
+                if await self._rs_pick(page, cid, [country], lambda t: country_option(country, t)):
+                    return True
+                await asyncio.sleep(0.5)
             return False
         flag = page.locator(".iti__selected-country, .iti__selected-flag, .iti__flag-container button").first
         try:
             if not await flag.count():
                 return True                     # no country widget on this form
-            title = ((await flag.get_attribute("title")) or "") + (await flag.inner_text())
-            if "united states" in title.lower() or "+1" in title:
+            title = ((await flag.get_attribute("title")) or "") + " " + (await flag.inner_text())
+            if want in normalize(title):
                 return True
             await flag.click()
-            us = page.locator("li.iti__country[data-country-code=us], [role=option]:has-text('United States')").first
-            await us.wait_for(state="visible", timeout=3000)
-            await us.click()
-            title = ((await flag.get_attribute("title")) or "") + (await flag.inner_text())
-            return "united states" in title.lower() or "+1" in title
+            items = page.locator("li.iti__country, .iti__country-list [role=option]")
+            await items.first.wait_for(state="visible", timeout=3000)
+            names = list(await items.evaluate_all(
+                "els => els.map(e => ((e.querySelector('.iti__country-name') || e).textContent || '').trim())"))
+            pick = country_option(country, names)
+            if pick is None:
+                await self._close_menu(page)
+                return False
+            await items.nth(names.index(pick)).click()
+            title = ((await flag.get_attribute("title")) or "") + " " + (await flag.inner_text())
+            return want in normalize(title)
         except Exception:
             await self._close_menu(page)
             return False
@@ -1266,11 +1421,13 @@ class PlaywrightDriver(VerificationMixin):
                         if not got or (f.options and not best_option(v if isinstance(v, str) else v[0], [got])):
                             bad.append(f.key)
                         continue
-                    if loc is not None and (await loc.evaluate("e => e.tagName")).upper() == "FIELDSET":
-                        ticked = [normalize(t) for t in await loc.evaluate(
-                            "e => [...e.querySelectorAll('input:checked')].map(i => i.labels && i.labels[0] ? i.labels[0].innerText : '')")]
-                        if any(normalize(str(one)) not in " | ".join(ticked) and not best_option(one, ticked)
-                               for one in (v if isinstance(v, list) else [v])):
+                    if await self._is_group(loc):
+                        texts = await self._group_texts(loc)
+                        states = await loc.locator(_CHOICE).evaluate_all("els => els.map(e => e.checked)")
+                        ticked = [t for t, on in zip(texts, states) if on and t]
+                        # every wanted option must be ticked; an empty group is never "verified"
+                        if not ticked or any(best_option(one, ticked) is None
+                                             for one in (v if isinstance(v, list) else [v])):
                             bad.append(f.key)
                         continue
                 except Exception:
