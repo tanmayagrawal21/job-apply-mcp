@@ -272,3 +272,29 @@ async def test_captcha_page_hands_off_without_click(drv, resume):
         if name == "handoff":
             assert len(drv._ctx.pages) >= 1 and "human must click" in res.detail
     drv.b.headless = True
+
+
+CARDS_HTML = """<html><body><form id=f>
+<label>Why us?<textarea name="cards[u1][field0]"></textarea></label>
+<label><input type=radio name="cards[u1][field1]" value="Yes"><span>Yes</span></label>
+<label><input type=radio name="cards[u1][field1]" value="No"><span>No</span></label>
+<label><input type=checkbox name="cards[u1][field2]" value="LinkedIn"><span>LinkedIn</span></label>
+<label><input type=checkbox name="cards[u1][field2]" value="Referral"><span>Referral</span></label>
+<label><input type=checkbox name="cards[u1][field2]" value="Other"><span>Other</span></label>
+<select name="cards[u1][field3]"><option value="">-</option><option>Yes</option><option>No</option></select>
+</form></body></html>"""
+
+
+async def test_lever_card_radio_checkbox_select_text_filled_by_name(drv):
+    srv = Srv(CARDS_HTML, GOOD)
+    form = ApplicationForm(ref="lever:acme:job1", fields=[
+        FormField(key="cards[u1][field0]", label="Why us?", kind=FieldKind.textarea),
+        FormField(key="cards[u1][field1]", label="Relocate?", kind=FieldKind.select, options=["Yes", "No"]),
+        FormField(key="cards[u1][field2]", label="Heard", kind=FieldKind.multiselect,
+                  options=["LinkedIn", "Referral", "Other"]),
+        FormField(key="cards[u1][field3]", label="Sponsor?", kind=FieldKind.select, options=["Yes", "No"])])
+    ans = {"cards[u1][field0]": "Because.", "cards[u1][field1]": "No",
+           "cards[u1][field2]": ["LinkedIn", "Other"], "cards[u1][field3]": "Yes"}
+    res = await drv.fill_and_submit(srv.url, form, ans, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+    assert srv.posts == 0

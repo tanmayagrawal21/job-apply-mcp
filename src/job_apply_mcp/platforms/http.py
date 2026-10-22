@@ -59,6 +59,10 @@ class HttpClient:
                        cache: bool = True, ttl_s: int | None = None) -> Any:
         return await self._json("GET", url, params=params, headers=headers, cache=cache, ttl_s=ttl_s)
 
+    async def get_text(self, url: str, *, headers: dict[str, str] | None = None) -> str:
+        """GET a page as text (HTML). Rate limited and retried like any GET; never cached."""
+        return (await self._send("GET", url, headers=headers, retry=True)).text
+
     async def post_json(self, url: str, *, json_body: Any, params: dict[str, Any] | None = None,
                         headers: dict[str, str] | None = None, cache: bool = True, ttl_s: int | None = None) -> Any:
         """POST a JSON body for an idempotent query (search, GraphQL read). Cached and retried like GET."""

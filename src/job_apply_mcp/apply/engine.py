@@ -341,6 +341,8 @@ class ApplyEngine:
             return None
         if value in (None, "") or conf < self.s.apply.llm_min_confidence:
             return None
+        if isinstance(value, str) and value.strip().lower() in ("null", "none", "n/a", "na", "unknown"):
+            return None                                   # the model's "no answer" must never be typed into a form
         value = self._validate(f, value)
         if value is not None and not self._grounded(f, value):
             value = None

@@ -107,6 +107,7 @@ async def test_lever(http):
     respx.get(f"https://api.lever.co/v0/postings/democo/{fx.LEVER_ID}").respond(json=fx.LEVER_LIST[0])
     got = await a.get_posting(f"https://jobs.lever.co/democo/{fx.LEVER_ID}/apply", with_description=True)
     assert "Requirements: Go SQL" in got.description
+    respx.get(f"https://jobs.lever.co/democo/{fx.LEVER_ID}/apply").respond(text="<html><form></form></html>")
     form = await a.get_form(got.ref)
     assert {"name", "email", "resume"} <= {f.key for f in form.fields} and form.submit_via == ["browser"]
     assert (await a.submit(form, {}, {}, dry_run=False)).status == "needs_browser"
