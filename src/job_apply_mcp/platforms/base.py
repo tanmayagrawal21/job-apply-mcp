@@ -85,6 +85,10 @@ class BaseAdapter:
         sal = api_salary
         if not sal and text and (r := extract_salary(text)):
             sal = r.summary()
+        if isinstance(p.get("title"), str):
+            p["title"] = p["title"].strip()  # Ashby/SmartRecruiters titles carry stray whitespace
+        if isinstance(p.get("location"), str):
+            p["location"] = re.sub(r"(,\s*)+", ", ", p["location"]).strip(" ,")  # 'Dublin, , Ireland'
         desc = text[: self.cfg.max_description_chars] if with_description and text else None
         return Posting(platform=self.name, flags=flags, salary=sal, description=desc, **p)
 

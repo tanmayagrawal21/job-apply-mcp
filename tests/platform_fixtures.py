@@ -58,8 +58,8 @@ SR_JOB = {**SR_LIST["content"][0], "applyUrl": "https://jobs.smartrecruiters.com
 WD_SEARCH = {"total": 2, "jobPostings": [
     {"title": "Associate Engineer", "externalPath": "/job/Phoenix-AZ/Associate-Engineer_JR100",
      "locationsText": "Phoenix, AZ", "postedOn": "Posted 3 Days Ago", "bulletFields": ["JR100"]},
-    {"title": "Technician", "externalPath": "/job/Tucson-AZ/Technician_JR101",
-     "locationsText": "Tucson, AZ", "postedOn": "Posted 30+ Days Ago", "bulletFields": ["JR101"]}]}
+    {"title": "Technician", "externalPath": "/job/Austin-TX/Technician_JR101",
+     "locationsText": "Austin, TX", "postedOn": "Posted 30+ Days Ago", "bulletFields": ["JR101"]}]}
 WD_JOB = {"jobPostingInfo": {"title": "Associate Engineer", "location": "Phoenix, AZ", "postedOn": "Posted 3 Days Ago",
                              "startDate": "2026-10-19", "canApply": True,
                              "externalUrl": "https://demo.wd5.myworkdayjobs.com/en-US/External/job/Phoenix-AZ/Associate-Engineer_JR100",

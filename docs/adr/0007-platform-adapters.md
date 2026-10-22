@@ -57,5 +57,6 @@ account or submits twice.
 
 ## Verify / revert
 `uv run pytest -q tests/test_platforms.py tests/test_textflags.py tests/test_http.py tests/test_services_search.py`.
+Live smoke (opt-in, read-only, hits real public endpoints): `JAM_LIVE=1 uv run pytest tests/test_live.py -q`.
 Revert: `git revert` the squash commit; `Services.search/get_job/get_form` return to `NotImplementedError`,
 and `PlatformsCfg`/the `jobspy` extra disappear with it.
