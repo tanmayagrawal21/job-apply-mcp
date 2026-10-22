@@ -32,6 +32,7 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
+from ..llm.base import LLM_TIMINGS
 from .approvals import ApprovalBook, evidence_path
 from .mapper import (
     DEMOGRAPHIC_KEYS,
@@ -50,7 +51,7 @@ from .mapper import (
 )
 from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
 from .salary import compute_ask, format_ask, is_salary_field
-from .writing import load_exemplar, summarize_posting, write_text
+from .writing import WriteProgress, load_exemplar, review_rubric, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
 _SENSITIVE_KEYS = SEMANTIC_SENSITIVE | {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
@@ -125,6 +126,9 @@ class _Cached:
     expires: float
     adapter: Any = None
     summary: str = ""
+    gate: GateResult | None = None                                  # for draft_answers (ADR-0041)
+    plan_answers: list[Answer] = field(default_factory=list)
+    audit: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -231,7 +235,26 @@ class ApplyEngine:
             ctx = await self._context(ref)
             return await self._plan_ctx(ref, ctx)
 
+    @contextmanager
+    def _llm_timings(self, ref: str):
+        """Collect the router's queue-wait / generation ms for this plan into timings (ADR-0041)."""
+        sink: dict[str, int] = {}
+        tok = LLM_TIMINGS.set(sink)
+        try:
+            yield
+        finally:
+            LLM_TIMINGS.reset(tok)
+            d = self.timings.setdefault(ref, {})
+            for k, v in sink.items():
+                d[k] = d.get(k, 0) + v
+
     async def _plan_ctx(self, ref: str, ctx: _Ctx) -> PlanOut:
+        with self._llm_timings(ref):
+            out = await self._plan_inner(ref, ctx)
+        out.timings = dict(self.timings.get(ref, {}))
+        return out
+
+    async def _plan_inner(self, ref: str, ctx: _Ctx) -> PlanOut:
         gate = await self._gate(ctx)
         if gate.decision != Decision.submit:
             return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
@@ -275,6 +298,14 @@ class ApplyEngine:
         else:
             long_ += short
         long_ += owner_only
+        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary)
+
+    def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
+                  tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,
+                  voluntary: dict[str, str] | None = None) -> PlanOut:
+        """Cache the plan, issue the server-held approval, and list unresolved fields as client_tasks.
+        Only `answers` are ever approved/submitted; drafts inside client_tasks never are (ADR-0041)."""
+        hints = hints or {}
         unresolved_keys: list[str] = []
         have = {t["key"] for t in tasks}
         for f in long_:
@@ -283,11 +314,12 @@ class ApplyEngine:
             if not f.required and not (f.kind == FieldKind.textarea and self.s.apply.write_optional):
                 continue
             unresolved_keys.append(f.key)
-            tasks.append(self._task(f, ctx, {"known": mapped.hints[f.key]} if f.key in mapped.hints else None))
+            tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
         planned = {a.key: a.value for a in answers}
         self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
-                                   time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary)
+                                   time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary,
+                                   gate, list(answers), audit)
         _, files = self._split(ctx.form, planned)
         aid = self.approvals.issue(ref, self._url(ctx), ctx.posting.company, ctx.posting.title, planned, files)
         self.approvals.set_state(ref, "planned", company=ctx.posting.company, title=ctx.posting.title,
@@ -295,7 +327,7 @@ class ApplyEngine:
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}),
-                       skipped_voluntary=voluntary)
+                       skipped_voluntary=voluntary or {})
 
     def _company_aliases(self, company: str) -> list[str]:
         """dedupe.company_aliases names that are the same employer as the posting company (ADR-0038)."""
@@ -445,24 +477,30 @@ class ApplyEngine:
         s = str(value).strip()
         return s if not f.max_length or len(s) <= f.max_length else None
 
-    async def _write_long(self, fields: list[FormField], ctx: _Ctx):
-        """Prose only for required (or opted-in) long text; fields written concurrently."""
+    async def _write_long(self, fields: list[FormField], ctx: _Ctx, *, deferred: bool | None = None):
+        """Prose only for required (or opted-in) long text; fields written concurrently under ONE wall-clock
+        budget (writing.timeout_s) shared by writer and reviewer rounds. In deferred mode nothing is drafted:
+        prose fields are listed for draft_answers (ADR-0041)."""
         written: list[Answer] = []
         rest: list[FormField] = []
         tasks: list[dict[str, Any]] = []
-        if not fields or self.router is None or not self.s.writing.enabled:
+        w = self.s.writing
+        if not fields or self.router is None or not w.enabled:
             return written, list(fields), tasks
-        if self._exemplar is None:
-            self._exemplar = load_exemplar(self.s.writing.style_exemplar)
-        avail = getattr(self.router, "available", None)
         todo: list[FormField] = []
         for f in fields:
             wanted = f.required or self.s.apply.write_optional or "cover" in normalize(f.label)
             if (self._is_prose_question(f) and wanted and self._llm_allowed(f)
-                    and not ("cover" in normalize(f.label) and self.s.writing.cover_letter_policy == "never")):
+                    and not ("cover" in normalize(f.label) and w.cover_letter_policy == "never")):
                 todo.append(f)
             else:
                 rest.append(f)
+        if deferred if deferred is not None else w.mode == "deferred":
+            tasks += [self._task(f, ctx, {"deferred": True}) for f in todo]   # no model call at all
+            return written, rest, tasks
+        if self._exemplar is None:
+            self._exemplar = load_exemplar(w.style_exemplar)
+        avail = getattr(self.router, "available", None)
         if todo and avail is not None:
             try:
                 if not await avail("narrative"):
@@ -470,18 +508,34 @@ class ApplyEngine:
             except Exception:  # noqa: BLE001
                 return written, rest + todo, tasks
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + w.timeout_s if w.timeout_s and w.timeout_s > 0 else None
+        progress = {f.key: WriteProgress() for f in todo}
+
         async def one(f: FormField):
             cover = "cover" in normalize(f.label)
-            return await write_text(
-                self.router, self.s.writing, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
+            coro = write_text(
+                self.router, w, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
                 company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
                 facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
-                resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None))
+                resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None),
+                progress=progress[f.key])
+            if deadline is None:
+                return await coro
+            async with asyncio.timeout_at(deadline):   # cancels the in-flight LLM call (and its HTTP request)
+                return await coro
 
         with self._stage(ctx.form.ref, "write"):
             results = await bounded_gather((one(f) for f in todo), self.s.concurrency.global_limit)
         for f, res in zip(todo, results, strict=True):
-            if isinstance(res, BaseException):
+            if isinstance(res, TimeoutError):
+                p = progress[f.key]
+                extra: dict[str, Any] = {"timed_out": True, "stage": p.stage or "queued"}
+                if p.draft:   # partial draft for the client to finish; never planned as an answer
+                    extra |= {"draft": p.draft, "review": review_rubric(
+                        w, company=ctx.posting.company, title=ctx.posting.title, facts=self.profile.facts(f.label, 12))}
+                tasks.append(self._task(f, ctx, extra))
+            elif isinstance(res, BaseException):
                 rest.append(f)
             elif res.status == "pass":
                 written.append(Answer(key=f.key, value=res.text, source="llm:narrative"))
@@ -492,6 +546,25 @@ class ApplyEngine:
                                                  "violations": [v.line() for v in res.violations][:6],
                                                  "scorecard": res.scorecard}))
         return written, rest, tasks
+
+    async def draft(self, ref: str) -> PlanOut:
+        """draft_answers: run writer + reviewer for the prose fields a (deferred) plan left open, under the same
+        writing.timeout_s budget, and re-issue the approval over the grown answer set (ADR-0041)."""
+        cached = self._cached(ref)
+        if cached is None or cached.adapter is None or cached.gate is None:
+            out = await self.plan(ref)
+            if out.plan.gate.decision != Decision.submit:
+                return out
+            cached = self._cached(ref)
+            if cached is None or cached.gate is None:
+                return out
+        ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)
+        open_ = [f for f in ctx.form.fields if f.key in cached.unresolved]
+        with self._llm_timings(ref), self._stage(ref, "llm"):
+            written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
+        out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit)
+        out.timings = dict(self.timings.get(ref, {}))
+        return out
 
     # ----------------------------------------------------------------- submit
     def _cached(self, ref: str) -> _Cached | None:

@@ -47,6 +47,15 @@ class WritingResult:
     scorecard: dict[str, Any] = field(default_factory=dict)   # compact quality scorecard (ADR-0023)
 
 
+@dataclass
+class WriteProgress:
+    """Live state of one write_text call, so a caller that cancels it at a deadline keeps the partial draft
+    (ADR-0041). `stage` is the step in flight: writer | review | revise | done."""
+    draft: str = ""
+    stage: str = ""
+    rounds: int = 0
+
+
 def summarize_posting(description: str | None, limit: int = 900) -> str:
     """Compact, deterministic summary: sentences that state the company's problem or the role's duties."""
     if not description:
@@ -169,8 +178,11 @@ def _parse_review(raw: str) -> tuple[bool, list[str], str]:
 async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: str, company: str, title: str,
                      summary: str, facts: list[str], max_len: int | None = None,
                      exemplar: str = "", resume: list[Fact] | None = None, corpus: list[str] | None = None,
-                     today: date | None = None) -> WritingResult:
+                     today: date | None = None, progress: WriteProgress | None = None) -> WritingResult:
     """kind: 'cover_letter' | 'free_text'. Returns pass / needs_review (client reviews) / needs_human.
+
+    `progress` (optional) is updated after every writer/reviewer step; the caller owns the time budget and may
+    cancel this coroutine at any await, keeping `progress.draft` as a partial draft (ADR-0041).
 
     `facts` must come from the precedence-resolved fact set (profile/facts.py); `resume` drives temporal checks
     and tense guidance; `corpus` (the user's own letters) is the quality baseline (writing/quality.py)."""
@@ -181,14 +193,18 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
     gate = cfg.quality_gate and kind == "cover_letter" and bool(refs)
     rubric = review_rubric(cfg, company=company, title=title, facts=facts) + (
         quality.client_rubric(refs, cfg) if gate else "")
+    prog = progress if progress is not None else WriteProgress()
+    prog.stage = "writer"
     draft = (await router.complete(
         _writer_prompt(kind=kind, label=label, company=company, title=title, summary=summary, facts=facts,
                        cfg=cfg, exemplar=exemplar, max_len=max_len, timeline=timeline),
         task_class="narrative", max_tokens=1200)).strip()
+    prog.draft = draft
     violations: list[Violation] = []
     card: dict[str, Any] = {}
     grounding = " ".join(facts)
     for rnd in range(1, max(1, cfg.max_rounds) + 1):
+        prog.rounds = rnd
         violations = lint(draft, cfg, company=company, max_len=max_len, exemplar=exemplar, resume=resume, today=today)
         if gate and not violations:
             card = quality.scorecard(draft, cfg, corpus=refs, grounding=grounding, posting=summary)
@@ -196,6 +212,7 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
         if not violations and cfg.reviewer == "client":
             return WritingResult("needs_review", draft, [], rnd, rubric, card)
         if not violations:  # router reviewer
+            prog.stage = "review"
             raw = await router.complete(
                 quality.rubric_prompt(draft, refs, company, title, facts, cfg) if gate else _reviewer_prompt(draft, rubric),
                 task_class="review", max_tokens=1500)
@@ -208,9 +225,12 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
                 return WritingResult("pass", draft, [], rnd, "", card)
             violations = [Violation("model", i) for i in issues] or [Violation("model", "reviewer failed draft")]
             if corrected and corrected != draft:
-                draft = corrected
+                draft = prog.draft = corrected
                 continue
         if rnd < cfg.max_rounds:
+            prog.stage = "revise"
             draft = (await router.complete(_revise_prompt(draft, violations, max_len),
                                            task_class="narrative", max_tokens=1200)).strip()
+            prog.draft = draft
+    prog.stage = "done"
     return WritingResult("needs_human", draft, violations, cfg.max_rounds, rubric, card)
