@@ -5,6 +5,15 @@ An MCP server that finds jobs and fills applications for you, and stops before a
 paginated output) and **local-first** (routine form fields go to Ollama, LM Studio or MLX on your machine; only
 hard prose escalates). Works with any MCP client on macOS, Linux and Windows.
 
+> [!WARNING]
+> **Alpha.** Field results from the first live dogfooding run (one user, one night, ~330 discovered postings):
+> search, ranking, dedupe and planning work end to end, and the browser driver now fills and verifies
+> complete Greenhouse and Lever forms, but **no application has yet been submitted unattended**. Most
+> Greenhouse boards are reCAPTCHA-protected, so the tool fills the form and hands the final click to you
+> (`handoff`), which is the intended behaviour. Free-text questions need `writing.reviewer = "router"` (local strict
+> review) to go out without you. Expect rough edges; every irreversible step is gated, logged and
+> never retried when the outcome is uncertain.
+
 ## 5-minute quickstart
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/) (or pipx). No clone required.
