@@ -303,7 +303,7 @@ class BrowserCfg(BaseModel):
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
     timeout_s: float = 30.0
     upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)
-    hydrate_wait_s: float = 10.0        # server-rendered forms: wait for the JS app to take over before typing (ADR-0037)
+    hydrate_wait_s: float = 10.0        # server-rendered forms: wait for the JS app to take over before typing (ADR-0038)
     confirmation_wait_s: float = 10.0
     evidence: bool = True               # screenshot + text + errors + submit responses under <data_dir>/evidence/<ref-hash>/
     evidence_text_chars: int = 20000    # cap on saved visible page text

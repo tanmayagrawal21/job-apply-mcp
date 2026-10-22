@@ -1,4 +1,4 @@
-# ADR-0037: Radio/checkbox groups, DOM-only consent radios, hydration wait, profile phone country
+# ADR-0038: Radio/checkbox groups, DOM-only consent radios, hydration wait, profile phone country
 
 Status: accepted · Date: 2026-10-22
 

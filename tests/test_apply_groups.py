@@ -1,4 +1,4 @@
-"""Radio / checkbox GROUPS and server-rendered forms against LOCAL fixtures (ADR-0037): Ashby radio and checkbox
+"""Radio / checkbox GROUPS and server-rendered forms against LOCAL fixtures (ADR-0038): Ashby radio and checkbox
 groups addressed by data-field-path, custom-drawn boxes whose real input is covered, DOM-only consent radios, the
 required-group scan behind `incomplete`, and the hydration wait. Needs a local Chrome/Chromium; skipped otherwise.
 Fictional data only."""

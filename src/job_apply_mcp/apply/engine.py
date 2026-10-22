@@ -779,7 +779,7 @@ class ApplyEngine:
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
-            # DOM-only context for the driver (ADR-0037): phone-widget country, opt-in privacy-notice acknowledgement.
+            # DOM-only context for the driver (ADR-0038): phone-widget country, opt-in privacy-notice acknowledgement.
             dom = {"contact:country": self.profile.lookup("country") or "",
                    "pref:acknowledge_privacy_notices": self.profile.lookup("acknowledge_privacy_notices") is True}
             async with self._browser_sem:

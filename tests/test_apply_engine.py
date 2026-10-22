@@ -165,7 +165,7 @@ async def test_falls_back_to_browser_and_unsupported_site_fallback():
 
 
 async def test_browser_driver_gets_dom_only_context(monkeypatch):
-    """ADR-0037: the driver learns the profile country (phone widget) and the privacy-ack opt-in, nothing more."""
+    """ADR-0038: the driver learns the profile country (phone widget) and the privacy-ack opt-in, nothing more."""
     monkeypatch.setitem(FakeProfile.VALUES, "country", "Canada")
     monkeypatch.setitem(FakeProfile.VALUES, "acknowledge_privacy_notices", True)
     ad = FakeAdapter(submit_status="needs_browser")
