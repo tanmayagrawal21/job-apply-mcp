@@ -130,6 +130,7 @@ _register_ingest(mcp, svc)
 
 
 def main() -> None:
+    """Stdio server (kept for 0.1 client configs). The full CLI lives in cli.py."""
     mcp.run()
 
 

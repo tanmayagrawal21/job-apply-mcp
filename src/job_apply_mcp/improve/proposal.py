@@ -95,6 +95,6 @@ def to_markdown(p: FeatureProposal) -> str:
 def save(p: FeatureProposal, root: Path) -> Path:
     d = root / p.id
     d.mkdir(parents=True, exist_ok=True)
-    (d / "proposal.json").write_text(json.dumps(asdict(p), indent=1))
-    (d / "proposal.md").write_text(to_markdown(p))
+    (d / "proposal.json").write_text(json.dumps(asdict(p), indent=1), encoding="utf-8")
+    (d / "proposal.md").write_text(to_markdown(p), encoding="utf-8")
     return d

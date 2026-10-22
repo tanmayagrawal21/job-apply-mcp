@@ -4,7 +4,23 @@ version = "0.1.0"
 description = "Modular, parallel, token-frugal MCP server for discovering and applying to jobs, with local-first LLM routing."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "model-context-protocol", "jobs", "job-application", "automation", "ollama", "local-llm"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business",
+  "Typing :: Typed",
+]
 dependencies = [
   "mcp>=1.2,<2",
   "httpx>=0.27,<1",
@@ -21,15 +37,28 @@ mlx = ["mlx-lm>=0.18"]
 keyring = ["keyring>=25,<26"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
 
+[project.urls]
+Homepage = "https://github.com/tanmayagrawal21/job-apply-mcp"
+Documentation = "https://github.com/tanmayagrawal21/job-apply-mcp/tree/main/docs"
+Issues = "https://github.com/tanmayagrawal21/job-apply-mcp/issues"
+Changelog = "https://github.com/tanmayagrawal21/job-apply-mcp/blob/main/CHANGELOG.md"
+
 [project.scripts]
-job-apply-mcp = "job_apply_mcp.server:main"
+job-apply-mcp = "job_apply_mcp.cli:main"
+job-apply-mcp-init = "job_apply_mcp.cli:init_main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/job_apply_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"examples" = "job_apply_mcp/_examples"   # `init` copies these; same files as the repo's examples/
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "examples", "docs", "tests", "scripts", "README.md", "LICENSE", "CHANGELOG.md", "pyproject.toml"]
 
 [tool.uv]
 # Supply-chain guard (ADR-0004): never resolve packages published in the last 14 days.
@@ -39,7 +68,7 @@ exclude-newer = "2026-10-08T00:00:00Z"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["live: needs a real local Ollama or browser (run with JAM_LIVE=1)"]
+markers = ["live: needs a real local Ollama or browser (skipped unless JAM_LIVE=1)"]
 
 [tool.ruff]
 line-length = 110
