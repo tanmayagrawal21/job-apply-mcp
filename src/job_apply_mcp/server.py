@@ -7,16 +7,27 @@ Token rules every tool follows (ADR-0005):
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 
 from .config import load_settings
+from .core import output as _output
 from .services import Services
 
 mcp = FastMCP("job-apply")
+_raw_tool = mcp.tool
+
+
+def _guarded_tool(*a: Any, **k: Any):
+    """Every registered tool gets the error envelope + schema-safe budgeting (ADR-0005 amendment)."""
+    dec = _raw_tool(*a, **k)
+    return lambda fn: dec(_output.guarded(fn, lambda: svc().settings.response_budget_chars))
+
+
+mcp.tool = _guarded_tool  # type: ignore[method-assign]
+_output.install(mcp)
 _svc: Services | None = None
 
 
@@ -28,18 +39,27 @@ def svc() -> Services:
 
 
 def _out(obj: Any) -> str:
-    s = json.dumps(obj, separators=(",", ":"), default=str)
-    budget = svc().settings.response_budget_chars
-    return s if len(s) <= budget else s[: budget - 40] + f'..."truncated":{len(s)}}}'
+    return _output.out(obj, svc().settings.response_budget_chars)
 
 
 @mcp.tool()
-async def search_jobs(query: str = "", boards: list[str] | None = None, platforms: list[str] | None = None,
-                      location: str = "", since_days: int = 7, limit: int = 25, cursor: int = 0,
-                      apply_policy: bool = True) -> str:
-    """Search postings across enabled platforms in parallel. Returns compact rows: ref, co, title, loc, pay, flags."""
+async def search_jobs(ctx: Context, query: str = "", boards: list[str] | None = None,
+                      platforms: list[str] | None = None, location: str = "", since_days: int = 7, limit: int = 25,
+                      cursor: str = "", apply_policy: bool = True) -> str:
+    """Search postings across enabled platforms in parallel. Returns compact rows: ref, co, title, loc, pay, flags.
+    The first call runs the whole search once; pass the returned `next` as `cursor` for more pages (instant)."""
+    async def progress(done: int, total: int) -> None:
+        await ctx.report_progress(done, total)
+
     return _out(await svc().search(query=query, boards=boards, platforms=platforms, location=location,
-                                   since_days=since_days, limit=limit, cursor=cursor, apply_policy=apply_policy))
+                                   since_days=since_days, limit=limit, cursor=cursor, apply_policy=apply_policy,
+                                   progress=progress))
+
+
+@mcp.tool()
+async def search_status(session_id: str) -> str:
+    """Progress of a search_jobs session: status, boards done/total, rows, elapsed. Accepts a session id or cursor."""
+    return _out(svc().search_status(session_id))
 
 
 @mcp.tool()
@@ -128,9 +148,13 @@ async def request_feature(description: str, kind: str | None = None) -> str:
 
 
 @mcp.tool()
-async def improvement_report(limit: int = 10) -> str:
-    """Ranked improvement proposals learned from recent run failures (compact)."""
-    return _out(await svc().improvement_report(limit))
+async def improvement_report(limit: int = 10, cursor: int = 0) -> str:
+    """Ranked improvement proposals learned from recent run failures (compact). Page with `cursor` (= `next`)."""
+    rep = await svc().improvement_report(cursor + limit)
+    props = rep.get("proposals", [])
+    rep["proposals"] = props[cursor:cursor + limit]
+    rep["next"] = cursor + limit if cursor + limit < rep.get("total", 0) else None
+    return _out(rep)
 
 
 @mcp.tool()

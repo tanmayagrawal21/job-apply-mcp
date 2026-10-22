@@ -79,9 +79,10 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `global_limit` | `int` | `16` | max concurrent outbound tasks |
+| `global_limit` | `int` | `32` | max concurrent outbound tasks (board fan-out) |
 | `per_host` | `int` | `4` | max concurrent requests per host |
 | `min_interval_s` | `float` | `0.25` | polite spacing per host |
+| `hosts` | `dict[str, HostLimitCfg]` | `{"boards-api.greenhouse.io": {"per_host": 16, "min_interval_s": 0.02}, "api.ashbyhq.com...` | per-host overrides of the two knobs above |
 | `browser_workers` | `int` | `2` | concurrent browser sessions |
 | `llm_parallel` | `dict[str, int]` | `{"ollama": 2, "default": 4}` |  |
 
@@ -298,6 +299,25 @@ Mail-confirmation dedupe (ADR-0016). `client` needs no credentials in the server
 | `min_confidence` | `float` | `0.6` |  |
 | `max_new_shown` | `int` | `10` | compact outputs list at most this many new matches |
 | `max_messages_per_call` | `int` | `300` |  |
+
+## `[search.sessions]`
+
+Search sessions (ADR-0024): the first search_jobs call builds the full result set once; pages read from it.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | `bool` | `true` |  |
+| `ttl_s` | `int` | `1800` | a session (and its cursor) expires this long after its last use |
+| `max_sessions` | `int` | `16` | in-memory LRU size |
+| `persist` | `bool` | `false` | also keep sessions on disk (survives server restarts) |
+| `max_rows` | `int` | `5000` | rows kept per session |
+
+## `[concurrency.hosts.<name>]`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `per_host` | `int` | `4` | max concurrent requests to this host |
+| `min_interval_s` | `float` | `0.25` | minimum spacing between request starts to this host |
 
 ## `[llm.tiers.<name>]`
 

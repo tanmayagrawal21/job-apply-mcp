@@ -30,15 +30,30 @@ async def bounded_gather(aws: Iterable[Awaitable[T]], limit: int) -> list[T | Ba
 
 
 class HostLimiter:
-    def __init__(self, per_host: int = 4, min_interval_s: float = 0.0):
+    """Per-host concurrency + spacing. `overrides` maps a hostname (no port) to (per_host, min_interval_s) so a
+    single high-capacity public API (e.g. all Greenhouse boards) is not throttled by the polite global default
+    (ADR-0024). Spacing slots are reserved under a per-host lock and slept outside it, so hosts never block
+    each other and a host's own requests are spaced exactly `min_interval_s` apart."""
+
+    def __init__(self, per_host: int = 4, min_interval_s: float = 0.0,
+                 overrides: dict[str, tuple[int, float]] | None = None):
         self.per_host = per_host
         self.min_interval_s = min_interval_s
-        self._sems: dict[str, asyncio.Semaphore] = defaultdict(lambda: asyncio.Semaphore(self.per_host))
-        self._last: dict[str, float] = defaultdict(float)
-        self._lock = asyncio.Lock()
+        self.overrides = {h.lower(): v for h, v in (overrides or {}).items()}
+        self._sems: dict[str, asyncio.Semaphore] = {}
+        self._next: dict[str, float] = defaultdict(float)
+        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    def limits(self, host: str) -> tuple[int, float]:
+        return self.overrides.get(host.lower(), (self.per_host, self.min_interval_s))
+
+    def _sem(self, host: str) -> asyncio.Semaphore:
+        if host not in self._sems:
+            self._sems[host] = asyncio.Semaphore(max(1, self.limits(host)[0]))
+        return self._sems[host]
 
     async def __call__(self, url: str):
-        return _HostSlot(self, urlparse(url).netloc)
+        return _HostSlot(self, urlparse(url).hostname or urlparse(url).netloc)
 
 
 class _HostSlot:
@@ -46,13 +61,15 @@ class _HostSlot:
         self.lim, self.host = lim, host
 
     async def __aenter__(self):
-        await self.lim._sems[self.host].acquire()
-        if self.lim.min_interval_s:
-            async with self.lim._lock:
-                wait = self.lim._last[self.host] + self.lim.min_interval_s - time.monotonic()
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                self.lim._last[self.host] = time.monotonic()
+        await self.lim._sem(self.host).acquire()
+        interval = self.lim.limits(self.host)[1]
+        if interval:
+            async with self.lim._locks[self.host]:
+                now = time.monotonic()
+                at = max(now, self.lim._next[self.host])
+                self.lim._next[self.host] = at + interval
+            if at > now:
+                await asyncio.sleep(at - now)
 
     async def __aexit__(self, *exc):
-        self.lim._sems[self.host].release()
+        self.lim._sem(self.host).release()
