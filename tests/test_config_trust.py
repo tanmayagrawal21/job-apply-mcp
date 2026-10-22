@@ -157,3 +157,93 @@ def test_unlimited_grant_still_counts(tmp_path):
     for _ in range(3):
         st.check("otp_assist")
     assert st.uses(g.id) == 3 and st.active()[0][1] is None
+
+
+# ---- caps must be whole numbers >= 0 from every source (0.5 used to become int(0.5) == 0 == "no limit")
+BAD_TOML = {"0.5": "0.5", '"0.5"': "0.5 (string)", "-1": "-1", '"1e9"': "1e9 (string)", "nan": "nan",
+            '"nan"': "nan (string)"}
+BAD_ENV = ["0.5", "-1", "1e9", "nan", "0.9"]
+
+
+@pytest.mark.parametrize("raw", list(BAD_TOML), ids=list(BAD_TOML.values()))
+@pytest.mark.parametrize("key", ["per_day", "per_platform_per_day", "per_run"])
+def test_invalid_legacy_quota_from_project_fails_closed(tmp_path, monkeypatch, key, raw):
+    s = _cfg(tmp_path, monkeypatch, proj=f"[control.params.quota]\n{key} = {raw}\n")
+    assert effective_limits(s.control.params.get("quota", {}), s) == {"day": 25, "platform": 10, "run": 10}
+
+
+@pytest.mark.parametrize("raw", BAD_ENV)
+@pytest.mark.parametrize("key", ["per_day", "per_platform_per_day", "per_run"])
+def test_invalid_legacy_quota_from_env_fails_closed(tmp_path, monkeypatch, key, raw):
+    user = "[control.params.quota]\nper_day = 4\n"
+    s = _cfg(tmp_path, monkeypatch, user=user, env={f"JOB_APPLY__CONTROL__PARAMS__QUOTA__{key.upper()}": raw})
+    assert effective_limits(s.control.params.get("quota", {}), s) == {"day": 4, "platform": 10, "run": 10}
+
+
+@pytest.mark.parametrize("raw", list(BAD_TOML), ids=list(BAD_TOML.values()))
+def test_invalid_apply_cap_from_any_source_uses_stricter_of_user_and_default(tmp_path, monkeypatch, caplog, raw):
+    with caplog.at_level("WARNING"):
+        s = _cfg(tmp_path, monkeypatch, user=f"[apply]\ndaily_limit = {raw}\nrun_limit = {raw}\n")
+    assert (s.apply.daily_limit, s.apply.run_limit) == (25, 10) and "whole number" in caplog.text   # trusted user
+    s = _cfg(tmp_path, monkeypatch, user="[apply]\ndaily_limit = 4\n", proj=f"[apply]\ndaily_limit = {raw}\n")
+    assert s.apply.daily_limit == 4
+    s = _cfg(tmp_path, monkeypatch, user="[apply]\ndaily_limit = 50\n", proj=f"[apply]\ndaily_limit = {raw}\n")
+    assert s.apply.daily_limit == 25                                          # stricter of user 50 and default 25
+    s = _cfg(tmp_path, monkeypatch, user="[apply]\ndaily_limit = 0\n", proj=f"[apply]\ndaily_limit = {raw}\n")
+    assert s.apply.daily_limit == 25                                          # user "off" + invalid -> default
+
+
+@pytest.mark.parametrize("raw", BAD_ENV)
+def test_invalid_apply_cap_from_env(tmp_path, monkeypatch, raw):
+    s = _cfg(tmp_path, monkeypatch, env={"JOB_APPLY__APPLY__RUN_LIMIT": raw})
+    assert s.apply.run_limit == 10
+
+
+@pytest.mark.parametrize("v", [0.5, "0.5", -1, "1e9", float("nan"), 1e9, True])
+def test_effective_limits_rejects_non_integers(v):
+    from job_apply_mcp.control.controls import ControlConfigError
+    with pytest.raises(ControlConfigError):
+        effective_limits({"per_day": v}, Settings())
+    assert effective_limits({"per_day": "7"}, Settings())["day"] == 7
+
+
+@pytest.mark.parametrize("raw", ["0.5", '"0.5"', "-1", '"1e9"', "nan"])
+@pytest.mark.parametrize("trusted", [False, True])
+def test_invalid_rules_file_quota_ignored(tmp_path, monkeypatch, raw, trusted):
+    from job_apply_mcp.control.agent import ControlAgent
+    rf = tmp_path / "rules.toml"
+    rf.write_text(f"[params.quota]\nper_day = {raw}\nper_run = {raw}\n")
+    layer = f"[control]\nrules_file = {json.dumps(str(rf))}\n"
+    s = _cfg(tmp_path, monkeypatch, user=layer if trusted else "", proj="" if trusted else layer)
+    a = ControlAgent(s)
+    assert a.config_error is None and a.daily_limit_status()["limit"] == {"day": 25, "platform": 10, "run": 10}
+
+
+# ---- grants: duplicated rows are tampering; counts come only from the signed counter
+def test_duplicated_grant_row_with_truncated_audit_is_rejected(tmp_path):
+    st = mk(tmp_path)
+    st.issue("approve_submissions", 600, max_uses=1)
+    rows = json.loads(st._grants_file.read_text())
+    st._grants_file.write_text(json.dumps(rows + rows))                     # copy carries its own used=0
+    with pytest.raises(GrantError, match="duplicated"):
+        st.check("approve_submissions")
+    assert st.active() == []
+    assert any(e["event"] == "tampered" for e in st.audit_rows())
+    st._grants_file.write_text(json.dumps(rows))                            # single row: first use works ...
+    st.check("approve_submissions")
+    used = json.loads(st._grants_file.read_text())
+    st._grants_file.write_text(json.dumps(used + rows))                     # ... then re-add the used=0 copy
+    st._audit_file.unlink()
+    with pytest.raises(GrantError):
+        st.check("approve_submissions")
+
+
+def test_use_count_comes_only_from_signed_counter(tmp_path):
+    st = mk(tmp_path)
+    g = st.issue("approve_submissions", 600, max_uses=3)
+    st.check("approve_submissions")
+    st.audit("use", g.id, "approve_submissions")                            # extra validly-signed audit lines
+    st.audit("use", g.id, "approve_submissions")
+    assert st.uses(g.id) == 1 and st.active()[0][1] == 2
+    st._audit_file.unlink()
+    assert st.uses(g.id) == 1 and st.active()[0][1] == 2
