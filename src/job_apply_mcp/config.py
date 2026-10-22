@@ -69,11 +69,17 @@ class PathsCfg(BaseModel):
     resume: str | None = None
 
 
+class ProvenanceCfg(BaseModel):
+    db_path: str | None = None          # default: <paths.data_dir>/provenance.db
+    export_tagging: str = "sidecar"     # none | sidecar | metadata  (see provenance/export.py)
+
+
 class Settings(BaseModel):
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     paths: PathsCfg = Field(default_factory=PathsCfg)
+    provenance: ProvenanceCfg = Field(default_factory=ProvenanceCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this
