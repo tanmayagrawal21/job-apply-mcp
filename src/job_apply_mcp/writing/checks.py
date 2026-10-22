@@ -153,22 +153,41 @@ _CONFUSABLES = str.maketrans({
     "І": "I", "Ј": "J", "Ѕ": "S", "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W", "Ү": "Y", "Ӏ": "I",
     "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x",
     "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P",
-    "Τ": "T", "Υ": "Y", "Χ": "X", "ɑ": "a", "ɡ": "g", "ɩ": "i", "ʟ": "L", "ı": "i",
+    "Τ": "T", "Υ": "Y", "Χ": "X", "ɑ": "a", "ɡ": "g", "ɩ": "i", "ʟ": "l", "ı": "i",
+    # small capitals (IPA / phonetic extensions)
+    "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ꜰ": "f", "ɢ": "g", "ʜ": "h", "ɪ": "i", "ᴊ": "j", "ᴋ": "k",
+    "ᴍ": "m", "ɴ": "n", "ᴏ": "o", "ᴘ": "p", "ʀ": "r", "ꜱ": "s", "ᴛ": "t", "ᴜ": "u", "ᴠ": "v", "ᴡ": "w", "ʏ": "y",
+    "ᴢ": "z",
 })
 _PUNCT = re.compile(r"[\W_]+", re.UNICODE)
 
 
+# Unicode Default_Ignorable_Code_Point, complete (DerivedCoreProperties.txt, Unicode 15.1/16.0): characters that
+# render as nothing. Inclusive ranges (ADR-0044).
+DEFAULT_IGNORABLE: tuple[tuple[int, int], ...] = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+
+
+def is_ignorable(c: str) -> bool:
+    o = ord(c)
+    return any(lo <= o <= hi for lo, hi in DEFAULT_IGNORABLE)
+
+
 def format_chars(text: str) -> list[str]:
-    """Unicode format (Cf) characters: zero-width space/joiners, soft hyphen, BOM, bidi controls (ADR-0044)."""
+    """Invisible characters: every Default_Ignorable_Code_Point (zero-width, joiners, soft hyphen, CGJ, variation
+    selectors, Hangul fillers, Mongolian FVS, tags, ...) plus any other Unicode format (Cf) character (ADR-0044)."""
     import unicodedata
-    return [f"U+{ord(c):04X}" for c in text if unicodedata.category(c) == "Cf"]
+    return [f"U+{ord(c):04X}" for c in text if is_ignorable(c) or unicodedata.category(c) == "Cf"]
 
 
 def scan_forms(text: str) -> list[str]:
-    """Views of `text` for deterministic phrase scans: NFKC with Cf characters removed and confusables mapped to
-    Latin, then the same with every run of punctuation, slug separators and line breaks collapsed to one space."""
+    """Views of `text` for deterministic phrase scans: NFKD, combining marks / Cf / default-ignorables removed,
+    confusables mapped to Latin, NFKC, then the same with every run of punctuation, slug separators and line breaks collapsed to one space."""
     import unicodedata
-    t = unicodedata.normalize("NFKC", text)
-    t = "".join(c for c in t if unicodedata.category(c) != "Cf").translate(_CONFUSABLES)
-    t = unicodedata.normalize("NFKC", t)
+    t = unicodedata.normalize("NFKD", text)                  # compatibility forms and decomposed accents
+    t = "".join(c for c in t if unicodedata.category(c) not in ("Mn", "Me", "Cf") and not is_ignorable(c))
+    t = unicodedata.normalize("NFKC", t.translate(_CONFUSABLES))   # cértify -> certify; Cyrillic і -> i
     return [t, " ".join(_PUNCT.sub(" ", t).split())]

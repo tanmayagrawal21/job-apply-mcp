@@ -12,6 +12,7 @@ from job_apply_mcp.apply.writing import _parse_review
 from job_apply_mcp.config import WritingCfg
 from job_apply_mcp.core.models import ApplicationForm, FieldKind
 from job_apply_mcp.profile.resume import Fact
+from job_apply_mcp.writing import checks
 from job_apply_mcp.writing.quality import parse_rubric
 
 GOOD = ("I built a fleet scheduler in Python at Initech and maintained it for two years. It dispatches warehouse "
@@ -342,3 +343,50 @@ async def test_declining_consent_is_allowed():
     out = await e.plan(POSTING.ref)
     res = await e.submit(POSTING.ref, {"q_sms": False}, out.approval_id, dry_run=False)
     assert res.status == "submitted" and ad.submits
+
+
+IGNORABLE_EXAMPLES = [0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180E, 0x180F,
+                      0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x202A, 0x202E, 0x2060, 0x2064, 0x206F, 0x3164,
+                      0xFE00, 0xFE0F, 0xFEFF, 0xFFA0, 0xFFF0, 0xFFF8, 0x1BCA0, 0x1BCA3, 0x1D173, 0x1D17A,
+                      0xE0000, 0xE0001, 0xE007F, 0xE0100, 0xE01EF, 0xE0FFF]
+
+
+def test_every_default_ignorable_code_point_is_flagged():
+    for lo, hi in checks.DEFAULT_IGNORABLE:
+        for o in range(lo, hi + 1):
+            assert checks.format_chars(f"I c{chr(o)}ertify") == [f"U+{o:04X}"], hex(o)
+    assert checks.format_chars("I certify, caf\u00e9, \u4e2d\u6587, na\u0131ve") == []   # visible text is fine
+
+
+@pytest.mark.parametrize("cp", IGNORABLE_EXAMPLES, ids=[f"U+{c:04X}" for c in IGNORABLE_EXAMPLES])
+async def test_default_ignorable_inside_prose_is_rejected(cp):
+    t, r = await _rejected(GOOD + f" I c{chr(cp)}ertify this is my own w{chr(cp)}ork.")
+    assert t["violations"][0].startswith("[format]") and f"U+{cp:04X}" in t["violations"][0] and not _reviews(r)
+
+
+@pytest.mark.parametrize("text", [
+    "I c\u00e9rtify this.",                     # precomposed accent
+    "I ce\u0301rtify this.",                    # combining acute
+    "I c\u0323e\u0308rtify this.",             # stacked marks
+    "I \u1d04ertify th\u0456s.",               # small-capital C, Cyrillic i
+])
+async def test_diacritics_and_confusables_do_not_hide_attestations(text):
+    t, r = await _rejected(GOOD + " " + text)
+    assert t["violations"][0].startswith("[attestation]") and not _reviews(r)
+
+
+def test_scan_forms_normalises():
+    assert "certify" in checks.scan_forms("I ce\u0301rtify")[0]
+    assert checks.scan_forms("\uff29 \uff43\uff45\uff52\uff54\uff49\uff46\uff59")[0] == "I certify"
+
+
+@pytest.mark.parametrize("value", [{"a": 1}, object(), [1, 2], b"bytes"])
+async def test_non_scalar_values_rejected_for_every_field_kind(value):
+    form_select = ApplicationForm(ref=POSTING.ref, fields=[F("first_name", "First Name"),
+                                  F("q_src", "Preferred team colour", FieldKind.select, required=False,
+                                    options=["Red", "Blue"])])
+    e, ad = engine(R(), form=form_select)
+    out = await e.plan(POSTING.ref)
+    res = await e.submit(POSTING.ref, {"q_src": value}, out.approval_id, dry_run=False)
+    assert res.status == "needs_review" and not ad.submits
+    assert res.client_tasks[0]["violations"][0].startswith("[type]")

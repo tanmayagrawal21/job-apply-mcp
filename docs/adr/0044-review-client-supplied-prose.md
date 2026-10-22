@@ -24,14 +24,20 @@ it could contradict the resume or break the writing rules and still be sent.
    Before the reviewer, every answer is scanned for `policy.stop_phrases` and for attestation, certification, no-AI
    and consent wording ("I certify", "personally completed", "without the use of AI", "true and correct",
    "consent to", "agree to", ...). A hit is `needs_review` without a reviewer call and is never submitted.
-   The scan runs on every client string, including URL slugs and select options. It runs after NFKC normalisation,
-   removal of Unicode format (Cf) characters and mapping of Cyrillic/Greek look-alikes to Latin, and again with
-   punctuation, slug separators and line breaks collapsed. Any Cf character (zero-width space or joiner, soft
-   hyphen, BOM, bidi control) left in an answer is itself `needs_review`. Text addressed to the reviewer, such as
+   The scan runs on every client string, including URL slugs and select options. Any invisible character in an
+   answer is itself `needs_review`: the complete Unicode Default_Ignorable_Code_Point set (a range table in
+   `writing/checks.py`, including the soft hyphen, CGJ, ZWSP/ZWJ/ZWNJ, bidi controls, variation selectors, Hangul
+   fillers, Khmer inherent vowels, Mongolian FVS and tags) plus any other Cf character. Otherwise the text is
+   scanned after NFKD, removal of combining marks (Mn/Me), mapping of Cyrillic, Greek and small-capital
+   look-alikes to Latin, and NFKC. It is scanned again with punctuation, slug separators and line breaks
+   collapsed. Text addressed to the reviewer, such as
    `{"pass": ...`, "Reviewer:" or "ignore previous instructions", is also `needs_review`.
    URLs, numbers and dates count as deterministic only outside prose-question fields.
    The client may not set attestation, AI-use or consent/opt-in fields (selects and booleans included) in agent
-   mode. Only a profile answer or a human may set them; declining (`false` or empty) is allowed.
+   mode. Only a profile answer or a human may set them; declining (`false` or empty) is allowed. `_CONSENT_LABEL`
+   is deliberately broad (`i agree`, `marketing`, `subscribe`, ...), so a field such as "Marketing experience" set
+   by the client is also held. That false positive is intended to fail closed: a human or a profile answer fills it.
+   For every field kind, a client value that is not a string, bool, number or list of strings is rejected.
    All of this happens before the control check and before `_authorize`, so no approval is ever re-bound over
    unreviewed text. Dry runs are reviewed too, so a dry run does not report success for text a live submit would
    refuse.

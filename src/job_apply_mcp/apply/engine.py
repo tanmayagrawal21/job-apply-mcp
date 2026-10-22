@@ -711,6 +711,11 @@ class ApplyEngine:
                 continue
             if v is None or v is False or v == "":
                 continue                                         # nothing filled / declined
+            if not (isinstance(v, str | bool | int | float)
+                    or (isinstance(v, list | tuple) and all(isinstance(x, str) for x in v))):
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    f"[type] answer must be a string, bool, number or list of strings, got {type(v).__name__}"]}))
+                continue
             if self._needs_human(f) or _CONSENT_LABEL.search(f.label):
                 failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
                     "[attestation] attestation/consent field: only a profile answer or a human may set it"]}))
@@ -809,7 +814,7 @@ class ApplyEngine:
         after NFKC, Cf removal and confusable mapping, and again with punctuation collapsed."""
         cf = checks.format_chars(text)
         if cf:
-            return f"[format] invisible format characters {sorted(set(cf))[:4]}"
+            return f"[format] invisible characters {sorted(set(cf))[:4]}"
         forms = checks.scan_forms(text)
         for t in forms:
             low = t.lower()
