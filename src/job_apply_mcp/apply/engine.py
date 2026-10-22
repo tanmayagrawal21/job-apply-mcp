@@ -55,10 +55,18 @@ _SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|
                               r"agree|certify|attest|signature|ssn|social security|graduat|\bdate\b|semester|\bterm\b|"
                               r"quarter|pronoun|gender|ethnic|\brace\b|veteran|disabilit", re.IGNORECASE)
 # Attestations and AI-use questions: answered only from an explicit profile [answers] pattern, else a human.
-_HUMAN_LABEL = re.compile(
-    r"\bai\b|artificial intelligence|\bllms?\b|chatgpt|copilot|generative|certif|attest|foreign talent|"
-    r"own work|by selecting|i agree|i acknowledge|i declare|under penalty|true and (?:correct|accurate)|"
-    r"truthful|export control|conflict of interest", re.IGNORECASE)
+_ATTEST_LABEL = re.compile(
+    r"certif|attest|foreign talent|own work|by selecting|i agree|i acknowledge|i declare|under penalty|"
+    r"true and (?:correct|accurate)|truthful|export control|conflict of interest", re.IGNORECASE)
+_AI_LABEL = re.compile(r"\bai\b|artificial intelligence|\bllms?\b|chatgpt|copilot|generative", re.IGNORECASE)
+_HUMAN_LABEL = re.compile(_ATTEST_LABEL.pattern + "|" + _AI_LABEL.pattern, re.IGNORECASE)
+# "What AI tools are you using?" is a factual prose question (writer + review), not an AI-use attestation (ADR-0033).
+_AI_TOOLS_PROSE = re.compile(r"^\W*(what|which)\b.*\bai\b.*\b(tools?|assistants?|workflows?)\b", re.IGNORECASE)
+_PROSE_Q = re.compile(r"^\W*(why|what|how|describe|tell (?:us|me)|explain|share|walk us|please (?:describe|explain|share|tell|provide))\b",
+                      re.IGNORECASE)
+_NOT_PROSE_Q = re.compile(r"^\W*what (?:is|are) (?:your|the)\b|how many|how did you (?:hear|find)|how long|how soon|how much|"
+                          r"\b(?:url|link|date|salary|compensation|phone|email|address|zip|postal|city|state|country|"
+                          r"number|name|pronouns?|gender|age|gpa|school|degree|location|office|timezone)\b", re.IGNORECASE)
 # Never fabricated: contact/link values exist only in the profile.
 _NO_FABRICATE_LABEL = re.compile(r"\burl\b|link|website|web site|e-?mail|phone|mobile|telephone|username|"
                                  r"user name|handle|linkedin|github|twitter|portfolio|\bprofile\b|address",
@@ -273,17 +281,35 @@ class ApplyEngine:
         return ("cover" in normalize(f.label) and not f.required
                 and self.s.writing.cover_letter_policy != "always")
 
+    def _is_prose_question(self, f: FormField) -> bool:
+        """A question-shaped label (why/what/describe...) in a free-text box with no options and room for prose.
+        Names, links, numbers and anything the mapper recognises are never prose (ADR-0033)."""
+        if f.kind == FieldKind.textarea:
+            return not f.options
+        if f.kind not in (FieldKind.text, FieldKind.unknown) or f.options or canonical_key(f.label) is not None:
+            return False
+        if f.max_length and f.max_length <= self.s.apply.short_text_max:
+            return False
+        return len(f.label.split()) >= 4 and bool(_PROSE_Q.search(f.label)) and not _NOT_PROSE_Q.search(f.label)
+
+    @staticmethod
+    def _needs_human(f: FormField) -> bool:
+        if _ATTEST_LABEL.search(f.label):
+            return True
+        return bool(_AI_LABEL.search(f.label) and not (not f.options and _AI_TOOLS_PROSE.search(f.label)))
+
     def _is_short(self, f: FormField) -> bool:
         if f.kind == FieldKind.file:
+            return False
+        if f.kind != FieldKind.textarea and self._is_prose_question(f):
             return False
         if f.kind == FieldKind.textarea:
             return bool(f.max_length and f.max_length <= self.s.apply.short_text_max)
         return True
 
-    @staticmethod
-    def _llm_allowed(f: FormField) -> bool:
+    def _llm_allowed(self, f: FormField) -> bool:
         return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label)
-                    or _HUMAN_LABEL.search(f.label) or _NO_FABRICATE_LABEL.search(f.label)
+                    or self._needs_human(f) or _NO_FABRICATE_LABEL.search(f.label)
                     or geo_kind(f) or f.kind == FieldKind.file)
 
     def _task(self, f: FormField, ctx: _Ctx, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -292,7 +318,7 @@ class ApplyEngine:
                                          "posting": ctx.summary, "facts": self.profile.facts(f.label, 6)}}
         if f.options:
             t["options"] = f.options[:30]
-        if _HUMAN_LABEL.search(f.label):
+        if self._needs_human(f):
             t["needs_human"] = True
             t["reason"] = "attestation/AI-use question: no explicit profile answer"
         if extra:
@@ -401,7 +427,7 @@ class ApplyEngine:
         todo: list[FormField] = []
         for f in fields:
             wanted = f.required or self.s.apply.write_optional or "cover" in normalize(f.label)
-            if (f.kind == FieldKind.textarea and wanted and self._llm_allowed(f)
+            if (self._is_prose_question(f) and wanted and self._llm_allowed(f)
                     and not ("cover" in normalize(f.label) and self.s.writing.cover_letter_policy == "never")):
                 todo.append(f)
             else:

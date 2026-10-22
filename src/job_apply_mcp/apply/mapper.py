@@ -39,18 +39,30 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("years_experience", (r"\b(years?|yrs?)\b.*\bexperience\b", r"\bexperience\b.*\b(years?|yrs?)\b",
                           r"\bhow many (total )?(years|yrs)\b")),
     ("languages_known", (r"\blanguages?\b.*\b(proficient|production|programming|coding|comfortable|strongest|primary|expert)",
-                        r"\b(proficient|programming|coding)\b.*\blanguages\b")),
+                        r"\b(proficient|programming|coding)\b.*\blanguages?\b",
+                        r"\b(strongest|primary|main|favou?rite|preferred|best)\b.*\b(coding|programming|code)\b.*\blanguage\b")),
     ("us_citizen", (r"\b(u s|us|usa|united states|american) citizen",)),
+    # ADR-0033 keys
+    ("citizenship", (r"^(your |current )?citizenship( status)?$", r"\bcitizenship status\b",
+                     r"^what is your (current )?citizenship( status)?$")),
+    ("gpa", (r"\bgpa\b", r"grade point average")),
+    ("prior_employee", (r"\b(previously|ever|formerly|before)\b.*\b(employed|worked|interned)\b.*\b(at|for|by|with)\b",
+                        r"\b(current|former|previous|past|prior) (employee|contractor|intern)\b",
+                        r"\bhave you (ever )?(been employed|worked) (at|by|for)\b")),
+    ("marketing_optin", (r"\btalent (community|network|pool)\b", r"\bjoin (our|the|\w+ s) (talent|community|network)\b",
+                         r"\b(newsletters?|marketing (emails?|communications?|messages?))\b")),
     ("first_name", (r"^(legal )?first name$", r"^given name$")),
     ("last_name", (r"^(legal )?(last|family) name$", r"^surname$")),
-    ("full_name", (r"^(full |legal )?name$",)),
+    ("full_name", (r"^(your )?(full |legal |full legal |legal full )?name$",)),
     ("preferred_name", (r"^preferred (first )?name$",)),
     ("email", (r"^e ?mail( address)?$",)),
     ("phone", (r"^(mobile |cell )?phone( number)?$", r"^mobile( number)?$")),
     ("linkedin", (r"linkedin",)),
     ("github", (r"github",)),
     ("website", (r"^(personal )?(website|portfolio)( url)?$", r"^website$", r"^portfolio")),
-    ("location", (r"^(current )?location( city)?$", r"^city$", r"^current city$")),
+    ("location", (r"^(your )?(current )?location( city)?$", r"^city$", r"^current city$",
+                  r"^where are you (currently )?(located|based|living|residing)$",
+                  r"^where do you (currently )?(live|reside)$", r"^(your )?(current )?(city|location) of residence$")),
     ("country", (r"^country( of residence)?$",)),
     ("current_company", (r"^current (company|employer)$",)),
     ("current_title", (r"^current (job )?title$",)),
@@ -339,7 +351,8 @@ _AUTH_NEG = re.compile(r"\bunauthori[sz]ed\b|\bunable to work\b|\bineligible\b|"
                        r"\bnot (?:legally )?(?:authori[sz]ed|eligible|permitted|allowed)\b")
 _SPOKEN = re.compile(r"speak|spoken|fluen|english|native|written|verbal|translat", re.IGNORECASE)
 _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relocation_support", "open_to_hybrid",
-                  "open_to_onsite", "knows_employee", "years_experience", "languages_known"}
+                  "open_to_onsite", "knows_employee", "years_experience", "languages_known", "citizenship", "gpa",
+                  "prior_employee", "marketing_optin"}
 # Never sent to the local LLM: a guess is a false statement about the candidate.
 SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"}
 _TOTAL_GENERIC = frozenset(
@@ -362,6 +375,11 @@ def _yes_no_options(options: list[str]) -> bool:
     return any(tokens(o)[:1] in (["yes"], ["no"]) for o in options)
 
 
+# "...valid work permit and do not need a company to sponsor my visa": the option that needs NO sponsorship
+_NO_SPONSOR = re.compile(r"without\b.*\b(sponsor|visa)|\b(do|does|will) not (?:\w+ ){0,2}(require|need)\b|\bno (?:\w+ ){0,2}sponsor|"
+                         r"\bnot (?:\w+ ){0,2}(require|need)\b|\bnon[- ]?sponsor")
+
+
 def pick_auth_option(options: list[str], authorized: bool | None, sponsorship: bool | None,
                      citizen: bool | None) -> str | None:
     """Non yes/no authorization choices ("authorization to work in the country where you live"): the one option
@@ -371,23 +389,103 @@ def pick_auth_option(options: list[str], authorized: bool | None, sponsorship: b
     pool = []
     for o in options:
         lo = o.lower()
-        if re.search(r"citizen|national\b|permanent resident|green card|settled|indefinite", lo) and citizen is not True:
+        if re.search(r"citizen|national\b|nationality|permanent resident|green card|settled|indefinite", lo) and citizen is not True:
             continue
         if re.search(r"\b(not|no|don't|do not)\b.{0,25}\b(right|authori[sz]ed|permit|permission|eligible|entitled)\b|unauthori[sz]ed", lo):
             continue
         pool.append(o)
     if sponsorship is True:
         pool = [o for o in pool if re.search(r"sponsor|visa|permit|permission|require|work authori[sz]ation", o.lower())
-                and not re.search(r"without\b.*sponsor|not require|no sponsor", o.lower())]
+                and not _NO_SPONSOR.search(o.lower())]
         if len(pool) > 1:
             pool = [o for o in pool if re.search(r"sponsor", o.lower()) and re.search(r"authori[sz]|right|eligible|permit|permission", o.lower())] or pool
     elif sponsorship is False:
         pool = [o for o in pool if re.search(r"authori[sz]|right to work|eligible|permit|permission", o.lower())
-                and (not re.search(r"sponsor|visa|require", o.lower())
-                     or re.search(r"without\b.*sponsor|not require", o.lower()))]
+                and (not re.search(r"sponsor|visa|require", o.lower()) or _NO_SPONSOR.search(o.lower()))]
     else:
         return None
     return pool[0] if len(pool) == 1 else None
+
+
+_US_NAMES = frozenset(["us", "usa", "unitedstates", "unitedstatesofamerica", "america"])
+
+
+def is_us_country(value: str) -> bool:
+    return re.sub(r"[^a-z]", "", str(value).lower()) in _US_NAMES
+
+
+def pick_citizenship_option(options: list[str], citizen: bool | None, authorized: bool | None) -> str | None:
+    """"Citizenship Status" choices. Citizen False -> the single explicit non-citizen option, else the single
+    visa-holder option (needs authorized=True). Never a citizen, permanent-resident, refugee, asylee or DACA option.
+    Citizen True -> the single plain citizen option. Anything ambiguous or inconsistent -> None."""
+    if citizen is None:
+        return None
+    pr = re.compile(r"permanent resident|green card|lawful permanent|refugee|asylee|daca|deferred action|settled")
+    non = re.compile(r"\bnon[- ]?(?:u\.?s\.?|us|american)?[- ]?citizen|\bnot a (?:u\.?s\.? |american )?citizen|foreign national|"
+                     r"citizen of (?:another|a different|an?other|a non|other)|international")
+    visa = re.compile(r"\bvisa\b|\bh-?1b|\bf-?1\b|\bopt\b|\bcpt\b|work permit|\btn\b|\bl-?1\b|\bj-?1\b|\be-?3\b")
+    cand = [(o, o.lower()) for o in options if not re.search(r"\bother\b|prefer not|decline", o.lower())]
+    if citizen is True:
+        hit = [o for o, lo in cand if re.search(r"citizen|national of", lo) and not non.search(lo) and not pr.search(lo)]
+        return hit[0] if len(hit) == 1 else None
+    explicit = [o for o, lo in cand if non.search(lo) and not pr.search(lo)]
+    if len(explicit) == 1:
+        return explicit[0]
+    if explicit or authorized is not True:
+        return None
+    vis = [o for o, lo in cand if visa.search(lo) and not pr.search(lo) and not re.search(r"citizen|national of", lo)]
+    return vis[0] if len(vis) == 1 else None
+
+
+_NUM = re.compile(r"\d+(?:\.\d+)?")
+
+
+def gpa_number(value: Any) -> float | None:
+    """Numeric GPA; a value on an explicit non-4.0 scale ("8.5/10") is not comparable -> None."""
+    s = str(value or "").strip()
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:/\s*(\d+(?:\.\d+)?))?", s)
+    if not m:
+        return None
+    if m.group(2) and float(m.group(2)) != 4.0:
+        return None
+    return float(m.group(1))
+
+
+def pick_gpa_option(value: float, options: list[str]) -> str | None:
+    """Exact value, or the single range option that contains it ("3.5 - 3.69", "Below 3.0"). Never rounds."""
+    hits = []
+    for o in options:
+        lo_t = o.lower()
+        nums = [float(x) for x in _NUM.findall(o)]
+        if not nums or re.search(r"outside|not applicable|prefer", lo_t):
+            continue
+        if len(nums) >= 2 and re.search(r"\d\s*(?:-|\u2013|\u2014|to)\s*\d", lo_t):
+            ok = nums[0] <= value <= nums[1]
+        elif len(nums) == 1 and re.search(r"below|under|less than|<", lo_t):
+            ok = value < nums[0]
+        elif len(nums) == 1 and re.search(r"above|over|at least|more than|\+|>", lo_t):
+            ok = value >= nums[0]
+        elif len(nums) == 1:
+            ok = abs(value - nums[0]) < 1e-9
+        else:
+            ok = False
+        if ok:
+            hits.append(o)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _gpa_level(label: str) -> str:
+    n = normalize(label)
+    if re.search(r"undergrad|bachelor", n):
+        return "undergrad"
+    if re.search(r"doctor|phd", n):
+        return "doctorate"
+    if re.search(r"graduate|master|postgrad", n):
+        return "graduate"
+    return "any"
+
+
+_CONSENT = re.compile(r"consent|agree|acknowledg|privacy|gdpr|attest|certif|authori[sz]e", re.IGNORECASE)
 
 
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any]:
@@ -472,9 +570,35 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return True, ("Yes" if f.options or f.kind == FieldKind.boolean else str(who))
     if ck == "years_experience":
         return True, _years_answer(f, profile)
-    if ck == "languages_known":
-        if _SPOKEN.search(f.label) or not f.options:
+    if ck == "citizenship":
+        cit = _truth(profile.lookup("us_citizen"))
+        if not f.options:
+            c = profile.lookup("citizenship_country")
+            return True, (str(c) if c else None)
+        return True, pick_citizenship_option(f.options, cit, _truth(profile.lookup("work_authorized")))
+    if ck == "gpa":
+        raw = profile.lookup("gpa:" + _gpa_level(f.label))
+        g = gpa_number(raw)
+        if g is None:
             return True, None
+        if f.options:
+            return True, pick_gpa_option(g, f.options)
+        return True, re.sub(r"\s*/.*$", "", str(raw).strip())
+    if ck == "prior_employee":
+        if not company:
+            return True, None
+        return True, "Yes" if profile.lookup("employer:" + normalize(company)) else "No"
+    if ck == "marketing_optin":
+        if _CONSENT.search(f.label):          # consent/privacy acknowledgements need the owner's decision
+            return True, None
+        return True, "No"
+    if ck == "languages_known":
+        if _SPOKEN.search(f.label):
+            return True, None
+        if not f.options:                      # "your strongest coding language" in a text box: the top language only
+            langs = list(profile.lookup("languages") or [])
+            single = re.search(r"\b(strongest|primary|main|favou?rite|preferred|best)\b", n) and not re.search(r"languages\b", n)
+            return True, (langs[0] if langs and single else None)
         got = pick_languages(list(profile.lookup("languages") or []), f.options, top_languages)
         if not got:
             return True, None
@@ -546,7 +670,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 if f.kind == FieldKind.multiselect and isinstance(sv, list):
                     res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
                     continue
-                if ck in ("years_experience", "languages_known") and f.options and sv in f.options:
+                if ck in ("years_experience", "languages_known", "gpa", "citizenship") and f.options and sv in f.options:
                     res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
                     continue
                 c = _coerce(f, sv, min_score)

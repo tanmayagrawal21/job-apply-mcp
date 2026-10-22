@@ -78,7 +78,8 @@ class Authorization(BaseModel):
     """Work-authorization facts. None = not configured (falls back to [answers] patterns)."""
     work_authorized: bool | None = None
     requires_sponsorship: bool | None = None
-    citizen: bool | None = None
+    citizen: bool | None = None            # US citizenship
+    citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
 
 
 class Profile(BaseModel):
