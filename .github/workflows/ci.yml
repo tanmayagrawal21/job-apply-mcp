@@ -25,11 +25,14 @@ jobs:
         if: runner.os == 'Linux' && matrix.python == '3.12'
         run: uv run python scripts/gen_config_docs.py --check
       - name: CLI smoke test
+        shell: bash
         run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/cfg" XDG_DATA_HOME="$RUNNER_TEMP/data"
+          export APPDATA="$RUNNER_TEMP/appdata" LOCALAPPDATA="$RUNNER_TEMP/localappdata"
           uv run job-apply-mcp --version
           uv run python -m job_apply_mcp version
+          uv run job-apply-mcp init --yes
           uv run job-apply-mcp doctor --offline --json
-        continue-on-error: false
   package:
     runs-on: ubuntu-latest
     steps:
