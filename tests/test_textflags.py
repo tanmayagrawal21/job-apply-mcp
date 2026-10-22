@@ -48,3 +48,39 @@ def test_flag_text_combined():
                     "Graduating in 2027. No sponsorship.")
     assert set(f) == {"phd_only", "citizenship", "years", "academic", "grad_window", "no_sponsorship"}
     assert t.flag_text("A friendly place to work.") == {}
+
+
+_GUARD_SAMPLES = [
+    "We are unable to provide visa sponsorship. Can't sponsor. WILL NOT SPONSOR. Without the need for sponsorship.",
+    "Sponsorship is not available. No visa sponsorship. Not eligible for sponsorship. Does not offer sponsorship.",
+    "Interns on CPT are ineligible. STEM OPT not supported. Not open to J-1 holders. I-983 forms: not signed.",
+    "Must be a U.S. citizen. US citizenship is required. Active clearance, TS/SCI, ITAR and export-control rules apply.",
+    "Graduating between Dec 2025 and June 2027. Class of 2026. 2027 new grads welcome. graduates of 2026.",
+    "PhD required. Currently pursuing a PhD. New PhD Graduate. PhD students and PhD candidates. New PhD.",
+    "Springfield University, a college town with a school of medicine and a research institute.",
+    "5+ years of experience; minimum of 3 years. Pay $95k-$120k or USD 40 - 60 per hour; CAD 70,000 to 90,000.",
+    "Nothing relevant here at all, just a role description about teamwork.", "",
+]
+
+
+def test_guarded_patterns_match_exactly_like_the_plain_ones(monkeypatch):
+    """ADR-0043: substring prefilters + first-character guards are a speedup only; results must not change."""
+    import html as _html
+
+    import platform_fixtures as fx
+
+    from job_apply_mcp.platforms import textflags as tf
+
+    texts = _GUARD_SAMPLES + [s.upper() for s in _GUARD_SAMPLES] + [
+        tf.html_to_text(fx.GH_DESC), _html.unescape(fx.GH_DESC), fx.LEVER_LIST[0]["descriptionPlain"],
+        fx.ASHBY_BOARD["jobs"][0]["descriptionPlain"]]
+    for text in texts:
+        plain = {k: h for k, p in tf._PATTERNS.items() if (h := tf._hits(p, text, 3, 140))}
+        if h := tf._hits(tf._YEARS, text, 3, 140):
+            plain["years"] = h
+        assert tf.flag_text(text) == plain, text
+    guarded = [tf.extract_salary(x) for x in texts]
+    monkeypatch.setattr(tf, "_may", lambda kind, low: True)   # prefilter off: the plain regex path
+    assert [tf.extract_salary(x) for x in texts] == guarded
+    assert set(tf.flag_text(_GUARD_SAMPLES[0])) == {"no_sponsorship"}
+    assert tf.extract_salary(_GUARD_SAMPLES[7]) is not None
