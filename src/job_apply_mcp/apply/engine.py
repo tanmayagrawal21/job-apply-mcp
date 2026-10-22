@@ -42,6 +42,7 @@ from .mapper import (
     tokens,
 )
 from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
+from .salary import compute_ask, format_ask, is_salary_field
 from .writing import load_exemplar, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
@@ -80,6 +81,8 @@ class PlanOut(BaseModel):
             d["why"] = self.plan.gate.reasons
         if self.plan.answers:
             d["answers"] = {a.key: a.value for a in self.plan.answers}
+            if self.plan.audit:
+                d["audit"] = self.plan.audit
             d["src"] = {a.key: a.source for a in self.plan.answers if a.source != "profile"}
         if self.plan.unresolved:
             d["unresolved"] = self.plan.unresolved
@@ -212,10 +215,21 @@ class ApplyEngine:
         gate = await self._gate(ctx)
         if gate.decision != Decision.submit:
             return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
+        audit: dict[str, Any] = {}
+        sal_answers: list[Answer] = []
+        sal_decision = compute_ask(self.s.policy, ctx.posting)
+        rest: list[FormField] = []
+        for f in ctx.form.fields:
+            v = format_ask(f, sal_decision.ask) if sal_decision and is_salary_field(f) else None
+            if sal_decision and is_salary_field(f) and v is not None:
+                sal_answers.append(Answer(key=f.key, value=v, source="rule:salary"))
+                audit.setdefault("salary", sal_decision.audit)
+            else:
+                rest.append(f)
         with self._stage(ref, "map"):  # deterministic first
-            mapped = map_fields(ctx.form.fields, self.profile, referral_preference=self.s.apply.referral_preference,
+            mapped = map_fields(rest, self.profile, referral_preference=self.s.apply.referral_preference,
                                 min_score=self.s.apply.option_min_score)
-        answers = list(mapped.answers)
+        answers = sal_answers + list(mapped.answers)
         short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in mapped.unresolved if f not in short]
         tasks: list[dict[str, Any]] = []
@@ -244,7 +258,8 @@ class ApplyEngine:
         token = canonical_digest(ref, planned)
         self._plans[ref] = _Cached(token, planned, unresolved_keys, ctx.posting, ctx.form,
                                    time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary)
-        return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys),
+        return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
+                                                audit=audit),
                        client_tasks=tasks, token=token, timings=self.timings.get(ref, {}))
 
     def _is_short(self, f: FormField) -> bool:
