@@ -63,24 +63,74 @@ _GUARD_SAMPLES = [
 ]
 
 
-def test_guarded_patterns_match_exactly_like_the_plain_ones(monkeypatch):
-    """ADR-0043: substring prefilters + first-character guards are a speedup only; results must not change."""
+# Characters re.IGNORECASE matches to ASCII letters although str.lower() does not map them there.
+_CONFUSABLE = {"i": ["\u0131", "\u0130"], "s": ["\u017f"], "k": ["\u212a"]}
+
+
+def _variants(text: str, rng) -> list[str]:
+    """The text, upper-cased, with each confusable substituted everywhere, all at once, and at random positions."""
+    out = [text, text.upper()]
+    for a, subs in _CONFUSABLE.items():
+        for c in subs:
+            out.append(text.replace(a, c).replace(a.upper(), c))
+    every = text
+    for a, subs in _CONFUSABLE.items():
+        every = every.replace(a, subs[0]).replace(a.upper(), subs[-1])
+    out.append(every)
+    for _ in range(12):
+        out.append("".join(rng.choice(_CONFUSABLE[ch.lower()] + [ch]) if ch.lower() in _CONFUSABLE else ch
+                           for ch in text))
+    return out
+
+
+def _plain_flags(tf, text: str) -> dict:
+    plain = {k: h for k, p in tf._PATTERNS.items() if (h := tf._hits(p, text, 3, 140))}
+    if h := tf._hits(tf._YEARS, text, 3, 140):
+        plain["years"] = h
+    return plain
+
+
+def test_guarded_flags_equal_unguarded_flags_including_confusables(monkeypatch):
+    """ADR-0043 property: the substring prefilter and first-character guards may only skip work. For every flag
+    pattern, flag_text (guarded) must equal the plain unguarded _PATTERNS, including on text with characters that
+    re.IGNORECASE folds onto ASCII letters (\u0131, \u0130, \u017f, \u212a)."""
     import html as _html
+    import random
 
     import platform_fixtures as fx
 
     from job_apply_mcp.platforms import textflags as tf
 
-    texts = _GUARD_SAMPLES + [s.upper() for s in _GUARD_SAMPLES] + [
+    base = _GUARD_SAMPLES + [
+        "Must be a U.S. c\u0131t\u0131zen", "We do not offer visa \u017fponsorship", "TS/\u017fCI required",
         tf.html_to_text(fx.GH_DESC), _html.unescape(fx.GH_DESC), fx.LEVER_LIST[0]["descriptionPlain"],
         fx.ASHBY_BOARD["jobs"][0]["descriptionPlain"]]
+    rng = random.Random(43)
+    texts = [v for t in base for v in _variants(t, rng)]
     for text in texts:
-        plain = {k: h for k, p in tf._PATTERNS.items() if (h := tf._hits(p, text, 3, 140))}
-        if h := tf._hits(tf._YEARS, text, 3, 140):
-            plain["years"] = h
-        assert tf.flag_text(text) == plain, text
+        assert tf.flag_text(text) == _plain_flags(tf, text), text
+    assert "citizenship" in tf.flag_text("Must be a U.S. c\u0131t\u0131zen")
+    assert "no_sponsorship" in tf.flag_text("We do not offer visa \u017fponsorship")
+    assert "citizenship" in tf.flag_text("TS/\u017fCI required")
+    assert "citizenship" in tf.flag_text("MUST BE A U.S. C\u0130T\u0130ZEN")
     guarded = [tf.extract_salary(x) for x in texts]
     monkeypatch.setattr(tf, "_may", lambda kind, low: True)   # prefilter off: the plain regex path
     assert [tf.extract_salary(x) for x in texts] == guarded
-    assert set(tf.flag_text(_GUARD_SAMPLES[0])) == {"no_sponsorship"}
-    assert tf.extract_salary(_GUARD_SAMPLES[7]) is not None
+    assert any(g is not None for g in guarded)
+
+
+def test_fold_table_covers_every_ignorecase_alias_of_needle_characters():
+    """Scan all of Unicode: any character that re.IGNORECASE matches to a character used in a prefilter needle must
+    become that character under textflags._low, otherwise the prefilter could skip a real match."""
+    import re
+
+    from job_apply_mcp.platforms import textflags as tf
+
+    needle_chars = {ch for words in tf._NEEDS.values() for w in words for ch in w}
+    union = re.compile("[" + re.escape("".join(sorted(needle_chars))) + "]", re.IGNORECASE)
+    for cp in range(0x110000):
+        c = chr(cp)
+        if 0xD800 <= cp <= 0xDFFF or not union.fullmatch(c):
+            continue
+        targets = [n for n in needle_chars if re.fullmatch(re.escape(n), c, re.IGNORECASE)]
+        assert tf._low(c) in targets, (hex(cp), targets)

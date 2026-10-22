@@ -35,7 +35,7 @@ def _default_host_limits() -> dict[str, HostLimitCfg]:
     # Public job-board APIs built for embedding; modest, documented-friendly rates (ADR-0024).
     return {"boards-api.greenhouse.io": HostLimitCfg(per_host=16, min_interval_s=0.02),
             "api.ashbyhq.com": HostLimitCfg(per_host=8, min_interval_s=0.05),
-            "api.lever.co": HostLimitCfg(per_host=16, min_interval_s=0.05)}
+            "api.lever.co": HostLimitCfg(per_host=8, min_interval_s=0.05)}
 
 
 class ConcurrencyCfg(BaseModel):

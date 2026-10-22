@@ -27,16 +27,26 @@ showed:
 2. **Date filter before parsing.** Adapters drop postings older than `since` using the raw date field, before
    building postings. The memo tag includes `since`, so different windows never share a list.
 3. **Cheaper text flags with identical results.** Each flag pattern has a necessary lowercase substring (`_NEEDS`;
-   for example, every no-sponsorship match contains "sponsor"). The pattern is skipped when its substring is absent.
-   A `(?=[first chars])` guard rejects impossible start positions. The set of matches does not change. A test checks
-   that the guarded and plain patterns agree, and they agreed on 23,842 real descriptions. This is 3.3x faster.
+   for example, every no-sponsorship match contains "sponsor"). The pattern is skipped when its substring is absent
+   from `_low(text)`. A `(?=[first chars])` guard rejects impossible start positions; IGNORECASE applies to the class
+   exactly as to the pattern. This is 3.3x faster.
+   - **The prefilter never decides a flag result, it only skips work.** `re.IGNORECASE` also matches four non-ASCII
+     characters to ASCII letters: U+0131 `ı` and U+0130 `İ` to `i`, U+017F `ſ` to `s`, and U+212A (Kelvin) to `k`.
+     `str.lower()` leaves the first three unusable (it does not map `ı`/`ſ`, and it expands `İ` to two characters).
+     `_low` therefore maps all four before lowercasing. A first version used plain `text.lower()`, and the review found
+     that "cıtızen" and "ſponsorship" lost their gate flags.
+   - **Tests.** A property test compares `flag_text` with the plain `_PATTERNS` for every pattern, over samples and
+     their confusable variants. It also compares `extract_salary` with the prefilter on and off. A second test scans
+     all of Unicode and asserts that every IGNORECASE alias of a needle character folds to it under `_low`. With only
+     `ı`/`ſ` mapped, both tests fail (on `İ`).
+   - **Corpus check.** On 23,842 real descriptions there were 0 mismatches.
 4. **Negative caching.** A 404 is stored as a negative entry for the TTL. A stale negative entry is refetched and is
    never served as stale-if-error.
 5. **Prune by mtime.** The startup prune reads the file mtime (equal to the last store) and never parses the file.
 6. **Interleaved fan-out.** `Services._targets` round-robins boards across platforms. The per-host semaphores then
    run in parallel. `concurrency.global_limit` goes from 32 to 48, which is at least the sum of the default per-host
-   caps. Lever `per_host` goes from 8 to 16 (amends ADR-0024): Lever bodies are large (one board was 36 MB, at about
-   3 MB/s per connection), so its throughput depends on connections.
+   caps (40). The per-host politeness limits of ADR-0024 are unchanged; Lever stays at 8. A user who wants more can
+   raise `concurrency.hosts."api.lever.co".per_host` in their own config.
 7. **Per-board timeout.** `search.board_timeout_s` (default 60) bounds each board. A board over budget is reported in
    `errors` as `timed out after Ns`. Its fetch is shielded and keeps running in the background, so the response still
    reaches the cache for the next search. `Services.aclose` cancels leftover fetches.
