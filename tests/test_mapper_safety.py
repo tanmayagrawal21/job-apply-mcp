@@ -252,3 +252,44 @@ def test_engine_passes_configured_company_aliases():
     s = Settings()
     s.dedupe.company_aliases = {"Roadrunner Labs": "Acme Robotics", "Globex": "Initech"}
     assert ApplyEngine._company_aliases(SimpleNamespace(s=s), "Acme Robotics Inc") == ["Roadrunner Labs"]
+
+
+# ---------------------------------------------------------------- qualifier words in the company name (ADR-0038)
+QUALIFIER_LABELS = {
+    "State Street": ["Have you ever worked for a state agency?", "Have you ever worked for the state?",
+                     "Have you ever worked for State Street?", "Have you ever been employed by a state government?",
+                     "Are you a former employee of any state?", "Have you previously worked for State?"],
+    "Agency Inc": ["Have you ever worked for an agency?", "Have you ever worked for Agency Inc?",
+                   "Have you ever worked for a federal agency?", "Were you previously employed by a staffing agency?",
+                   "Are you a current or former employee of Agency?"],
+    "Competitor Labs": ["Have you ever worked for a competitor?", "Have you ever worked for Competitor Labs?",
+                        "Have you previously been employed by a competitor of ours?",
+                        "Are you a former employee of a competitor?", "Have you ever worked for Competitor?"],
+}
+
+
+@pytest.mark.parametrize("company,label", [(c, x) for c, xs in QUALIFIER_LABELS.items() for x in xs])
+def test_company_name_with_qualifier_word_is_never_answered(company, label):
+    assert not about_this_company(label, company)
+    assert run(sel(label), company=company) == (None, ["q"])
+
+
+@pytest.mark.parametrize("label", [
+    "Have you ever worked for Acme Robotics in any capacity?", "Have you worked with Acme Robotics' partners?",
+    "Have you ever worked for Acme Robotics or a related entity?", "Have you ever applied to Acme Robotics?",
+    "Have you ever interviewed with Acme Robotics?", "Do you know anyone who has worked for Acme Robotics?",
+    "Has a family member ever worked for Acme Robotics?", "Have you ever worked for Acme Robotics in Springfield?",
+    "Have you worked for Acme Robotics within the last 12 months?",
+])
+def test_prior_employee_requires_a_plain_direct_employment_question(label):
+    assert not about_this_company(label, "Acme Robotics")
+
+
+@pytest.mark.parametrize("label", ["Have you ever been employed by Acme Robotics?",
+                                   "Have you previously worked at Acme Robotics?",
+                                   "Have you ever worked for Acme Robotics before?",
+                                   "Were you previously employed at Acme Robotics?",
+                                   "Are you a former employee of Acme Robotics?"])
+def test_direct_employment_paraphrases_still_answered(label):
+    assert about_this_company(label, "Acme Robotics")
+    assert run(sel(label))[0] == ("No", "rule:prior_employee")

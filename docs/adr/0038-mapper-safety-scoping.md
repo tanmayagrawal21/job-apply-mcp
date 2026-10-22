@@ -22,12 +22,14 @@ unlisted countries), so blocklists are not used to decide that an answer is safe
   The chosen option must match the acknowledgement pattern and also consist only of `_ACK_VOCAB` words.
   Sensitive labels first matched as `privacy_ack` are reclassified (`is_sensitive_question`) so, for example, a gender
   question takes the demographic path; that reclassification is routing only, never a reason to answer.
-- **Prior employee.** `about_this_company(label, company, aliases)` removes the posting company name (alias-tolerant
-  `_co_key`, its distinctive leading word, or a `dedupe.company_aliases` name for the same employer, passed by the
-  engine) or "this company"/"us"; it must have found one, and every remaining word must be in `_EMPLOY_VOCAB`
-  (have/ever/previously/worked/employed/employee/current/former/intern ...). Parent, subsidiary, affiliate, auditor,
-  joint venture, contractor, "or any of its ...", a place or any other entity -> only the user's own `[answers]` entry
-  for that question, else unresolved.
+- **Prior employee.** `about_this_company(label, company, aliases)` replaces the posting company name (alias-tolerant
+  `_co_key`, its distinctive leading word, a `dedupe.company_aliases` name for the same employer passed by the engine,
+  or "this company"/"us") with a placeholder; the whole label must then match a direct-employment form
+  (`_DIRECT_EMPLOY`: "have you (ever) (been employed|worked) by/for/at <company>", "were you employed by <company>",
+  "are you a current or former employee of <company>"), with only tense/time words left over. If the company name or
+  an alias contains a qualifier word (state, federal, government, agency, competitor, affiliate, parent, subsidiary,
+  partner, client, vendor, public, national, department) it is never answered, so "State Street" cannot turn "worked
+  for a state agency?" into "No". Everything else uses only the user's own `[answers]` entry, else unresolved.
 - **Authorization.** `auth_place_ok` requires every word of the label to be in `_AUTH_VOCAB` (authorization,
   sponsorship and visa wording, visa types, stopwords, and US/U.S./USA/United States/America). Any other word, so any
   city, region, country, "here" or "the country where ...", leaves it unresolved. A label naming exactly one listed

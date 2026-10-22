@@ -593,44 +593,54 @@ def _years_answer(f: FormField, profile: ProfileLike) -> Any | None:
 
 
 # ---- prior-employee scope (ADR-0038) --------------------------------------------------------------
-# Deny-by-default: the label must name the posting company (or a configured alias, or "this company"/"us"), and
-# after removing that name every remaining word must be plain direct-employment wording. Parent, subsidiary,
-# affiliate, auditor, joint venture, client, government, competitor, a place, "or any of its ..." -> unresolved.
-_SELF_REF = re.compile(r"\b(this|the) (company|organi[sz]ation)\b|\b(for|by|with|at) us\b")
-_EMPLOY_VOCAB = frozenset(["have", "has", "had", "you", "your", "ever", "previously", "formerly", "before", "been", "be", "worked", "work", "working", "employed", "employee", "employees", "employment", "intern", "interned", "internship", "are", "were", "is", "a", "an", "at", "for", "by", "with", "of", "or", "current", "former", "past", "prior", "as", "any", "length", "time", "s", "did", "do"])
+# Deny-by-default: answered only for a direct-employment question about the posting company itself (or a configured
+# alias, or "this company"/"us"). The company name is replaced by a placeholder and the whole label must then match
+# one of the _DIRECT_EMPLOY forms, with nothing left over except tense/time words. A company whose own name contains
+# a qualifier word ("State Street", "Agency Inc", "Competitor Labs") is never answered: the label is ambiguous.
+_CO = "zzcozz"
+_SELF_REF = re.compile(r"\b(?:this|the) (?:company|organi[sz]ation)\b|(?<=\bfor )us\b|(?<=\bby )us\b|(?<=\bat )us\b|"
+                       r"(?<=\bwith )us\b")
+_TIME = r"(?:(?:ever|previously|formerly|currently|before|once) )*"
+_DIRECT_EMPLOY = re.compile(
+    rf"^(?:have|did|do) you {_TIME}(?:been employed|worked|work|been an? (?:employee|intern)) {_TIME}(?:by|for|at|with) {_CO}"
+    rf"(?: {_TIME}| before| previously| for any (?:length|period) of time)?$|"
+    rf"^(?:are|were) you {_TIME}(?:been )?employed (?:by|at) {_CO}(?: before| previously| for any (?:length|period) of time)?$|"
+    rf"^(?:are|were) you an? (?:current or former|former or current|current|former|previous|past|prior) "
+    rf"(?:employee|intern) (?:of|at) {_CO}$")
+_CO_QUALIFIERS = frozenset(["state", "states", "federal", "government", "agency", "competitor", "competitors",
+                            "affiliate", "affiliates", "parent", "subsidiary", "subsidiaries", "partner", "partners",
+                            "client", "clients", "vendor", "vendors", "public", "national", "department"])
 _GENERIC_CO_WORDS = frozenset(["the", "global", "united", "american", "national", "general", "first", "international",
                                "data", "systems", "group", "technologies", "digital", "new", "world", "health"])
 
 
-def _strip_company(words: list[str], name: str) -> tuple[list[str], bool]:
+def _mark_company(words: list[str], name: str) -> tuple[list[str], bool]:
     from .adapters import _co_key
     key = _co_key(name)
     if not key:
         return words, False
     for size in range(min(6, len(words)), 0, -1):
         for i in range(len(words) - size + 1):
-            if _co_key(" ".join(words[i:i + size])) == key:
-                return words[:i] + words[i + size:], True
+            if _CO not in words[i:i + size] and _co_key(" ".join(words[i:i + size])) == key:
+                return words[:i] + [_CO] + words[i + size:], True
     lead = [t for t in normalize(name).split() if t not in _GENERIC_CO_WORDS]
     if lead and len(lead[0]) >= 4 and lead[0] in words:
         i = words.index(lead[0])
-        return words[:i] + words[i + 1:], True
+        return words[:i] + [_CO] + words[i + 1:], True
     return words, False
 
 
 def about_this_company(label: str, company: str, aliases: Sequence[str] = ()) -> bool:
-    """True only for a question about direct employment by the posting company itself (or a configured alias)."""
-    n = _SELF_REF.sub(" __self__ ", normalize(label))
-    words = n.split()
-    hit = "__self__" in words
-    words = [w for w in words if w != "__self__"]
-    for name in (company, *aliases):
-        while True:
-            words, found = _strip_company(words, name)
-            hit = hit or found
-            if not found:
-                break
-    return hit and all(w in _EMPLOY_VOCAB for w in words)
+    """True only for a direct-employment question about the posting company itself (or a configured alias)."""
+    names = [x for x in (company, *aliases) if normalize(x)]
+    if not names or any(t in _CO_QUALIFIERS for x in names for t in normalize(x).split()):
+        return False
+    words = _SELF_REF.sub(_CO, normalize(label)).split()
+    for name in names:
+        found = True
+        while found:
+            words, found = _mark_company(words, name)
+    return bool(_DIRECT_EMPLOY.match(" ".join(words)))
 
 
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
