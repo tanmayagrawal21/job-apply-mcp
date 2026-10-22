@@ -6,6 +6,7 @@ testable with small fakes and independent of how profile, router, gates and stor
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -17,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..control.builtin import _NOT_SENT
 from ..core.concurrency import bounded_gather
 from ..core.interfaces import BrowserDriver, PlatformAdapter, Store
 from ..core.models import (
@@ -514,6 +516,14 @@ class ApplyEngine:
         st = self.approvals.state(ref) if self.approvals is not None else None
         return st["state"] if st else None
 
+    async def _release_unsent(self, ref: str, reason: str, event_id: str = "") -> None:
+        """Return the control quota of a live submit whose state proves nothing was sent (ADR-0032)."""
+        release = getattr(self.control, "release", None)
+        if release is None or not event_id or self._submission_state(ref) not in _NOT_SENT:   # no id: fail closed
+            return
+        with contextlib.suppress(Exception):   # a failed release only keeps the count higher (fail closed)
+            await release(ref, reason, event_id)
+
     async def _control(self, action: str, ctx: _Ctx, dry: bool, eff: dict[str, Any] | None = None) -> str | None:
         """Optional control layer (ADR-0014). Returns a block reason, or None when allowed."""
         if self.control is None:
@@ -528,6 +538,8 @@ class ApplyEngine:
             if v is not None:
                 verdict = v
                 break
+        ctx.meta["control_event_id"] = (res.get("event_id") if isinstance(res, dict)
+                                        else getattr(res, "event_id", "")) or ""
         v = getattr(verdict, "value", verdict)
         if v is None or v is True or str(v).lower() in ("allow", "allowed", "ok", "pass", "submit", "proceed"):
             return None
@@ -611,6 +623,8 @@ class ApplyEngine:
                         st = "unknown" if ctx.meta.get("dispatched") else "failed"   # pre-dispatch is safe to retry
                         self.approvals.finish(ref, st, f"{type(e).__name__}: {e}"[:200],
                                               evidence_path(self.s.paths.data_dir, ref))
+                        if isinstance(e, Exception):
+                            await self._release_unsent(ref, f"{type(e).__name__} before dispatch", ctx.meta.get("control_event_id", ""))
                     raise
                 if not dry:
                     st = {"submitted": "submitted", "roadblock": "unknown", "needs_human": "handoff",   # roadblock may follow the click
@@ -620,6 +634,7 @@ class ApplyEngine:
                         st = "failed"
                     self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
                                           evidence_path(self.s.paths.data_dir, ref))
+                    await self._release_unsent(ref, f"not sent: {result.status}", ctx.meta.get("control_event_id", ""))
                 if result.status in ("submitted", "needs_human", "roadblock", "incomplete"):
                     await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title,
                                             url=ctx.posting.apply_url or ctx.posting.url)
