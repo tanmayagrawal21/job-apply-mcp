@@ -45,7 +45,13 @@ class AshbyAdapter(BaseAdapter):
             j.get("descriptionPlain") or "", with_description=with_description, api_salary=pay,
             ref=self.ref(board, j["id"]), company=board, title=j.get("title", ""), location=j.get("location") or "",
                  url=url, apply_url=j.get("applyUrl") or url + "/application",
-                 posted_at=iso_date(j.get("publishedAt")))
+                 posted_at=iso_date(j.get("publishedAt")), countries=self._countries(j))
+
+    def _countries(self, j: dict) -> list[str]:
+        """addressCountry of the primary and every secondary location (ADR-0040); any missing -> unknown ([])."""
+        addrs = [j.get("address")] + [s.get("address") for s in j.get("secondaryLocations") or [] if isinstance(s, dict)]
+        codes = [self.country_code(((a or {}).get("postalAddress") or {}).get("addressCountry")) for a in addrs]
+        return sorted(set(codes)) if codes and all(codes) else []  # type: ignore[arg-type]
 
     async def _board(self, board: str) -> list[dict]:
         try:

@@ -53,7 +53,15 @@ class GreenhouseAdapter(BaseAdapter):
                  location=(j.get("location") or {}).get("name", ""),
                  url=j.get("absolute_url") or f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
                  apply_url=f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
-                 posted_at=iso_date(j.get("updated_at") or j.get("first_published")))
+                 posted_at=iso_date(j.get("updated_at") or j.get("first_published")),
+                 countries=self._countries(j))
+
+    def _countries(self, j: dict) -> list[str]:
+        """["US"] only when every office's location ends in an explicit United States name (ADR-0040); else unknown."""
+        offices = [o for o in j.get("offices") or [] if isinstance(o, dict)]
+        tails = [str(o.get("location") or "").rsplit(",", 1)[-1] for o in offices]
+        codes = [self.country_code(t) for t in tails]
+        return ["US"] if codes and all(c == "US" for c in codes) else []
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:

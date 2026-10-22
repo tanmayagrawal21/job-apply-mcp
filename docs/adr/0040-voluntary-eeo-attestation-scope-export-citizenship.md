@@ -67,6 +67,14 @@ A QA round (issues #47, #48, #51) found:
   ambiguous code (CA, IN, DE, LA, WA, MI, ...) counts only with a city from a small explicit US city table, and
   well-known shared city names (Perth, Melbourne, Sydney, London, Paris, Birmingham, Cambridge, Hamilton, Victoria,
   Vancouver, Kingston) need an explicit US marker. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
+- **Confirmed-US job.** The `[authorization]` facts are US facts. Unless the job is confirmed in the US, an
+  authorization/sponsorship question is answered only when the label itself names the US ("US", "U.S.", "United
+  States", or a US-only visa type such as H-1B, OPT, CPT, E-3); a place-less "Will you require sponsorship?" stays
+  unresolved. Confirmation (`job_is_us`) uses STRUCTURED adapter metadata first: `Posting.countries` from Lever
+  `country`, Ashby `address.postalAddress.addressCountry` (primary and secondary locations) and Greenhouse offices
+  whose location ends in "United States"; exactly ["US"] (and no foreign country in the text) confirms. Only when the
+  adapter gives no country does the free-text heuristic decide, and there only the LAST comma component counts ("US"
+  marker, full state name, or "City, ST"); "(US)" parentheticals are kept as a US marker, others are dropped.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an

@@ -51,7 +51,7 @@ def _view(**auth):
 
 
 def test_mapper_fills_standard_questions_and_defers_prose():
-    r = map_fields(parse_cards(page()), _view(requires_sponsorship=True), company="Springfield Robotics")
+    r = map_fields(parse_cards(page()), _view(requires_sponsorship=True), company="Springfield Robotics", job_in_us=True)
     got = {a.key: a.value for a in r.answers}
     assert got[key(2)] == "Yes" and got[key(3)] == "Yes"             # exact input names, option values as rendered
     assert key(0) in [u.key for u in r.unresolved]                    # prose is left for the client task

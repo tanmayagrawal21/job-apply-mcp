@@ -53,7 +53,8 @@ class LeverAdapter(BaseAdapter):
             ref=self.ref(board, d["id"]), company=board, title=d.get("text", ""),
                  location=cat.get("location") or "", url=d.get("hostedUrl") or f"https://jobs.lever.co/{board}/{d['id']}",
                  apply_url=d.get("applyUrl") or f"https://jobs.lever.co/{board}/{d['id']}/apply",
-                 posted_at=iso_date(d.get("createdAt")))
+                 posted_at=iso_date(d.get("createdAt")),
+                 countries=[c] if (c := self.country_code(d.get("country"))) else [])
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:

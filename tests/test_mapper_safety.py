@@ -21,8 +21,8 @@ def prof(ack=True, answers=None, **auth):
                                preferences=Preferences(acknowledge_privacy_notices=ack)), Settings())
 
 
-def run(f, p=None, company="Acme Robotics"):
-    r = map_fields([f], p or prof(), company=company)
+def run(f, p=None, company="Acme Robotics", job_in_us=False):
+    r = map_fields([f], p or prof(), company=company, job_in_us=job_in_us)
     ans = {a.key: (a.value, a.source) for a in r.answers}.get(f.key)
     return ans, [x.key for x in r.unresolved]
 
@@ -41,7 +41,8 @@ def test_sponsorship_question_mentioning_privacy_notice_is_a_sponsorship_questio
              "(See our Applicant Privacy Notice for how we use this data)")
     assert run(sel(label)) == (None, ["q"])          # extra wording -> never the ack path, never a guessed answer
     assert privacy_ack_value(sel(label)) is None
-    assert run(sel("Will you now or in the future require visa sponsorship?"))[0] == ("No", "rule:requires_sponsorship")
+    assert run(sel("Will you now or in the future require visa sponsorship?"), job_in_us=True)[0] == \
+        ("No", "rule:requires_sponsorship")
     # unknown sponsorship fact: unresolved, never "Yes" from the ack path
     assert run(sel(label), prof(requires_sponsorship=None)) == (None, ["q"])
 
@@ -133,10 +134,14 @@ def test_non_us_authorization_uses_a_country_specific_answer_only():
 
 @pytest.mark.parametrize("label,want", [("Are you legally authorized to work in the United States?", "Yes"),
                                         ("Are you authorized to work in the U.S.?", "Yes"),
-                                        ("Are you legally authorized to work?", "Yes"),
                                         ("Will you require sponsorship for a US work visa?", "No")])
 def test_us_or_unspecified_authorization_still_answered(label, want):
     assert run(sel(label))[0][0] == want
+
+
+def test_place_less_authorization_needs_a_confirmed_us_job():   # ADR-0040
+    assert run(sel("Are you legally authorized to work?"), job_in_us=True)[0][0] == "Yes"
+    assert run(sel("Are you legally authorized to work?")) == (None, ["q"])
 
 
 def test_question_countries():

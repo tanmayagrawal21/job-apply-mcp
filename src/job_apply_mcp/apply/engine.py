@@ -41,7 +41,7 @@ from .mapper import (
     canonical_key,
     eeo_class,
     geo_kind,
-    location_is_us,
+    job_is_us,
     looks_fabricated,
     map_fields,
     never_llm,
@@ -276,7 +276,7 @@ class ApplyEngine:
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
                                 company_aliases=self._company_aliases(ctx.posting.company),
-                                job_in_us=location_is_us(ctx.posting.location))
+                                job_in_us=job_is_us(ctx.posting.location, ctx.posting.countries))
         answers = sal_answers + list(mapped.answers)
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
         voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}

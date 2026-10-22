@@ -12,6 +12,7 @@ from job_apply_mcp.apply.mapper import (
     best_option,
     eeo_option_ok,
     exact_option,
+    job_is_us,
     location_is_us,
     map_fields,
     never_llm,
@@ -289,7 +290,10 @@ def test_real_us_sponsorship_labels_are_answered():
     for label in [SPONS_EG, SPONS_ETC, "Will you now or in the future require sponsorship (i.e. OPT, CPT)?",
                   "Do you require visa sponsorship such as H-1B or TN?",
                   "Will you require immigration sponsorship for work authorization?"]:
-        assert auth(label) == "No", label
+        assert auth(label, job_in_us=True) == "No", label
+    for label in [SPONS_EG, SPONS_ETC, "Do you require visa sponsorship such as H-1B or TN?"]:
+        assert auth(label) == "No", label                       # names a US-only visa type
+    assert auth("Will you require immigration sponsorship for work authorization?") is None
     assert auth("Are you authorized to work in the United States?") == "Yes"
 
 
@@ -457,3 +461,55 @@ def test_company_name_only_strips_as_notice_owner():
     # a notice noun must remain after stripping
     assert ack("Acme Privacy", ["I acknowledge"], "Acme Privacy") is None
     assert ack("Acme Privacy Notice", ["I acknowledge"], "Acme Privacy") is None
+
+
+# ---------------------------------------------------------------- review 3883cdc: last component, place-less, structured
+def test_only_the_last_component_decides():
+    for loc in ["Florida, Uruguay", "Virginia, ZA", "Delaware, ON", "Washington, Tyne and Wear", "Montana, BG",
+                "Florida, UY", "Indiana, BR", "Arizona, HN", "Washington, GB", "Vermont, Victoria", "Maryland, Liberia"]:
+        assert not location_is_us(loc), loc
+    for loc in ["Remote (US)", "Remote - US", "Remote (USA)", "Austin, Texas (HQ)", "Springfield, Illinois, United States"]:
+        assert location_is_us(loc), loc
+    assert not location_is_us("Remote (Canada)") and not location_is_us("Remote (HQ)")
+
+
+def test_place_less_sponsorship_unresolved_unless_job_confirmed_us():
+    label = "Will you require sponsorship?"
+    for loc in ["Perth, WA", "Toronto, ON", "Remote", ""]:
+        assert auth(label, job_in_us=job_is_us(loc)) is None, loc
+        assert auth("Are you legally authorized to work?", job_in_us=job_is_us(loc)) is None, loc
+    assert auth(label, job_in_us=job_is_us("Remote (US)")) == "No"
+    assert auth("Are you authorized to work in the US?", job_in_us=job_is_us("Perth, WA")) == "Yes"   # names the US
+
+
+def test_structured_country_is_the_primary_signal():
+    assert job_is_us("Cambridge, MA", ["US"]) and job_is_us("Remote", ["US"]) and job_is_us("", ["US"])
+    assert not job_is_us("Perth, WA", ["AU"]) and not job_is_us("Seattle, WA", ["AU"])
+    assert not job_is_us("Toronto", ["CA"]) and not job_is_us("New York, NY", ["US", "CANADA"])
+    assert not job_is_us("London, UK", ["US"])                        # the text names another country
+    assert job_is_us("Seattle, WA", []) and not job_is_us("Cambridge, MA", [])   # fallback heuristic
+
+
+def test_adapters_extract_structured_countries():
+    from job_apply_mcp.platforms.ashby import AshbyAdapter
+    from job_apply_mcp.platforms.greenhouse import GreenhouseAdapter
+    from job_apply_mcp.platforms.lever import LeverAdapter
+    lv = LeverAdapter(None, env={})
+    d = {"id": "x1", "text": "Engineer", "categories": {"location": "Springfield"}, "country": "US"}
+    assert lv._to_posting("acme", d, with_description=False).countries == ["US"]
+    assert lv._to_posting("acme", d | {"country": "AU"}, with_description=False).countries == ["AU"]
+    assert lv._to_posting("acme", {k: v for k, v in d.items() if k != "country"}, with_description=False).countries == []
+    ab = AshbyAdapter(None, env={})
+    j = {"id": "x2", "title": "Engineer", "location": "Springfield",
+         "address": {"postalAddress": {"addressCountry": "United States"}},
+         "secondaryLocations": [{"address": {"postalAddress": {"addressCountry": "USA"}}}]}
+    assert ab._to_posting("acme", j, with_description=False).countries == ["US"]
+    j2 = j | {"secondaryLocations": [{"address": {"postalAddress": {"addressCountry": "Canada"}}}]}
+    assert ab._to_posting("acme", j2, with_description=False).countries == ["CANADA", "US"]
+    assert ab._to_posting("acme", j | {"address": None}, with_description=False).countries == []
+    gh = GreenhouseAdapter(None, env={})
+    g = {"id": 1, "title": "Engineer", "location": {"name": "Springfield"},
+         "offices": [{"location": "Springfield, Illinois, United States"}]}
+    assert gh._to_posting("acme", g, with_description=False).countries == ["US"]
+    g2 = g | {"offices": [{"location": "Springfield, Illinois, United States"}, {"location": "Perth, WA"}]}
+    assert gh._to_posting("acme", g2, with_description=False).countries == []

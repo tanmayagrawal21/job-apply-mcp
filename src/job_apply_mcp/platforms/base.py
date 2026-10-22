@@ -78,6 +78,17 @@ class BaseAdapter:
         slug = re.sub(r"[^A-Za-z0-9]+", "_", board).strip("_").upper()
         return self.env.get(f"{self.cfg.api_key_env_prefix}_{self.name.upper()}_{slug}") or None
 
+    # ---------------------------------------------------------------- structured country (ADR-0040)
+    @staticmethod
+    def country_code(value: Any) -> str | None:
+        """A structured country field -> "US" for the United States, else an ISO-2 code / upper-cased name; None if empty."""
+        v = str(value or "").strip()
+        if not v:
+            return None
+        if re.sub(r"[^a-z]", "", v.lower()) in ("us", "usa", "unitedstates", "unitedstatesofamerica"):
+            return "US"
+        return v.upper()[:40]
+
     # ---------------------------------------------------------------- posting assembly
     def finish(self, text: str, *, with_description: bool, api_salary: str | None = None, **p: Any) -> Posting:
         """Build a Posting: flags and salary always come from `text`; the description only on request."""

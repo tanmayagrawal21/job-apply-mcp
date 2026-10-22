@@ -624,25 +624,42 @@ _US_EXPLICIT = re.compile(r"\b(?:united states(?: of america)?|usa|u s a?|us)\b"
 
 
 def _part_is_us(part: str) -> bool:
+    """Only the LAST comma component decides: an explicit US marker, a full US state name, or "City, ST"."""
     if question_countries(part)[1]:
         return False
-    n = normalize(part)
-    if _US_EXPLICIT.search(n) or _US_STATE_NAMES.search(n):
-        return True
-    m = re.fullmatch(r"\s*([^,]+?)\s*,\s*([A-Za-z]{2})\s*", part)
-    if not m:
+    comps = [normalize(c) for c in part.split(",") if normalize(c)]
+    if not comps:
         return False
-    city, code = normalize(m.group(1)), m.group(2).lower()
+    tail = comps[-1]
+    if _US_EXPLICIT.search(tail) or _US_STATE_NAMES.fullmatch(tail):
+        return True
+    if len(comps) < 2 or not re.fullmatch(r"[a-z]{2}", tail):
+        return False
+    city, code = comps[-2], tail
     if city in _SHARED_CITY_NAMES:
         return False
     return code in _US_STATE_CODES_UNAMBIGUOUS or (city, code) in _US_CITY_STATE
 
 
+def _parenthetical(m: re.Match[str]) -> str:
+    """"(US)" / "(USA)" / "(United States)" become a trailing component; any other parenthetical ("(HQ)") is dropped."""
+    return f", {m.group(1)}" if _US_EXPLICIT.fullmatch(normalize(m.group(1))) else " "
+
+
 def location_is_us(location: str) -> bool:
     """True only when every part of a posting location is explicitly a US place ("New York, NY", "Remote - US",
-    "Austin, Texas"). No location, "Remote", a non-US country or an ambiguous code alone ("Toronto, CA") -> False."""
-    parts = [p for p in re.split(r"[;|]|\s/\s|\bor\b", re.sub(r"\([^)]*\)", " ", location or "")) if p.strip()]
+    "Remote (US)", "Austin, Texas"). No location, "Remote", a non-US country or an ambiguous code alone -> False."""
+    text = re.sub(r"\(([^)]*)\)", _parenthetical, location or "")
+    parts = [p for p in re.split(r"[;|]|\s/\s|\bor\b", text) if p.strip()]
     return bool(parts) and all(_part_is_us(p) for p in parts)
+
+
+def job_is_us(location: str, countries: Sequence[str] = ()) -> bool:
+    """Structured adapter countries first (exactly ["US"], and no foreign country named in the text); the free-text
+    location heuristic only when the adapter gave no country. Deny-by-default (ADR-0040)."""
+    if countries:
+        return list(dict.fromkeys(countries)) == ["US"] and not question_countries(location or "")[1]
+    return location_is_us(location)
 
 
 # ADR-0040 (control review): an authorization/sponsorship rule never answers a field whose label, help text or options
@@ -656,10 +673,25 @@ def auth_legal_blocked(f: FormField) -> bool:
     return any(_AUTH_LEGAL_BLOCK.search(normalize(t)) for t in (f.label, *f.options))
 
 
+_US_UPPER = re.compile(r"\bU\.?S\.?(?:A\.?)?(?![A-Za-z])")   # "US", "U.S.", "USA" in capitals; "us" may be the company
+# US-only visa types name the US too ("H-1B sponsorship"); upper case, so "opt in" is not OPT
+_US_VISA_NAMED = re.compile(r"\bH-?1-?B\b|\bSTEM OPT\b|\bOPT\b|\bCPT\b|\bE-?3\b|\bTN (?:visa|status)\b")
+
+
+def names_us(text: str) -> bool:
+    """The text itself names the United States (or a US-only visa type)."""
+    t = text or ""
+    return bool(_US_UPPER.search(t) or _US_VISA_NAMED.search(t) or _US_IN_LABEL.search(normalize(t)))
+
+
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_in_us: bool = False) -> tuple[bool, Any]:
     if auth_legal_blocked(f):
         return True, None
     core = auth_core(f.label, job_in_us)
+    # ADR-0040: the [authorization] facts are US facts. Unless the job is confirmed in the US, only a question that
+    # names the US itself is answered; "Will you require sponsorship?" for a Perth/Toronto/Remote job stays unresolved.
+    if core is not None and not job_in_us and not names_us(f.label):
+        return True, None
     n = normalize(core if core is not None else f.label)
     if core is None:
         us, foreign = question_countries(f.label)

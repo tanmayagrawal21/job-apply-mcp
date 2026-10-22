@@ -31,8 +31,8 @@ def prof(**over) -> ProfileView:
     return ProfileView(Profile(**base), Settings())
 
 
-def run(f, p=None, company="Acme Robotics"):
-    r = map_fields([f], p or prof(), company=company)
+def run(f, p=None, company="Acme Robotics", job_in_us=False):
+    r = map_fields([f], p or prof(), company=company, job_in_us=job_in_us)
     return ({a.key: a.value for a in r.answers}.get(f.key), [x.key for x in r.unresolved])
 
 
@@ -55,8 +55,10 @@ def test_authorized_yes(label):
     "Will you need visa sponsorship?",
     "Do you now or will you in the future require immigration sponsorship by the company for continued work-authorization?\n"])
 def test_sponsorship_yes_never_flips(label):
-    assert run(sel(label))[0] == "Yes"
-    assert run(sel(label), prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False)))[0] == "No"
+    assert run(sel(label), job_in_us=True)[0] == "Yes"
+    no = prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False))
+    assert run(sel(label), no, job_in_us=True)[0] == "No"
+    assert run(sel(label))[0] is None          # ADR-0040: names no place and the job is not confirmed US
 
 
 @pytest.mark.parametrize("label", [
@@ -81,7 +83,7 @@ def test_sponsorship_unknown_stays_unresolved():
 def test_authorization_falls_back_to_answers_patterns():
     p = prof(authorization=Authorization(), answers={"eligible to work": "Yes", "require sponsorship": "Yes"})
     assert run(sel("Are you eligible to work in the US?"), p)[0] == "Yes"
-    assert run(sel("Do you now or will you in the future require immigration sponsorship"), p)[0] == "Yes"
+    assert run(sel("Do you now or will you in the future require immigration sponsorship"), p, job_in_us=True)[0] == "Yes"
 
 
 COUNTRY = ["I am a citizen of this country", "I have permission to work here but will require sponsorship",
