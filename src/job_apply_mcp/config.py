@@ -89,6 +89,34 @@ class ControlCfg(BaseModel):
     review_fail: str = "warn"           # what to do when the reviewer errors: warn | needs_human
 
 
+class ImapCfg(BaseModel):
+    """Read-only IMAP (ADR-0016). Holds only *names* of environment variables / a keychain service: the
+    username and password themselves are never read from config files."""
+
+    host: str = ""
+    port: int = 993
+    folder: str = "INBOX"
+    user_env: str = "JOB_APPLY_IMAP_USER"
+    password_env: str = "JOB_APPLY_IMAP_PASSWORD"
+    keyring_service: str = "job-apply-mcp"   # optional `keyring` extra; used when the env vars are unset
+    senders: list[str] = Field(default_factory=list)     # extra FROM terms (union with subjects)
+    subjects: list[str] = Field(default_factory=lambda: ["application", "applying", "applied"])
+    max_messages: int = 500
+
+
+class IngestCfg(BaseModel):
+    """Mail-confirmation dedupe (ADR-0016). `client` needs no credentials in the server."""
+
+    source: str = "client"              # client | mbox | imap
+    path: str | None = None             # mbox file or directory of .eml files (source = mbox)
+    patterns_file: str | None = None    # user TOML extending the built-in sender/subject patterns
+    since_days: int = 90
+    min_confidence: float = 0.6
+    max_new_shown: int = 10             # compact outputs list at most this many new matches
+    max_messages_per_call: int = 300
+    imap: ImapCfg = Field(default_factory=ImapCfg)
+
+
 class PathsCfg(BaseModel):
     data_dir: str = "~/.local/share/job-apply-mcp"
     profile: str = "~/.config/job-apply-mcp/profile.toml"
@@ -120,6 +148,7 @@ class Settings(BaseModel):
     paths: PathsCfg = Field(default_factory=PathsCfg)
     platforms: PlatformsCfg = Field(default_factory=PlatformsCfg)
     control: ControlCfg = Field(default_factory=ControlCfg)
+    ingest: IngestCfg = Field(default_factory=IngestCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this

@@ -89,6 +89,10 @@ from .control.tools import register as _register_control
 
 _register_control(mcp, lambda: svc().settings)
 
+from .ingest.tools import register as _register_ingest
+
+_register_ingest(mcp, svc)
+
 
 def main() -> None:
     mcp.run()
