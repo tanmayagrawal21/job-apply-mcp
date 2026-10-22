@@ -216,6 +216,14 @@ async def test_needs_human_result_becomes_handoff():
     assert e.approvals.state(POSTING.ref)["state"] == "handoff"
 
 
+
+async def test_roadblock_result_becomes_unknown_never_retryable():
+    """A captcha/verification wall can appear AFTER the click: the application may have been received."""
+    e, _ = make(adapter=FakeAdapter(submit_status="roadblock"))
+    out = await e.plan(POSTING.ref)
+    await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert e.approvals.state(POSTING.ref)["state"] == "unknown"
+
 class _Tty:
     def __init__(self, tty):
         self.tty = tty

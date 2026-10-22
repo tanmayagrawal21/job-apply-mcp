@@ -116,6 +116,18 @@ async def test_single_submit_window(tmp_path):
     assert (await a.check("submit", {"ref": "gh:a:2", "dry_run": False})).decision == "pass"
 
 
+
+async def test_single_submit_allows_retry_only_when_nothing_was_sent(tmp_path):
+    a = mk(tmp_path, params={"single_submit": {"window_minutes": 10}})
+    p = {"ref": "gh:a:1", "dry_run": False}
+    assert (await a.check("submit", p)).decision == "pass"
+    for not_sent in ("planned", "approved", "failed"):
+        assert (await a.check("submit", {**p, "submission_state": not_sent})).decision == "pass"
+    for maybe_sent in ("submitting", "unknown", "submitted", "confirmed", "handoff", None):
+        rep = await a.check("submit", {**p, "submission_state": maybe_sent})
+        assert rep.decision == "block" and "single_submit" in ids(rep), maybe_sent
+
+
 GOOD = ("Dear Hiring Team, I build reliable data pipelines for a living and have shipped three of them "
         "to production. Sincerely, Pat Doe")
 
