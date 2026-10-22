@@ -18,13 +18,24 @@ from .platforms.textflags import grad_window_conflict, years_required
 
 
 class Services:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, engine: Any = None):
         self.settings = settings
+        self._engine = engine
         c = settings.concurrency
         self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s)
         self._http: HttpClient | None = None
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
+        self._llm = None
+
+    @property
+    def llm(self):
+        """Task-class + complexity router (ADR-0008), created lazily."""
+        if self._llm is None:
+            from .llm import LLMRouter
+
+            self._llm = LLMRouter(self.settings)
+        return self._llm
 
     @property
     def store(self):
@@ -34,6 +45,18 @@ class Services:
 
             self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days)
         return self._store
+
+    @property
+    def engine(self):
+        """Apply engine, built lazily (ADR-0011); raises ComponentMissing with a clear message if a
+        required sibling component is not installed."""
+        if self._engine is None:
+            from .apply.adapters import RouterView
+            from .apply.factory import build_engine
+
+            self._engine = build_engine(self.settings, store=self.store, resolve_adapter=self.resolve,
+                                        router=RouterView(self.llm))
+        return self._engine
 
     # ------------------------------------------------------------------ platform plumbing
     @property
@@ -171,15 +194,17 @@ class Services:
         return {"ref": f.ref, "via": f.submit_via, "fields": rows}
 
     async def plan(self, ref_or_url: str) -> dict[str, Any]:
-        raise NotImplementedError("apply engine lands in feat/apply-engine")
+        return (await self.engine.plan(ref_or_url)).compact()
 
-    async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None) -> dict[str, Any]:
-        raise NotImplementedError("apply engine lands in feat/apply-engine")
+    async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None,
+                     token: str | None = None) -> dict[str, Any]:
+        r = await self.engine.submit(ref_or_url, answers, token, dry_run)
+        row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
+               "t": self.engine.timings.get(ref_or_url)}
+        return {k: v for k, v in row.items() if v}
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        limit = max_parallel or self.settings.concurrency.browser_workers
-        rows = await bounded_gather((self.submit(r, {}, dry_run) for r in refs), limit)
-        return {"results": [r if not isinstance(r, BaseException) else {"error": str(r)} for r in rows]}
+        return {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
 
     async def list_applications(self, status: str, limit: int, cursor: int) -> dict[str, Any]:
         page = await self.store.list(status="" if status in ("", "all") else status, limit=limit, cursor=cursor)
@@ -191,4 +216,5 @@ class Services:
         from .core import registry
 
         return {"platforms": registry.platforms.names(), "llm": registry.llm_providers.names(),
-                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run}
+                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run,
+                "llm_router": await self.llm.health()}

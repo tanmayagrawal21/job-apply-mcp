@@ -26,6 +26,9 @@ from .controls import (
 from .rules import RuleSet, load_rules
 from .sanitize import SanitizeResult, sanitize_untrusted
 
+MAX_AUDIT_BYTES = 5 * 1024 * 1024    # rotate to control_audit.jsonl.1 beyond this
+MAX_REPLAY_BYTES = 2 * 1024 * 1024   # replay reads only the tail (quota window is 2 days)
+
 # reviewer(action, ctx) -> {"ok": bool, "issues": [str], "needs_human": bool}; may raise.
 Reviewer = Callable[[str, Context], Awaitable[dict[str, Any]]]
 
@@ -99,7 +102,10 @@ class ControlAgent:
         params_all.setdefault("mode", {}).update(self.rules.mode)
         built: list[Control] = []
         for cid in self.cfg.enabled:
-            built.append(controls.create(cid, params=params_all.get(cid, {}), settings=self.settings))
+            try:
+                built.append(controls.create(cid, params=params_all.get(cid, {}), settings=self.settings))
+            except KeyError as e:   # unknown control id -> fail closed via config_error, not a crash
+                raise ControlConfigError(str(e.args[0])) from None
         ids = [c.id for c in built]
         for c in self.rules.controls:
             if c.id in ids:
@@ -111,7 +117,7 @@ class ControlAgent:
         if not self.audit_path.is_file():
             return
         cutoff = self.clock() - 2 * 86400
-        for line in self.audit_path.read_text().splitlines():
+        for line in self._tail_lines(MAX_REPLAY_BYTES):
             try:
                 r = json.loads(line)
             except ValueError:
@@ -120,11 +126,32 @@ class ControlAgent:
                 self.state.add(UsageEvent(r["ts"], r["a"], r.get("ref", ""), r.get("plat", ""),
                                           r.get("co", ""), r.get("run", "")))
 
+    def _tail_lines(self, nbytes: int) -> list[str]:
+        """Last ~nbytes of the audit log as complete lines (never reads the whole file)."""
+        try:
+            with self.audit_path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - nbytes))
+                raw = f.read()
+        except OSError:
+            return []
+        lines = raw.decode("utf-8", "replace").splitlines()
+        return lines[1:] if size > nbytes and lines else lines
+
+    def _rotate(self) -> None:
+        try:
+            if self.audit_path.stat().st_size > MAX_AUDIT_BYTES:
+                self.audit_path.replace(self.audit_path.with_suffix(".jsonl.1"))
+        except OSError:
+            pass
+
     def _audit(self, row: dict[str, Any]) -> None:
         if not self.cfg.audit:
             return
         try:
             self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate()
             with self.audit_path.open("a") as f:
                 f.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
         except OSError:
@@ -198,7 +225,7 @@ class ControlAgent:
         if not self.audit_path.is_file():
             return []
         out: list[dict[str, Any]] = []
-        for line in reversed(self.audit_path.read_text().splitlines()[-500:]):
+        for line in reversed(self._tail_lines(256 * 1024)[-500:]):
             try:
                 r = json.loads(line)
             except ValueError:

@@ -62,9 +62,10 @@ async def plan_application(ref_or_url: str) -> str:
 
 @mcp.tool()
 async def submit_application(ref_or_url: str, answers: dict[str, Any] | None = None,
-                             dry_run: bool | None = None) -> str:
-    """Submit using the best available path (platform API, else browser driver). Honors global dry_run."""
-    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run))
+                             dry_run: bool | None = None, token: str | None = None) -> str:
+    """Submit using the best available path (platform API, else browser driver). Honors global dry_run.
+    `token` is the approval token from plan_application (required for real submits unless auto_approve)."""
+    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, token=token))
 
 
 @mcp.tool()
