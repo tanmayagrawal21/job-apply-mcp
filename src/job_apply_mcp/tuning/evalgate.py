@@ -9,10 +9,30 @@ from typing import Any
 
 from ..config import TuneCfg
 from ..control.builtin import CONTRACTION_RX, DEFAULT_ENTHUSIASM, DEFAULT_GAP_PHRASES, phrase_regex
+from ..writing import checks
 from .trainer import Trainer
 
 _GAP, _ENTH = phrase_regex(DEFAULT_GAP_PHRASES), phrase_regex(DEFAULT_ENTHUSIASM)
 _MD = re.compile(r"(?m)^\s*(?:[#>*\-]\s|\d+\.\s)|\*\*|`")
+
+def degenerate_count(outs: list[str], cfg: TuneCfg | None = None) -> int:
+    """Outputs that loop, repeat sentences, or emit non-text runs (same check as the writing lint)."""
+    return sum(1 for o in outs if checks.degenerate(o))
+
+
+def leakage_count(outs: list[str], rows: list[dict]) -> int:
+    """Outputs containing addressees/orgs/dates that belong to OTHER eval examples' letters but not to their own prompt."""
+    n = 0
+    texts = [r["messages"][2]["content"] for r in rows]
+    for i, o in enumerate(outs):
+        own = (rows[i]["messages"][0]["content"] + " " + rows[i]["messages"][1]["content"]).lower()
+        low = o.lower()
+        for j, t in enumerate(texts):
+            if j != i and any(e.lower() in low and e.lower() not in own for e in checks.exemplar_entities(t)):
+                n += 1
+                break
+    return n
+
 
 Judge = Callable[[str, str, str], float | None]   # (prompt, base_out, cand_out) -> P(candidate better) or None
 _judge: Judge | None = None
@@ -69,6 +89,11 @@ def evaluate(trainer: Trainer, cfg: TuneCfg, eval_rows: list[dict], candidate: P
         reasons.append(f"length adherence worse ({base['len_err']:.2f} -> {cand['len_err']:.2f})")
     if cand["format_err"] > base["format_err"]:
         reasons.append("format adherence worse")
+    # Hard gates, independent of loss: degenerate output or exemplar leakage always REJECTs (ADR-0023).
+    if n := degenerate_count(c_outs):
+        reasons.append(f"degenerate output in {n} held-out generation(s) (loops/repeats/markdown runs)")
+    if n := leakage_count(c_outs, eval_rows):
+        reasons.append(f"exemplar leakage in {n} generation(s) (foreign addressee/org/date)")
     judge_p = None
     if cfg.use_judge and _judge:
         ps = [p for p in (_judge(r["messages"][1]["content"], b, c) for r, b, c in

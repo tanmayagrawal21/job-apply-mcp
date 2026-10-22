@@ -86,10 +86,30 @@ def _profile_checks(s: Settings) -> list[Check]:
         rp = Path(s.paths.resume).expanduser()
         out.append(Check("resume", OK, f"{rp}") if rp.is_file()
                    else Check("resume", FAIL, f"paths.resume not found: {rp}", "Point paths.resume at your PDF."))
+        if rp.is_file():
+            out.append(_resume_consistency_check(rp, prof))
     else:
         out.append(Check("resume", WARN, "paths.resume not set; applications that need an upload will stop",
                          'Set paths.resume = "/path/to/resume.pdf" in config.toml.'))
     return out
+
+
+def _resume_consistency_check(rp: Path, prof) -> Check:
+    from .profile.facts import resume_consistency
+    from .profile.resume import load_resume
+    try:
+        facts = load_resume(rp)
+    except (OSError, RuntimeError) as e:
+        return Check("resume_facts", WARN, f"could not parse resume ({e})",
+                     "Use a .txt/.md export or install the extra: pip install 'job-apply-mcp[resume]'.")
+    if not facts:
+        return Check("resume_facts", WARN, "no experience/education entries recognised in the resume",
+                     "Use clear section headings (EXPERIENCE, EDUCATION) and date ranges.")
+    bad = resume_consistency(facts, prof)
+    if bad:
+        return Check("resume_facts", WARN, f"{len(bad)} profile/resume conflict(s): {bad[0].detail}",
+                     "The resume wins in drafts; update profile.toml to match (see the facts_report tool).")
+    return Check("resume_facts", OK, f"{len(facts)} resume facts; consistent with profile")
 
 
 def _data_dir_check(s: Settings) -> Check:

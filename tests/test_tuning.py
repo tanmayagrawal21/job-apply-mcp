@@ -43,7 +43,7 @@ class FakeTrainer:
         return TrainResult(spec.adapter_dir, 0.1, spec.cfg.iters)
 
     def generate(self, base, adapter, prompts, max_tokens):
-        return ["I'm thrilled to apply."] * len(prompts) if adapter is None else [body(30, "a")] * len(prompts)
+        return ["I'm thrilled to apply."] * len(prompts) if adapter is None else [" ".join(f"w{k}x" for k in range(30))] * len(prompts)
 
     def nll(self, base, adapter, pairs):
         if adapter is None:

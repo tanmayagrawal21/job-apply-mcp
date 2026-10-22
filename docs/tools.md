@@ -51,6 +51,7 @@ Tool names are the MCP tool names your client shows. Argument defaults are shown
 |---|---|---|
 | `tune_status` | none | backend, promoted and previous adapter, new user texts versus the threshold, last run |
 | `tune_run` | `trigger` (manual, new_data, rollback), `wait=False` | run summary; trains a LoRA on your own texts, gates it against the incumbent and promotes only if better. `wait=False` runs in the background; poll `tune_status` |
+| `facts_report` | none | resume-first fact precedence: counts, profile/resume conflicts, and letter facts excluded as conflicting or outdated (with the resume's version) |
 
 ## Operations and self-improvement
 

@@ -8,9 +8,13 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 from ..config import WritingCfg
+from ..profile.resume import Fact, today_local
+from ..writing import checks, quality
 from .ports import RouterLike
 
 _CONTRACTION = re.compile(
@@ -24,7 +28,8 @@ _SUMMARY_HINTS = re.compile(
 
 @dataclass
 class Violation:
-    kind: str       # banned_phrase | contraction | gap | length | structure | company | copied | model
+    kind: str       # banned_phrase | contraction | gap | length | structure | company | copied | model |
+                    # placeholder | addressee | temporal | degenerate | closing | leakage | quality
     detail: str
     sentence: str = ""
 
@@ -39,6 +44,7 @@ class WritingResult:
     violations: list[Violation] = field(default_factory=list)
     rounds: int = 0
     rubric: str = ""                 # for client review: what the calling agent must check
+    scorecard: dict[str, Any] = field(default_factory=dict)   # compact quality scorecard (ADR-0023)
 
 
 def summarize_posting(description: str | None, limit: int = 900) -> str:
@@ -76,8 +82,17 @@ def _shingles(text: str, n: int = 8) -> set[tuple[str, ...]]:
 
 
 def lint(text: str, cfg: WritingCfg, *, company: str = "", max_len: int | None = None,
-         exemplar: str = "") -> list[Violation]:
+         exemplar: str = "", resume: list[Fact] | None = None, today: date | None = None) -> list[Violation]:
     out: list[Violation] = []
+    long_form = len(text) > 600
+    hits = checks.placeholders(text) + checks.degenerate(
+        text, max_nonalpha=cfg.degenerate_max_nonalpha, repeat=cfg.degenerate_repeat)
+    if long_form:
+        hits += checks.addressee(text, company) + checks.closing(text, cfg.required_closing)
+    hits += checks.temporal(text, resume or [], today or today_local())
+    if exemplar:
+        hits += checks.leakage(text, exemplar, company)
+    out += [Violation(k, d, s) for k, d, s in hits]
     for sent in _sentences(text):
         low = sent.lower()
         for ph in cfg.banned_phrases:
@@ -90,7 +105,6 @@ def lint(text: str, cfg: WritingCfg, *, company: str = "", max_len: int | None =
             if re.search(pat, sent, re.IGNORECASE):
                 out.append(Violation("gap", f"gap or deficiency statement ({pat})", sent))
     paras = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
-    long_form = len(text) > 600
     if long_form and not (cfg.paragraphs_min <= len(paras) <= cfg.paragraphs_max):
         out.append(Violation("structure", f"{len(paras)} paragraphs; want {cfg.paragraphs_min}-{cfg.paragraphs_max}"))
     if max_len and len(text) > max_len:
@@ -103,18 +117,21 @@ def lint(text: str, cfg: WritingCfg, *, company: str = "", max_len: int | None =
 
 
 def _writer_prompt(*, kind: str, label: str, company: str, title: str, summary: str, facts: list[str],
-                   cfg: WritingCfg, exemplar: str, max_len: int | None) -> str:
+                   cfg: WritingCfg, exemplar: str, max_len: int | None, timeline: list[str] | None = None) -> str:
     rules = "\n".join(f"- {r}" for r in cfg.rules)
     length = (f"At most {max_len} characters." if max_len else
               f"{cfg.paragraphs_min}-{cfg.paragraphs_max} paragraphs." if kind == "cover_letter" else
               "One to three short paragraphs.")
-    ex = (f"\nSTYLE EXEMPLAR (imitate structure and tone only; never reuse its sentences or facts):\n{exemplar}\n"
-          if exemplar else "")
+    ex = (f"\nSTYLE EXEMPLAR (style only — do not copy facts, names, addressees, dates; address {company!r} only):"
+          f"\n{exemplar}\n" if exemplar else "")
+    tl = ("\nTIMELINE (from the resume, which is authoritative; follow these tenses):\n" +
+          "\n".join(f"- {t}" for t in (timeline or [])) + "\n" if timeline else "")
     return (f"Write the answer to: {label!r} for the role {title!r} at {company!r}.\n"
             f"RULES:\n{rules}\n{length}\n\n"
             f"COMPANY/ROLE CONTEXT (their stated problem and the duties):\n{summary or '(none provided)'}\n\n"
-            f"PROFILE FACTS (the only claims you may make):\n" + "\n".join(f"- {f}" for f in facts) +
-            f"{ex}\nReturn only the final text, no preamble.")
+            f"FACTS (resume first; the only claims you may make):\n" + "\n".join(f"- {f}" for f in facts) +
+            f"{tl}{ex}\nNo placeholders such as [Your Name]; plain text only, no markdown. "
+            "Return only the final text, no preamble.")
 
 
 def _revise_prompt(draft: str, violations: list[Violation], max_len: int | None) -> str:
@@ -151,23 +168,44 @@ def _parse_review(raw: str) -> tuple[bool, list[str], str]:
 
 async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: str, company: str, title: str,
                      summary: str, facts: list[str], max_len: int | None = None,
-                     exemplar: str = "") -> WritingResult:
-    """kind: 'cover_letter' | 'free_text'. Returns pass / needs_review (client reviews) / needs_human."""
-    rubric = review_rubric(cfg, company=company, title=title, facts=facts)
+                     exemplar: str = "", resume: list[Fact] | None = None, corpus: list[str] | None = None,
+                     today: date | None = None) -> WritingResult:
+    """kind: 'cover_letter' | 'free_text'. Returns pass / needs_review (client reviews) / needs_human.
+
+    `facts` must come from the precedence-resolved fact set (profile/facts.py); `resume` drives temporal checks
+    and tense guidance; `corpus` (the user's own letters) is the quality baseline (writing/quality.py)."""
+    today = today or today_local()
+    from ..profile.resume import temporal_phrasing
+    timeline = temporal_phrasing(resume, today) if resume else []
+    refs = corpus or []
+    gate = cfg.quality_gate and kind == "cover_letter" and bool(refs)
+    rubric = review_rubric(cfg, company=company, title=title, facts=facts) + (
+        quality.client_rubric(refs, cfg) if gate else "")
     draft = (await router.complete(
         _writer_prompt(kind=kind, label=label, company=company, title=title, summary=summary, facts=facts,
-                       cfg=cfg, exemplar=exemplar, max_len=max_len),
+                       cfg=cfg, exemplar=exemplar, max_len=max_len, timeline=timeline),
         task_class="narrative", max_tokens=1200)).strip()
     violations: list[Violation] = []
+    card: dict[str, Any] = {}
+    grounding = " ".join(facts)
     for rnd in range(1, max(1, cfg.max_rounds) + 1):
-        violations = lint(draft, cfg, company=company, max_len=max_len, exemplar=exemplar)
+        violations = lint(draft, cfg, company=company, max_len=max_len, exemplar=exemplar, resume=resume, today=today)
+        if gate and not violations:
+            card = quality.scorecard(draft, cfg, corpus=refs, grounding=grounding, posting=summary)
+            violations = [Violation("quality", f) for f in card["fails"]]
         if not violations and cfg.reviewer == "client":
-            return WritingResult("needs_review", draft, [], rnd, rubric)
+            return WritingResult("needs_review", draft, [], rnd, rubric, card)
         if not violations:  # router reviewer
-            ok, issues, corrected = _parse_review(await router.complete(
-                _reviewer_prompt(draft, rubric), task_class="review", max_tokens=1500))
+            raw = await router.complete(
+                quality.rubric_prompt(draft, refs, company, title, facts, cfg) if gate else _reviewer_prompt(draft, rubric),
+                task_class="review", max_tokens=1500)
+            if gate:
+                ok, scores, issues, corrected = quality.parse_rubric(raw, cfg)
+                card["rubric"] = scores
+            else:
+                ok, issues, corrected = _parse_review(raw)
             if ok:
-                return WritingResult("pass", draft, [], rnd)
+                return WritingResult("pass", draft, [], rnd, "", card)
             violations = [Violation("model", i) for i in issues] or [Violation("model", "reviewer failed draft")]
             if corrected and corrected != draft:
                 draft = corrected
@@ -175,4 +213,4 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
         if rnd < cfg.max_rounds:
             draft = (await router.complete(_revise_prompt(draft, violations, max_len),
                                            task_class="narrative", max_tokens=1200)).strip()
-    return WritingResult("needs_human", draft, violations, cfg.max_rounds, rubric)
+    return WritingResult("needs_human", draft, violations, cfg.max_rounds, rubric, card)
