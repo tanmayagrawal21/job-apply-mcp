@@ -18,7 +18,16 @@ from apply_fakes import (
 from job_apply_mcp.apply.engine import ApplyEngine
 from job_apply_mcp.core.models import ApplicationForm, Decision, FieldKind
 
-GOOD = "\n\n".join(["Acme Robotics builds software for warehouse fleets. I built a fleet scheduler in Python." * 2] * 4)
+GOOD = (
+    "Acme Robotics builds software that keeps warehouse fleets moving. I built a fleet scheduler in Python "
+    "for a regional distributor and maintained it for two years.\n\n"
+    "The scheduler cut idle time by 30 percent across 40 robots. I wrote the test harness myself and "
+    "documented every dispatch rule for the operations staff.\n\n"
+    "Order errors fall when routing is predictable, which is the problem your team states. My dispatch code "
+    "removed the manual overrides that caused most errors.\n\n"
+    "I would apply the same discipline to your control software. The work maps directly onto your duties "
+    "and onto the review process your engineers already follow."
+)
 
 
 def engine(adapter=None, router=None, gates=None, store=None, drivers=None, control=None, **cfg):

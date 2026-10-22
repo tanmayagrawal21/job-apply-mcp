@@ -284,6 +284,16 @@ class BrowserCfg(BaseModel):
 class WritingCfg(BaseModel):
     enabled: bool = True
     style_exemplar: str | None = None   # path outside the repo; few-shot by structure and tone only
+    style_corpus: list[str] = Field(default_factory=list)   # more of the user's own letters (files/dirs) = quality baseline
+    cover_letter_policy: str = "required_only"   # required_only | always | never (ADR-0023)
+    required_closing: list[str] = Field(default_factory=list)   # regexes; the letter must END with one (long form)
+    degenerate_max_nonalpha: float = 0.25    # > this share of non-alphabetic tokens = degenerate output
+    degenerate_repeat: int = 3               # a 4-gram repeated this many times = loop
+    quality_gate: bool = True                # compare drafts with the user's own letters (writing/quality.py)
+    quality_tolerance: float = 1.0           # deterministic metric may trail the corpus mean by this many sd
+    quality_min_scores: dict[str, int] = Field(default_factory=lambda: {
+        "argument": 4, "voice": 4, "precision": 4, "specificity": 4})
+    quality_min_problem_overlap: float = 0.08   # share of the posting's stated problem words the draft must engage
     paragraphs_min: int = 4
     paragraphs_max: int = 6
     max_rounds: int = 3
@@ -299,6 +309,7 @@ class WritingCfg(BaseModel):
         "excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "what excites",
         "dream job", "admire", "world-class", "cutting-edge", "innovative company", "leading company",
         "i am eager", "i'm eager", "honored", "humbled",
+        "track record", "extensive experience", "high-stakes", "proven ability", "i possess",
     ])
     gap_patterns: list[str] = Field(default_factory=lambda: [
         r"\bI have not\b", r"\bI haven't\b", r"\bI lack\b", r"\bI would need to learn\b",

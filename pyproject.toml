@@ -36,6 +36,7 @@ litellm = ["litellm>=1.83.0"]
 mlx = ["mlx-lm>=0.18"]
 tune = ["mlx-lm>=0.18"]
 keyring = ["keyring>=25,<26"]
+resume = ["pypdf>=4"]   # optional: PDF resume ingestion (ADR-0023); .txt/.md work without it
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
 
 [project.urls]

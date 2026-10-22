@@ -180,6 +180,10 @@ from .tuning.tools import register as _register_tune
 
 _register_tune(mcp, lambda: svc().settings)
 
+from .profile.tools import register as _register_facts
+
+_register_facts(mcp, lambda: svc().settings)
+
 from .ingest.tools import register as _register_ingest
 
 _register_ingest(mcp, svc)
