@@ -64,7 +64,10 @@ class GreenhouseAdapter(BaseAdapter):
         codes = [self.country_code(t) for t in tails]
         if codes and all(c == "US" for c in codes):
             return ["US"]
-        return ["UNCONFIRMED"] if len(offices) > 1 else []
+        from ..apply.mapper import question_countries  # lazy: platforms never import apply at module load
+        if len(offices) > 1 or any(question_countries(str(o.get("location") or ""))[1] for o in offices):
+            return ["UNCONFIRMED"]                              # several offices, or a known foreign one
+        return []
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:

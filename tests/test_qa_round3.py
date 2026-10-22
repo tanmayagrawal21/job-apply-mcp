@@ -512,6 +512,8 @@ def test_adapters_extract_structured_countries():
     assert ab._to_posting("acme", j, with_description=False).countries == ["US"]
     j2 = j | {"secondaryLocations": [{"address": {"postalAddress": {"addressCountry": "Canada"}}}]}
     assert ab._to_posting("acme", j2, with_description=False).countries == ["CANADA", "US"]
+    j5 = j | {"location": "New York, NY", "secondaryLocations": [{"location": "Remote"}, {"address": None}]}
+    assert not job_is_us(j5["location"], ab._to_posting("acme", j5, with_description=False).countries)
     j3 = j | {"location": "New York, NY", "secondaryLocations": [{"location": "Toronto"}]}   # secondary without a country
     p3 = ab._to_posting("acme", j3, with_description=False)
     assert not job_is_us(p3.location, p3.countries)
@@ -525,6 +527,11 @@ def test_adapters_extract_structured_countries():
     g2 = g | {"offices": [{"location": "Springfield, Illinois, United States"}, {"location": "Perth, WA"}]}
     p2 = gh._to_posting("acme", g2 | {"location": {"name": "New York, NY"}}, with_description=False)
     assert not job_is_us(p2.location, p2.countries)                   # a non-US office never falls back to the text
+    for offices in ([{"location": "New York, New York, United States"}, {"location": "London, United Kingdom"}],
+                    [{"location": "London, United Kingdom"}], [{"location": "New York, NY"}, {"location": "London"}]):
+        pg = gh._to_posting("acme", g | {"location": {"name": "New York, NY"}, "offices": offices},
+                            with_description=False)
+        assert not job_is_us(pg.location, pg.countries), offices
     p1 = gh._to_posting("acme", g | {"location": {"name": "New York, NY"}, "offices": [{"location": "NYC"}]},
                         with_description=False)
     assert p1.countries == [] and job_is_us(p1.location, p1.countries)                        # single: text fallback
