@@ -29,8 +29,8 @@ defaults or giving the agent a way to grant itself rights.
 ## Consequences
 Residual risk: an agent with shell access as the same OS user can read the file secret (use the keychain) or delete the
 audit tail (undetectable truncation) or the grants file (which only reduces rights).
-*Amended by ADR-0037:* uses are also kept in a signed `used` counter inside each grant record (re-signed per use), so
-truncating the audit tail no longer restores `max_uses`; `grants.use_keyring=false` is honored only from the trusted
+*Amended by ADR-0037:* consumed uses are the max of a signed `used` counter in each grant record, the audit log and a
+high-water mark (keychain or 0600 file), so rolling back any one store no longer restores `max_uses`; `grants.use_keyring=false` is honored only from the trusted
 user config. Grants defend against an agent
 acting through MCP, not against arbitrary local code execution as the owner.
 

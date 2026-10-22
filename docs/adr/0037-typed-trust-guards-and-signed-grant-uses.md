@@ -34,27 +34,31 @@ project file could force the weaker file secret.
   `apply.daily_limit_per_platform`, `apply.run_limit`, `control.params.quota.{per_day,per_platform_per_day,per_run}`,
   `control.apply_enabled`, `control.dev_mode`, `grants.max_duration_s`, `grants.max_uses_cap`,
   `grants.otp_window_min`, `grants.use_keyring` (new), `browser.captcha_handoff` (new).
-- **Signed use counter.** Each grant record carries `used`, part of the HMAC payload. `check()` bumps it and re-signs
-  the record before appending the audit `use` line. The use count comes ONLY from that signed counter, never from the
-  audit log, so a truncated or deleted log cannot hand uses back, and a hand-edited counter fails the signature. A
-  grant id that appears more than once in `grants.json` is treated as tampering: every copy is rejected and a
-  `tampered` audit line is written. Otherwise a copied row would carry its own `used=0`. Records
-  without `used` (issued before this change) are refused; grants live at most 12h, so the human re-issues.
+- **Use count = MAX of three independent stores.** (1) A signed `used` counter inside each grant record (part of
+  the HMAC payload, re-signed per use). (2) The audit log's `use` lines for that grant id. (3) A per-grant high-water
+  mark in the OS keychain (`job-apply-mcp` / `grant-uses:<id>`) when keyring is in use, otherwise in a separate 0600
+  file `<config dir>/grant_uses.json`, written at each use. Rolling back `grants.json`, truncating or deleting
+  `audit.jsonl`, or deleting the high-water file, each alone (or any two together), cannot restore a use. When the
+  stores disagree, `check()` takes the max and writes a `use_count_mismatch` audit line. A hand-edited counter fails
+  the signature check. A grant id that appears more than once in `grants.json` is tampering: every copy is rejected
+  and audited as `tampered` (otherwise a copied row would carry its own counter). Records without `used` (issued
+  before this change) are refused; grants live at most 12h, so the human re-issues them.
 - This replaces ADR-0035's "compare to the default, stay stateless" rule.
 
 ## Consequences
 - A user who relaxed a value in the trusted user file can now have a project/env value *between* default and their
   own value honored (it is tighter than their baseline).
 - Env equal to the user's own relaxed value is no longer dropped (it is not a relaxation).
-- Residual: an attacker with shell access as the same OS user who restores an earlier snapshot of `grants.json` can
-  still restore uses; grants still defend against an agent acting through MCP, not
+- Out of scope: a local attacker with full file (and keychain) access as the same OS user who rolls back ALL THREE
+  stores together (grants.json, audit.jsonl and the high-water mark) can still restore uses; grants still defend against an agent acting through MCP, not
   arbitrary local code execution (ADR-0027 residual risk, narrowed).
 - New guarded settings added later (e.g. a `captcha_policy`) must be added to `_RELAXES` with a typed predicate.
 
 ## Verify
 `uv run pytest tests/test_config_trust.py tests/test_approvals.py tests/test_daily_limit.py tests/test_grants.py`.
 The new file has one string-typed bypass case per guarded key (project file and env), user-tighter-than-default
-cases, audit tail/all/delete truncation, a tampered counter, and `use_keyring` via env.
+cases, invalid caps (0.5, "0.5", -1, "1e9", nan), duplicated grant rows, single-store rollbacks of grants.json,
+audit.jsonl and the high-water file, a tampered counter, and `use_keyring` via env.
 
 ## Revert
 Revert the PR. Guards go back to raw-value, default-relative predicates and uses are counted from the audit log only.
