@@ -154,7 +154,7 @@ async def test_reasons_short_and_output_within_budget(tmp_path):
         respx.get(f"https://boards-api.greenhouse.io/v1/boards/acmeco/jobs/{j['id']}").respond(json=j)
     s = mk(tmp_path, location_order=["a very long preferred location name " * 3, "remote"])
     out = await s.search(query="rust kafka engineer", since_days=0, apply_policy=False)
-    assert out["total"] == 200 and 0 < len(out["rows"]) <= 25 and out["next"] == len(out["rows"])
+    assert out["total"] == 200 and 0 < len(out["rows"]) <= 25 and out["next"].endswith(f":{len(out['rows'])}")
     assert all(len(w) <= 60 and len(r["why"]) <= 3 for r in out["rows"] for w in r["why"])
     import json
     assert len(json.dumps(out, separators=(",", ":"))) <= s.settings.response_budget_chars

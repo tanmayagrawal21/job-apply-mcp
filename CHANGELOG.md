@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Search sessions, per-host rate limits, progress + `search_status` (ADR-0024).
+
 ### Added
 - Resume-first fact precedence, placeholder/addressee/temporal/degeneration/closing lint, comparative quality gate,
   `facts_report` tool, `writing.cover_letter_policy`, tuning degeneration/leakage hard gates (ADR-0023).
