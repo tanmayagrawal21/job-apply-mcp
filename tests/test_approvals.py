@@ -267,3 +267,14 @@ async def test_server_elicit_approver_handles_unsupported_client():
     assert await _elicit_approver(NoSupport())(s) is None
     assert await _elicit_approver(Accept())(s) is True
     assert await _elicit_approver(Decline())(s) is False
+
+
+async def test_error_before_dispatch_is_failed_not_unknown():
+    e, _ = make()
+    out = await e.plan(POSTING.ref)
+
+    async def pre(ctx, eff, dry):          # raises before any adapter/driver call (dispatched flag unset)
+        raise RuntimeError("failed before any click")
+    e._dispatch = pre
+    r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert r.status == "error" and e.approvals.state(POSTING.ref)["state"] == "failed"

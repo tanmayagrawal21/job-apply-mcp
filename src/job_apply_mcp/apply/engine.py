@@ -572,12 +572,15 @@ class ApplyEngine:
                         result = await self._dispatch(ctx, eff, dry)
                 except BaseException as e:  # incl. cancellation: the click may have happened
                     if not dry:
-                        self.approvals.finish(ref, "unknown", f"{type(e).__name__}: {e}"[:200],
+                        st = "unknown" if ctx.meta.get("dispatched") else "failed"   # pre-dispatch is safe to retry
+                        self.approvals.finish(ref, st, f"{type(e).__name__}: {e}"[:200],
                                               evidence_path(self.s.paths.data_dir, ref))
                     raise
                 if not dry:
                     st = {"submitted": "submitted", "roadblock": "failed", "needs_human": "handoff",
                           "duplicate": "failed"}.get(result.status, "unknown")
+                    if result.status == "error" and not ctx.meta.get("dispatched"):
+                        st = "failed"
                     self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
                                           evidence_path(self.s.paths.data_dir, ref))
                 if result.status in ("submitted", "needs_human", "roadblock"):
@@ -611,6 +614,7 @@ class ApplyEngine:
         last = SubmitResult(ref=ref, status="needs_human", detail="no submission path available")
         for path in form.submit_via or ["api", "browser"]:
             if path == "api":
+                ctx.meta["dispatched"] = True
                 res = await ctx.adapter.submit(form, values, files, dry_run=dry)
                 if res.status != "needs_browser":
                     return res
@@ -630,6 +634,7 @@ class ApplyEngine:
             if drv is None:
                 continue
             async with self._browser_sem:
+                ctx.meta["dispatched"] = True
                 last = await drv.fill_and_submit(url, ctx.form, values, files, dry_run=dry)
             if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
                 return last
