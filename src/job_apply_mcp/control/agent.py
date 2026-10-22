@@ -14,6 +14,7 @@ from ..config import Settings
 from . import builtin  # noqa: F401  (registers built-in controls)
 from .controls import (
     ACTION_KINDS,
+    RELEASE,
     SIDE_EFFECTING,
     Context,
     Control,
@@ -177,6 +178,19 @@ class ControlAgent:
                          "w": [v.compact() for v in report.warnings]})
         return report
 
+    async def release(self, ref: str, reason: str) -> None:
+        """Give back the quota of a live `submit` that provably sent nothing (ADR-0032). Audited, replayed."""
+        if not ref:
+            return
+        async with self._lock:
+            now = self.clock()
+            prior = next((e for e in reversed(self.state.events) if e.action == "submit" and e.ref == ref), None)
+            plat, co = (prior.platform, prior.company) if prior else ("", "")
+            self.state.add(UsageEvent(now, RELEASE, ref, plat, co, self.run_id))
+            self._audit({"ts": round(now, 2), "a": RELEASE, "d": "release", "ref": ref, "plat": plat, "co": co,
+                         "dry": False, "run": self.run_id, "n": 1, "reason": str(reason)[:160],
+                         "v": [], "w": []})
+
     async def _evaluate(self, c: Context) -> ControlReport:
         if self.config_error:
             return ControlReport("block", [Violation("config", f"control config invalid: {self.config_error}")])
@@ -230,7 +244,7 @@ class ControlAgent:
                 r = json.loads(line)
             except ValueError:
                 continue
-            if r.get("d") != "pass":
+            if r.get("d") not in ("pass", "release"):
                 v = r.get("v") or [{}]
                 out.append({"a": r["a"], "d": r["d"], "ref": r.get("ref", ""), "why": v[0].get("m", "")})
                 if len(out) >= n:

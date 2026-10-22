@@ -10,6 +10,7 @@ from ..core.registry import Registry
 
 ACTION_KINDS = frozenset({"apply", "submit", "send_message", "write_prose", "merge"})
 SIDE_EFFECTING = frozenset({"apply", "submit", "send_message", "merge"})
+RELEASE = "submit_release"   # audit/usage action that cancels an earlier `submit` for the same ref (ADR-0032)
 SEVERITIES = ("block", "warn")
 
 
@@ -54,14 +55,28 @@ class UsageState:
     def add(self, ev: UsageEvent) -> None:
         self.events.append(ev)
 
+    def _live(self, action_filter: set[str] | frozenset[str]) -> list[UsageEvent]:
+        """Events of the given actions, minus any `submit` that a later `submit_release` for the same ref cancels."""
+        released: set[str] = set()
+        out: list[UsageEvent] = []
+        for e in reversed(self.events):
+            if e.action == RELEASE:
+                if e.ref:
+                    released.add(e.ref)
+            elif e.action == "submit" and e.ref and e.ref in released:
+                continue
+            if e.action in action_filter:
+                out.append(e)
+        return out
+
     def count(self, *, actions: set[str] | frozenset[str], since: float = 0.0, run: str | None = None,
               platform: str | None = None) -> int:
-        return sum(1 for e in self.events
-                   if e.action in actions and e.ts >= since and (run is None or e.run == run)
+        return sum(1 for e in self._live(actions)
+                   if e.ts >= since and (run is None or e.run == run)
                    and (platform is None or e.platform == platform))
 
     def seen_ref(self, ref: str, actions: set[str] | frozenset[str], since: float) -> bool:
-        return any(e.ref == ref and e.action in actions and e.ts >= since for e in self.events)
+        return any(e.ref == ref and e.ts >= since for e in self._live(actions))
 
 
 @dataclass
