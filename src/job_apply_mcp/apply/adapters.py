@@ -7,7 +7,24 @@ from typing import Any, ClassVar
 
 from ..config import Settings
 from ..core.models import ApplicationForm, GateResult, Posting
+from .mapper import is_us_country
 from .ports import ComponentMissing
+
+_CO_SUFFIX = frozenset(["inc", "llc", "ltd", "corp", "corporation", "co", "company", "technologies", "technology",
+                        "labs", "group", "holdings", "the", "usa", "us", "global", "incorporated", "limited"])
+
+
+def _co_key(name: str) -> str:
+    toks = [t for t in re.sub(r"[^a-z0-9]+", " ", str(name).lower()).split() if t not in _CO_SUFFIX]
+    return "".join(toks)
+
+
+def same_company(a: str, b: str) -> bool:
+    """Alias-tolerant employer match: legal suffixes ignored, "DoorDash" == "DoorDash USA" == "Door Dash Inc"."""
+    ka, kb = _co_key(a), _co_key(b)
+    if not ka or not kb:
+        return False
+    return ka == kb or (min(len(ka), len(kb)) >= 5 and (ka.startswith(kb) or kb.startswith(ka)))
 
 
 class ProfileView:
@@ -96,7 +113,35 @@ class ProfileView:
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
                 "open_to_onsite": pr.open_to_onsite}.get(key)
 
+    def _citizenship_country(self) -> str | None:
+        """[authorization].citizenship, else the user's own "country of citizenship" answer (never a Yes/No)."""
+        c = (self.p.authorization.citizenship or self.p.answer_for("country of citizenship") or "").strip()
+        return None if not c or c.lower() in ("yes", "no") else c
+
+    def _gpa(self, level: str) -> str | None:
+        """Education `gpa` for the degree level asked ('undergrad' | 'graduate' | 'doctorate'); 'any' only when
+        exactly one education row has a gpa. Ambiguous or missing -> None (never guessed)."""
+        from .mapper import degree_level
+        want = {"undergrad": "Bachelor", "graduate": "Master", "doctorate": "Doctor"}.get(level)
+        rows = [e for e in self.p.education if (e.gpa or "").strip()]
+        rows = [e for e in rows if degree_level(e.degree) == want] if want else rows
+        vals = {e.gpa.strip() for e in rows}
+        return vals.pop() if len(vals) == 1 else None
+
+    def _employers(self) -> list[str]:
+        orgs = [w.company for w in self.p.work]
+        return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
+
     def _derived(self, key: str) -> Any | None:
+        if key == "citizenship_country":
+            return self._citizenship_country()
+        if key.startswith("gpa:"):
+            return self._gpa(key[4:])
+        if key.startswith("employer:"):
+            want = key[9:]
+            return "Yes" if any(same_company(o, want) for o in self._employers()) else None
+        if key == "us_citizen" and self._structured(key) is None and (c := self._citizenship_country()):
+            return self._TRI[is_us_country(c)]
         if key == "years_experience":
             from .derive import total_years
             return total_years(self._experience_spans())
@@ -121,8 +166,8 @@ class ProfileView:
         return None
 
     def lookup(self, key: str) -> Any | None:
-        if key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite",
-                   "relocation_support", "open_to_hybrid") or key.startswith("referral:"):
+        if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
+                    "open_to_hybrid", "citizenship_country") or key.startswith(("referral:", "gpa:", "employer:"))):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v

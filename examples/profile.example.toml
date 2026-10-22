@@ -43,6 +43,7 @@ Python = 3
 work_authorized = true
 requires_sponsorship = false
 citizen = true
+# citizenship = "Canada"        # country of citizenship (optional); "Citizenship Status" never picks a citizen option unless US
 
 [preferences]
 willing_to_relocate = true
