@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 ## [Unreleased]
 
 ### Added
+- Resume-first fact precedence, placeholder/addressee/temporal/degeneration/closing lint, comparative quality gate,
+  `facts_report` tool, `writing.cover_letter_policy`, tuning degeneration/leakage hard gates (ADR-0023).
 - `job-apply-mcp` CLI with subcommands `serve` (default, stdio), `init`, `doctor`, `version`; `python -m job_apply_mcp`;
   console script `job-apply-mcp-init` (ADR-0020).
 - Setup wizard: creates `config.toml`, `profile.toml`, `controls.toml` from the fictional examples, detects

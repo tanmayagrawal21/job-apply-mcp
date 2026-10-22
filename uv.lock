@@ -1611,6 +1611,9 @@ litellm = [
 mlx = [
     { name = "mlx-lm" },
 ]
+resume = [
+    { name = "pypdf" },
+]
 tune = [
     { name = "mlx-lm" },
 ]
@@ -1627,6 +1630,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'agent'", specifier = ">=1.45,<2" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.45,<2" },
     { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pypdf", marker = "extra == 'resume'", specifier = ">=4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-jobspy", marker = "extra == 'jobspy'", specifier = ">=1.1" },
@@ -1634,7 +1638,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.44,<5" },
 ]
-provides-extras = ["jobspy", "browser", "agent", "hf", "litellm", "mlx", "tune", "keyring", "dev"]
+provides-extras = ["jobspy", "browser", "agent", "hf", "litellm", "mlx", "tune", "keyring", "resume", "dev"]
 
 [[package]]
 name = "joserfc"

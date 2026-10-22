@@ -225,6 +225,7 @@ class ApplyEngine:
                 audit.setdefault("salary", sal_decision.audit)
             else:
                 rest.append(f)
+        rest = [f for f in rest if not self._skip_cover(f)]
         with self._stage(ref, "map"):  # deterministic first
             mapped = map_fields(rest, self.profile, referral_preference=self.s.apply.referral_preference,
                                 min_score=self.s.apply.option_min_score)
@@ -263,6 +264,11 @@ class ApplyEngine:
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}))
+
+    def _skip_cover(self, f: FormField) -> bool:
+        """Cover letters only when the form requires one (writing.cover_letter_policy, ADR-0023)."""
+        return ("cover" in normalize(f.label) and not f.required
+                and self.s.writing.cover_letter_policy != "always")
 
     def _is_short(self, f: FormField) -> bool:
         if f.kind == FieldKind.file:
@@ -389,8 +395,9 @@ class ApplyEngine:
         avail = getattr(self.router, "available", None)
         todo: list[FormField] = []
         for f in fields:
-            wanted = f.required or self.s.apply.write_optional
-            if f.kind == FieldKind.textarea and wanted and self._llm_allowed(f):
+            wanted = f.required or self.s.apply.write_optional or "cover" in normalize(f.label)
+            if (f.kind == FieldKind.textarea and wanted and self._llm_allowed(f)
+                    and not ("cover" in normalize(f.label) and self.s.writing.cover_letter_policy == "never")):
                 todo.append(f)
             else:
                 rest.append(f)
@@ -406,7 +413,8 @@ class ApplyEngine:
             return await write_text(
                 self.router, self.s.writing, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
                 company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
-                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "")
+                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
+                resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None))
 
         with self._stage(ctx.form.ref, "write"):
             results = await bounded_gather((one(f) for f in todo), self.s.concurrency.global_limit)
@@ -416,10 +424,11 @@ class ApplyEngine:
             elif res.status == "pass":
                 written.append(Answer(key=f.key, value=res.text, source="llm:narrative"))
             elif res.status == "needs_review":
-                tasks.append(self._task(f, ctx, {"draft": res.text, "review": res.rubric}))
+                tasks.append(self._task(f, ctx, {"draft": res.text, "review": res.rubric, "scorecard": res.scorecard}))
             else:
                 tasks.append(self._task(f, ctx, {"draft": res.text, "needs_human": True,
-                                                 "violations": [v.line() for v in res.violations][:6]}))
+                                                 "violations": [v.line() for v in res.violations][:6],
+                                                 "scorecard": res.scorecard}))
         return written, rest, tasks
 
     # ----------------------------------------------------------------- submit

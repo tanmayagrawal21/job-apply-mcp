@@ -18,6 +18,52 @@ class ProfileView:
         self.p = profile
         self.resume_path = settings.paths.resume
         self.cover_letter_path: str | None = None
+        self.settings = settings
+        self._fs: Any = None
+        self._corpus: list[str] | None = None
+
+    # -- resume-first facts (ADR-0023) ------------------------------------------------------------
+    @property
+    def fact_set(self) -> Any:
+        """Precedence-resolved facts: resume (1) > profile and non-conflicting user-letter facts (2)."""
+        if self._fs is None:
+            from ..profile.facts import resolve_facts
+            from ..profile.resume import load_resume
+            from ..writing.quality import read_corpus
+            resume: list[Any] = []
+            if self.resume_path:
+                try:
+                    resume = load_resume(self.resume_path)
+                except (OSError, RuntimeError):
+                    resume = []
+            w = self.settings.writing
+            letters = read_corpus([x for x in [w.style_exemplar, *w.style_corpus] if x])
+            self._fs = resolve_facts(resume, self.p, letters)
+        return self._fs
+
+    @property
+    def resume_facts(self) -> list[Any]:
+        return self.fact_set.resume
+
+    @property
+    def corpus(self) -> list[str]:
+        """The user's own letters (exemplar + style_corpus + user-trusted cover letters in provenance)."""
+        if self._corpus is None:
+            from ..writing.quality import read_corpus
+            w = self.settings.writing
+            c = read_corpus([x for x in [w.style_exemplar, *w.style_corpus] if x])
+            try:
+                from pathlib import Path
+
+                from ..provenance import ProvenanceStore
+                from ..provenance.models import USER_TRUSTED
+                db = self.settings.provenance.db_path or Path(self.settings.paths.data_dir).expanduser() / "provenance.db"
+                if Path(db).is_file():
+                    c += [r.text for r in ProvenanceStore(db).list_by_origin(USER_TRUSTED, ["cover_letter"])][:8]
+            except Exception:  # noqa: BLE001, S110
+                pass
+            self._corpus = c[:8]
+        return self._corpus
 
     def _current_work(self):
         cur = [w for w in self.p.work if not w.end]
@@ -51,16 +97,12 @@ class ProfileView:
         return self.p.answer_for(q) or self.p.demographic_for(q)
 
     def facts(self, topic: str = "", limit: int = 12) -> list[str]:
-        rows: list[str] = []
-        for w in self.p.work:
-            rows.append(f"{w.title} at {w.company} ({w.start}-{w.end or 'present'}): {w.summary}".strip(": "))
-        for e in self.p.education:
-            rows.append(f"{e.degree} in {e.field}, {e.school} (to {e.end})".replace("  ", " "))
-        if self.p.skills:
-            rows.append("Skills: " + ", ".join(self.p.skills))
+        """Only the precedence-resolved fact set (ADR-0023): never raw letters or unresolved profile text."""
+        rows = list(self.fact_set.lines)
         words = set(re.findall(r"[a-z]{4,}", topic.lower()))
-        rows.sort(key=lambda r: -len(words & set(re.findall(r"[a-z]{4,}", r.lower()))))
-        return [r[:300] for r in rows[:limit]]
+        rows.sort(key=lambda r: (r.startswith("TIMELINE"), -len(words & set(re.findall(r"[a-z]{4,}", r.lower())))))
+        keep = [r for r in rows if not r.startswith("TIMELINE")][:limit]
+        return [r[:300] for r in keep]
 
 
 class PolicyGates:
