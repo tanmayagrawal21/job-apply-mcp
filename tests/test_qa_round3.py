@@ -499,6 +499,12 @@ def test_adapters_extract_structured_countries():
     assert lv._to_posting("acme", d, with_description=False).countries == ["US"]
     assert lv._to_posting("acme", d | {"country": "AU"}, with_description=False).countries == ["AU"]
     assert lv._to_posting("acme", {k: v for k, v in d.items() if k != "country"}, with_description=False).countries == []
+    multi = d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY", "Toronto, ON"]}}
+    pm = lv._to_posting("acme", multi, with_description=False)
+    assert not job_is_us(pm.location, pm.countries)
+    same = d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY"]}}
+    ps = lv._to_posting("acme", same, with_description=False)
+    assert job_is_us(ps.location, ps.countries)
     ab = AshbyAdapter(None, env={})
     j = {"id": "x2", "title": "Engineer", "location": "Springfield",
          "address": {"postalAddress": {"addressCountry": "United States"}},
@@ -506,10 +512,19 @@ def test_adapters_extract_structured_countries():
     assert ab._to_posting("acme", j, with_description=False).countries == ["US"]
     j2 = j | {"secondaryLocations": [{"address": {"postalAddress": {"addressCountry": "Canada"}}}]}
     assert ab._to_posting("acme", j2, with_description=False).countries == ["CANADA", "US"]
-    assert ab._to_posting("acme", j | {"address": None}, with_description=False).countries == []
+    j3 = j | {"location": "New York, NY", "secondaryLocations": [{"location": "Toronto"}]}   # secondary without a country
+    p3 = ab._to_posting("acme", j3, with_description=False)
+    assert not job_is_us(p3.location, p3.countries)
+    p4 = ab._to_posting("acme", {"id": "x3", "title": "E", "location": "New York, NY"}, with_description=False)
+    assert p4.countries == [] and job_is_us(p4.location, p4.countries)                        # single: text fallback
+    assert not job_is_us(p3.location, ab._to_posting("acme", j2, with_description=False).countries)
     gh = GreenhouseAdapter(None, env={})
     g = {"id": 1, "title": "Engineer", "location": {"name": "Springfield"},
          "offices": [{"location": "Springfield, Illinois, United States"}]}
     assert gh._to_posting("acme", g, with_description=False).countries == ["US"]
     g2 = g | {"offices": [{"location": "Springfield, Illinois, United States"}, {"location": "Perth, WA"}]}
-    assert gh._to_posting("acme", g2, with_description=False).countries == []
+    p2 = gh._to_posting("acme", g2 | {"location": {"name": "New York, NY"}}, with_description=False)
+    assert not job_is_us(p2.location, p2.countries)                   # a non-US office never falls back to the text
+    p1 = gh._to_posting("acme", g | {"location": {"name": "New York, NY"}, "offices": [{"location": "NYC"}]},
+                        with_description=False)
+    assert p1.countries == [] and job_is_us(p1.location, p1.countries)                        # single: text fallback

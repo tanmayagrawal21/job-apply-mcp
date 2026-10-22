@@ -54,7 +54,16 @@ class LeverAdapter(BaseAdapter):
                  location=cat.get("location") or "", url=d.get("hostedUrl") or f"https://jobs.lever.co/{board}/{d['id']}",
                  apply_url=d.get("applyUrl") or f"https://jobs.lever.co/{board}/{d['id']}/apply",
                  posted_at=iso_date(d.get("createdAt")),
-                 countries=[c] if (c := self.country_code(d.get("country"))) else [])
+                 countries=self._countries(d, cat))
+
+    def _countries(self, d: dict, cat: dict) -> list[str]:
+        """Lever's `country` covers the primary location only; any other location makes the set unconfirmed, so
+        job_is_us() is False (deny-by-default, ADR-0040)."""
+        c = self.country_code(d.get("country"))
+        if not c:
+            return []
+        others = [x for x in cat.get("allLocations") or [] if x and x != cat.get("location")]
+        return [c] if not others else [c, "UNCONFIRMED"]
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:

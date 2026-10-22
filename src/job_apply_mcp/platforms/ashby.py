@@ -48,10 +48,14 @@ class AshbyAdapter(BaseAdapter):
                  posted_at=iso_date(j.get("publishedAt")), countries=self._countries(j))
 
     def _countries(self, j: dict) -> list[str]:
-        """addressCountry of the primary and every secondary location (ADR-0040); any missing -> unknown ([])."""
-        addrs = [j.get("address")] + [s.get("address") for s in j.get("secondaryLocations") or [] if isinstance(s, dict)]
+        """addressCountry of the primary and every secondary location (ADR-0040). A single location without a country
+        -> unknown ([], text fallback); with secondary locations, any missing country -> unconfirmed (never US)."""
+        secondary = [s for s in j.get("secondaryLocations") or [] if isinstance(s, dict)]
+        addrs = [j.get("address")] + [s.get("address") for s in secondary]
         codes = [self.country_code(((a or {}).get("postalAddress") or {}).get("addressCountry")) for a in addrs]
-        return sorted(set(codes)) if codes and all(codes) else []  # type: ignore[arg-type]
+        if all(codes):
+            return sorted(set(codes))  # type: ignore[arg-type]
+        return ["UNCONFIRMED"] if secondary else []
 
     async def _board(self, board: str) -> list[dict]:
         try:

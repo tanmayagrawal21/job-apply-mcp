@@ -72,7 +72,7 @@ A QA round (issues #47, #48, #51) found:
   States", or a US-only visa type such as H-1B, OPT, CPT, E-3); a place-less "Will you require sponsorship?" stays
   unresolved. Confirmation (`job_is_us`) uses STRUCTURED adapter metadata first: `Posting.countries` from Lever
   `country`, Ashby `address.postalAddress.addressCountry` (primary and secondary locations) and Greenhouse offices
-  whose location ends in "United States"; exactly ["US"] (and no foreign country in the text) confirms. Only when the
+  whose location ends in "United States"; exactly ["US"] (and no foreign country in the text) confirms. A location without a country among several (Lever allLocations, Ashby secondaryLocations, Greenhouse offices) makes the set unconfirmed, never US. Only when the
   adapter gives no country does the free-text heuristic decide, and there only the LAST comma component counts ("US"
   marker, full state name, or "City, ST"); "(US)" parentheticals are kept as a US marker, others are dropped.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
