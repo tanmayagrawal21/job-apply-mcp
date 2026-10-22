@@ -79,6 +79,15 @@ class Profile(BaseModel):
     answer_synonyms: list[list[str]] = Field(default_factory=list)
     answer_synonyms_mode: str = "extend"   # "extend" adds to the defaults; "replace" uses only answer_synonyms ([] = off)
 
+    def education_rows(self) -> list[dict[str, str]]:
+        """Generic education list for ATS education blocks, most recent first (ADR-0029). Years are 4-digit strings."""
+        def yr(v: str) -> str:
+            return v[:4] if re.fullmatch(r"\d{4}(-\d{2})?", v or "") else ""
+        rows = sorted(self.education, key=lambda e: e.end or "9999", reverse=True)
+        return [{"school": e.school, "degree": e.degree, "discipline": e.field, "start_year": yr(e.start),
+                 "end_year": yr(e.end), "start_month": (e.start[5:7] if len(e.start) >= 7 else ""),
+                 "end_month": (e.end[5:7] if len(e.end) >= 7 else ""), "gpa": e.gpa} for e in rows]
+
     def graduation(self) -> str | None:
         """Latest education end date (YYYY-MM), for PolicyCfg.graduation."""
         ends = sorted(e.end for e in self.education if e.end)

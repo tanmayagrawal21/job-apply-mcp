@@ -376,3 +376,56 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         else:
             res.answers.append(Answer(key=f.key, value=coerced, source="profile" if ck is None else f"rule:{ck}"))
     return res
+
+
+# ---------------------------------------------------------------- education block (ADR-0029)
+_LEVELS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bm\.?b\.?a\b|business administration", re.IGNORECASE), "M.B.A"),
+    (re.compile(r"ph\.?\s?d|doctor", re.IGNORECASE), "Doctor"),
+    (re.compile(r"\bmaster|\bm\.?\s?(s|a|eng|tech)\b\.?|\bmsc\b|\bmeng\b", re.IGNORECASE), "Master"),
+    (re.compile(r"\bbachelor|\bb\.?\s?(s|a|e|eng|tech)\b\.?|\bbsc\b|\bbtech\b", re.IGNORECASE), "Bachelor"),
+    (re.compile(r"\bassociate", re.IGNORECASE), "Associate"),
+    (re.compile(r"high school|\bged\b", re.IGNORECASE), "High School"),
+]
+
+
+def degree_level(value: str) -> str | None:
+    return next((lvl for rx, lvl in _LEVELS if rx.search(value or "")), None)
+
+
+def pick_degree(value: str, options: list[str]) -> str | None:
+    """Snap a free-text degree ("Master of Science", "BS") onto an option such as "Master's Degree".
+    Never crosses levels and never turns a generic master's into an MBA."""
+    if not value or not options:
+        return None
+    if (hit := next((o for o in options if normalize(o) == normalize(value)), None)):
+        return hit
+    lvl = degree_level(value)
+    if lvl is None:
+        return best_option(value, options, cutoff=0.9)
+    key = lvl.lower()
+    cands = [o for o in options if key in o.lower()]
+    if lvl != "M.B.A":
+        cands = [o for o in cands if "m.b.a" not in o.lower() and "business administration" not in o.lower()]
+    plain = [o for o in cands if re.fullmatch(rf"{re.escape(key)}(?:'?s)? degree", o.lower().strip())]
+    if plain:
+        return plain[0]
+    return cands[0] if len(cands) == 1 else None
+
+
+def degree_queries(value: str) -> list[str]:
+    lvl = degree_level(value)
+    return [lvl] if lvl else [value]
+
+
+def pick_school(value: str, options: list[str]) -> str | None:
+    """Exact (normalised) school match, else an "Other" option, else None. Never a different school."""
+    if not value:
+        return None
+    return (next((o for o in options if normalize(o) == normalize(value)), None)
+            or next((o for o in options if normalize(o) == "other"), None))
+
+
+def discipline_queries(value: str) -> list[str]:
+    words = [w for w in re.split(r"[\s,/&-]+", value or "") if len(w) > 2]
+    return [value, *words[:1]] if value else []

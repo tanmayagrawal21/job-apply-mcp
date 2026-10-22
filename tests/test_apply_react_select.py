@@ -183,3 +183,76 @@ def test_located_in_us_maps_from_country():
     from job_apply_mcp.apply.mapper import canonical_key
     assert canonical_key("Are you currently located in the US?") == "located_in_us"
     assert canonical_key("Are you currently based in or willing to relocate to the Bay Area?") == "willing_to_relocate"
+
+
+EDU_HTML = """<html><body><form id=f>
+<label for=school--0>School *</label><div id="school--0_wrap"></div>
+<label for=degree--0>Degree *</label><div id="degree--0_wrap"></div>
+<label for=discipline--0>Discipline *</label><div id="discipline--0_wrap"></div>
+<label for=start-year--0>Start date year *</label><input id=start-year--0 type=number required>
+<label for=end-year--0>End date year *</label><input id=end-year--0 type=number required>
+<button type=button>Add another</button><button type=submit>Submit application</button></form>
+<script>__RS__
+const SCHOOLS = __SCHOOLS__;
+rs('school--0', SCHOOLS, {delay: 200});
+rs('degree--0', ["Bachelor's Degree", 'Master of Business Administration (M.B.A.)', "Master's Degree"]);
+rs('discipline--0', ['Computer Science', 'Biology', 'Physics']);
+['school--0', 'degree--0', 'discipline--0'].forEach(i => document.getElementById(i).setAttribute('aria-required', 'true'));
+function report() { fetch('/state', {method: 'POST', body: JSON.stringify({vals: [...document.querySelectorAll('.select__single-value')].map(x => x.textContent),
+  sy: document.getElementById('start-year--0').value, ey: document.getElementById('end-year--0').value})}); }
+new MutationObserver(report).observe(document.body, {subtree: true, childList: true}); report();
+['start-year--0', 'end-year--0'].forEach(i => document.getElementById(i).addEventListener('input', report));
+</script></body></html>"""
+
+EDU_ROW = {"school": "Springfield State University", "degree": "Master of Science", "discipline": "Computer Science",
+           "start_year": "2022", "end_year": "2024"}
+
+
+async def _edu_run(drv, schools, row=None):
+    html = EDU_HTML.replace("__RS__", RS_JS).replace("__SCHOOLS__", json.dumps(schools))
+    srv, posts = _serve(html)
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/3",
+                                    ApplicationForm(ref="greenhouse:acme:3", fields=[]), {"education:0": row or EDU_ROW},
+                                    {}, dry_run=True)
+    st = [p for p in posts if p[0] == "/state"]
+    return res, (json.loads(st[-1][1]) if st else {})
+
+
+async def test_education_block_filled_and_read_back(drv):
+    res, st = await _edu_run(drv, ["Springfield University", "Springfield State University", "Other"])
+    assert res.status == "dry_run", res.detail
+    assert st["vals"] == ["Springfield State University", "Master's Degree", "Computer Science"]
+    assert (st["sy"], st["ey"]) == ("2022", "2024")
+
+
+async def test_education_unknown_school_uses_other_never_a_different_school(drv):
+    res, st = await _edu_run(drv, ["Springfield University", "Springfield State University Online", "Other"],
+                             {**EDU_ROW, "school": "Springfield State"})
+    assert res.status == "dry_run", res.detail
+    assert st["vals"][0] == "Other"
+
+
+async def test_education_unknown_school_without_other_stays_empty(drv):
+    res, st = await _edu_run(drv, ["Springfield University", "Shelbyville College"])
+    assert res.status == "incomplete" and "School" in res.detail, res.detail
+    assert "Springfield University" not in st["vals"] and "Shelbyville College" not in st["vals"]
+
+
+def test_education_pure_helpers():
+    from job_apply_mcp.apply.mapper import pick_degree, pick_school
+    opts = ["Associate's Degree", "Bachelor's Degree", "Master of Business Administration (M.B.A.)", "Master's Degree"]
+    assert pick_degree("Master of Science", opts) == "Master's Degree"
+    assert pick_degree("M.S.", opts) == "Master's Degree"
+    assert pick_degree("BS", opts) == "Bachelor's Degree"
+    assert pick_degree("MBA", opts) == "Master of Business Administration (M.B.A.)"
+    assert pick_degree("Master of Science", ["Master of Business Administration (M.B.A.)"]) is None
+    assert pick_school("University of Springfield", ["University of Springfield Global", "Other"]) == "Other"
+    assert pick_school("University of Springfield", ["University of Springfield Global"]) is None
+
+
+def test_profile_education_rows_newest_first():
+    from job_apply_mcp.profile import Education, Profile
+    p = Profile(education=[Education(school="A", start="2016-08", end="2020-05"),
+                           Education(school="B", degree="MS", field="CS", start="2022-08", end="2024-05")])
+    r = p.education_rows()
+    assert [x["school"] for x in r] == ["B", "A"] and r[0]["start_year"] == "2022" and r[0]["discipline"] == "CS"

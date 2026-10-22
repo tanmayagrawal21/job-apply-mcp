@@ -33,8 +33,12 @@ from .mapper import (
     best_option,
     canonical_key,
     decline_option,
+    degree_queries,
+    discipline_queries,
     exact_option,
     normalize,
+    pick_degree,
+    pick_school,
 )
 from .verification import VerificationMixin
 
@@ -381,6 +385,7 @@ class PlaywrightDriver(VerificationMixin):
             return SubmitResult(ref=ref, status="needs_human", via="browser",
                                 detail=f"could not fill/verify: {problems[:8]}{ev}")
         await self._fill_demographics(page, answers)
+        await self._fill_education(page, answers)
         empty = await self._empty_required(page)
         if empty:                                   # late re-renders (resume parse) can wipe a field: refill once
             ids = {e["id"] for e in empty}
@@ -709,6 +714,93 @@ class PlaywrightDriver(VerificationMixin):
                     await self._close_menu(page)
             except Exception:
                 await self._close_menu(page)
+
+    async def _rs_pick(self, page, el_id: str, queries: list[str], choose) -> str | None:
+        """Type each query into the react-select `el_id`, let `choose(option_texts)` pick, CLICK it and confirm
+        it shows as this select's value. Returns the committed text, or None (field left empty)."""
+        loc = page.locator(f'[id="{el_id}"]').first
+        try:
+            await loc.scroll_into_view_if_needed()
+            marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
+        except Exception:
+            return None
+        scope = page.locator("[data-jam-scope]") if marked else None
+        opts = (scope or page).locator(_MENU_SCOPED)
+        for q in queries:
+            try:
+                await loc.click()
+                await loc.press("ControlOrMeta+a")
+                await loc.press("Backspace")
+                await loc.press_sequentially(q, delay=15)
+                try:
+                    await opts.first.wait_for(state="visible", timeout=3500)
+                except Exception:
+                    continue
+                await asyncio.sleep(0.3)                  # async lists redraw after the first paint
+                texts = [t.strip() for t in await opts.all_inner_texts()]
+                pick = choose(texts)
+                if pick is None or pick not in texts:
+                    continue
+                await opts.nth(texts.index(pick)).click(timeout=3000)
+                if await self._committed(page, scope, pick):
+                    return pick
+            except Exception:
+                pass
+            await self._close_menu(page)
+        await self._close_menu(page)
+        return None
+
+    async def _fill_education(self, page, answers: dict[str, Any]) -> None:
+        """Greenhouse job-boards Education block, entry 0 = most recent degree (ADR-0029). School must match
+        exactly (else an 'Other' option, else left empty); degree and discipline snap to the offered options;
+        years are typed and read back. Anything not filled stays empty and the run reports `incomplete`."""
+        row = answers.get("education:0")
+        if not isinstance(row, dict) or not await page.locator(
+                "[id='school--0'], [id='degree--0'], [id='discipline--0'], [id='end-year--0']").count():
+            return                                   # some boards ask only degree / discipline / end year
+
+        async def present(el_id: str) -> bool:
+            return bool(await page.locator(f'[id="{el_id}"]').count())
+
+        async def has_value(el_id: str) -> bool:
+            try:
+                loc = page.locator(f'[id="{el_id}"]').first
+                if not await loc.evaluate(_MARK_SCOPE_JS):
+                    return False
+                return bool(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).count())
+            except Exception:
+                return False
+
+        school, degree, disc = (str(row.get(k) or "").strip() for k in ("school", "degree", "discipline"))
+        if school and await present("school--0") and not await has_value("school--0"):
+            await self._rs_pick(page, "school--0", [school, "Other"], lambda t: pick_school(school, t))
+        if degree and await present("degree--0") and not await has_value("degree--0"):
+            await self._rs_pick(page, "degree--0", degree_queries(degree), lambda t: pick_degree(degree, t))
+        if disc and await present("discipline--0") and not await has_value("discipline--0"):
+            await self._rs_pick(page, "discipline--0", discipline_queries(disc), lambda t: best_option(disc, t))
+        for el_id, key in (("start-year--0", "start_year"), ("end-year--0", "end_year")):
+            want = str(row.get(key) or "")
+            loc = page.locator(f'[id="{el_id}"]').first
+            if not want or not await loc.count():
+                continue
+            try:
+                if (await loc.input_value()).strip() == want:
+                    continue
+                await loc.click()
+                await loc.press("ControlOrMeta+a")
+                await loc.press("Backspace")
+                await loc.press_sequentially(want, delay=15)
+                if (await loc.input_value()).strip() != want:
+                    await loc.fill("")                       # wrong read-back: leave empty -> incomplete
+            except Exception:
+                pass
+        for el_id, key in (("start-month--0", "start_month"), ("end-month--0", "end_month")):
+            mm = str(row.get(key) or "")
+            if not (mm.isdigit() and 1 <= int(mm) <= 12) or not await page.locator(f'[id="{el_id}"]').count():
+                continue
+            name = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][int(mm) - 1]
+            if not await has_value(el_id):
+                await self._rs_pick(page, el_id, [name], lambda t, n=name: next((o for o in t if normalize(o) == normalize(n)), None))
 
     async def _ensure_phone_country(self, page) -> bool:
         """Intl-tel widgets reset the number when the country changes: pick United States (+1) BEFORE typing the phone."""
