@@ -124,7 +124,7 @@ class Profile(BaseModel):
                     best = (len(pat), val)
                 continue
             p = normalize_question(pat)
-            if p and (p in q or _synonym_hit(q, p, groups)) and (best is None or len(p) > best[0]):
+            if p and (re.search(rf"\b{re.escape(p)}\b", q) or _synonym_hit(q, p, groups)) and (best is None or len(p) > best[0]):
                 best = (len(p), val)
         return best[1] if best else None
 

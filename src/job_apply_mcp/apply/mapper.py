@@ -559,6 +559,9 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         if value is None:
             value = profile.lookup(normalize(f.label))
         coerced = _coerce(f, value, min_score) if value is not None else None
+        if (coerced is not None and ck is None and not f.options and f.kind in (FieldKind.text, FieldKind.textarea)
+                and normalize(str(coerced)) in ("yes", "no") and not _YESNO_STYLE.search(normalize(f.label))):
+            coerced = None                       # a saved Yes/No never goes into a free-text question
         if coerced is None or coerced == "":
             res.unresolved.append(f)
         else:

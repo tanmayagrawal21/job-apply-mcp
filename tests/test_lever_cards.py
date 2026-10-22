@@ -82,3 +82,15 @@ def test_llm_null_string_is_never_an_answer():
     f = F("q", "Which event did you attend?", K.text)
     assert e._accept(f, {"value": "null", "confidence": 1.0}) is None
     assert e._accept(f, {"value": "None", "confidence": 1.0}) is None
+
+
+def test_saved_yesno_answer_never_lands_in_preferred_name_field():
+    """Regression: saved answer 'referred' -> 'No' matched inside the word 'preferred'."""
+    label = ("What is your preferred first name and last name? If your legal first and last name is your "
+             "preferred name, you do not need to respond.")
+    prof = Profile(answers={"referred": "No"}, authorization=Authorization(work_authorized=True))
+    f = parse_cards(page())[0].model_copy(update={"label": label, "required": False})
+    r = map_fields([f], ProfileView(prof, Settings()), company="Springfield Robotics")
+    assert r.answers == []
+    assert prof.answer_for("Were you referred by an employee?") == "No"
+    assert prof.answer_for("What is your preferred name?") is None

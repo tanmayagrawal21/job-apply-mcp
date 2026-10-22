@@ -24,3 +24,9 @@ One more request per Lever form. Field order index relies on Lever keeping `fiel
 ## Verify / revert
 `uv run pytest tests/test_lever_cards.py tests/test_apply_browser_local.py -k "lever or card"`; dry-run
 `lever:acceldata:c12c39cb-68c1-45ae-9a88-601e297957b1`. Revert the PR.
+
+## Addendum: saved-answer matching
+`Profile.answer_for` matched plain patterns as substrings, so the saved answer `referred` -> "No" fired inside the
+word "preferred" and typed "No" into a name question. Plain patterns now match on word boundaries, and the mapper
+refuses a saved Yes/No answer for a free-text field whose label is not a yes/no question (it stays unresolved; an
+optional field is left empty). Regression: `test_saved_yesno_answer_never_lands_in_preferred_name_field`.
