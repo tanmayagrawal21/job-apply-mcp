@@ -27,7 +27,10 @@ async def main() -> None:
     p = OllamaProvider(**{**cfg.providers.get("ollama", {}), "timeout_s": 180})
     if not await p.available():
         raise SystemExit("Ollama not reachable")
-    tiers = {t.model: t for t in (*cfg.tiers.values(), *cfg.task_tiers.values()) if t.provider == "ollama"}
+    tiers: dict = {}
+    for t in (*cfg.tiers.values(), *cfg.task_tiers.values()):   # first (cheapest) config per model wins
+        if t.provider == "ollama":
+            tiers.setdefault(t.model, t)
     models = [m for m in a.models.split(",") if m] or list(tiers)
     have = set(await p.list_models())
     print(f"{'model':28} {'cold_s':>7} {'warm_ms':>8} {'tok/s':>7} {'tokens':>7}")
