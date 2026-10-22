@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -566,7 +567,28 @@ for _k in CAP_DEFAULTS:
     _RELAXES[("apply", _k)] = _loosens
 
 _INVALID = object()
-_INT = TypeAdapter(int)
+_DIGITS = re.compile(r"[0-9]+")
+
+
+def parse_cap(v: Any) -> int | None:
+    """Strict submission-cap parse (ADR-0037): a non-negative whole number given as an int or a string of ASCII
+    digits. Floats (0.5, 1e9, nan), negatives, bools and anything else -> None (invalid; callers fail closed)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v if v >= 0 else None
+    if isinstance(v, str) and _DIGITS.fullmatch(v.strip()):
+        return int(v.strip())
+    return None
+
+
+def _stricter_cap(a: int, b: int) -> int:
+    """The tighter of two caps where 0 = no limit."""
+    if a == 0:
+        return b
+    if b == 0:
+        return a
+    return min(a, b)
 
 
 def _adapter(sect: str | None, key: str) -> TypeAdapter:
@@ -597,8 +619,8 @@ def _legacy_base(base: Settings, key: str) -> int:
     """Effective baseline for a legacy quota key: the baseline's legacy value when set, else its apply.* cap."""
     q = base.control.params.get("quota", {})
     if key in q:
-        v = _typed(_INT, q[key])
-        if v is not _INVALID:
+        v = parse_cap(q[key])
+        if v is not None:
             return v
     return getattr(base.apply, LEGACY_QUOTA_KEYS[key])
 
@@ -616,10 +638,43 @@ def _relaxations(d: dict, base: Settings) -> tuple[list[tuple[str | None, str, A
     qhits = []
     for k in LEGACY_QUOTA_KEYS:
         if k in q:
-            v = _typed(_INT, q[k])
-            if v is not _INVALID and _loosens(v, _legacy_base(base, k)):
+            v = parse_cap(q[k])          # invalid counts as loosening: it never reaches effective_limits
+            if v is None or _loosens(v, _legacy_base(base, k)):
                 qhits.append((k, q[k]))
     return hits, qhits
+
+
+def _sanitize_caps(d: dict, source: str, base: Settings | None) -> dict:
+    """Every submission cap (apply.* and legacy control.params.quota.*) must be a non-negative whole number. An
+    invalid value from ANY source (0.5, "0.5", -1, "1e9", nan, ...) is replaced by the stricter of the user
+    value (`base`, if known) and the built-in default, and logged. Valid values are normalized to int."""
+    out = dict(d)
+    ap = out.get("apply")
+    if isinstance(ap, dict):
+        ap = dict(ap)
+        for k, dflt in CAP_DEFAULTS.items():
+            if k in ap:
+                n = parse_cap(ap[k])
+                if n is None:
+                    n = _stricter_cap(getattr(base.apply, k), dflt) if base else dflt
+                    log.warning("apply.%s=%r from %s is not a whole number >= 0; using %d", k, ap[k], source, n)
+                ap[k] = n
+        out["apply"] = ap
+    q = _quota_params(out)
+    if q:
+        q = dict(q)
+        for k, cap in LEGACY_QUOTA_KEYS.items():
+            if k in q:
+                n = parse_cap(q[k])
+                if n is None:
+                    n = _stricter_cap(_legacy_base(base, k), CAP_DEFAULTS[cap]) if base else CAP_DEFAULTS[cap]
+                    log.warning("control.params.quota.%s=%r from %s is not a whole number >= 0; using %d",
+                                k, q[k], source, n)
+                q[k] = n
+        ctl = dict(out["control"])
+        ctl["params"] = {**ctl["params"], "quota": q}
+        out["control"] = ctl
+    return out
 
 
 def _restrict(d: dict, source: str, base: Settings | None = None) -> dict:
@@ -658,8 +713,8 @@ def _enforce(s: Settings, base: Settings) -> None:
     if isinstance(q, dict):
         for k in LEGACY_QUOTA_KEYS:
             if k in q:
-                v = _typed(_INT, q[k])
-                if v is not _INVALID and _loosens(v, _legacy_base(base, k)):
+                v = parse_cap(q[k])
+                if v is None or _loosens(v, _legacy_base(base, k)):
                     log.error("control.params.quota.%s=%r relaxed past the user config; reset", k, q[k])
                     q[k] = _legacy_base(base, k)
 
@@ -689,7 +744,7 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     defaults = Settings()
     user = paths.config_file()
     if user.is_file():
-        udata = tomllib.loads(user.read_text(encoding="utf-8"))
+        udata = _sanitize_caps(tomllib.loads(user.read_text(encoding="utf-8")), str(user), None)
         trusted, why = _user_file_trusted(user)
         trusted_user = trusted
         if not trusted:
@@ -700,8 +755,10 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     base = Settings.model_validate(udata) if udata else defaults
     proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
     if proj.is_file() and proj.resolve() != user.resolve():
-        data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj), base))
-    data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)", base))
+        pdata = _sanitize_caps(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj), base)
+        data = _deep_merge(data, _restrict(pdata, str(proj), base))
+    edata = _sanitize_caps(_env_overrides(), "environment (JOB_APPLY__*)", base)
+    data = _deep_merge(data, _restrict(edata, "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
     _enforce(s, base)
     if trusted_user:     # log which settings the trusted user file relaxed relative to the built-in defaults
