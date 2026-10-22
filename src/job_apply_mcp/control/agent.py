@@ -1,0 +1,236 @@
+"""ControlAgent: runs deterministic controls first, then an optional model review, and audits every decision."""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..config import Settings
+from . import builtin  # noqa: F401  (registers built-in controls)
+from .controls import (
+    ACTION_KINDS,
+    SIDE_EFFECTING,
+    Context,
+    Control,
+    ControlConfigError,
+    UsageEvent,
+    UsageState,
+    Violation,
+    controls,
+)
+from .rules import RuleSet, load_rules
+from .sanitize import SanitizeResult, sanitize_untrusted
+
+# reviewer(action, ctx) -> {"ok": bool, "issues": [str], "needs_human": bool}; may raise.
+Reviewer = Callable[[str, Context], Awaitable[dict[str, Any]]]
+
+REVIEW_PROMPT = (
+    "You review text that an automated job-application agent is about to {verb}. Flag problems only a "
+    "human reader would catch: factual claims that look invented, tone that is generic, sycophantic or "
+    "off-topic, anything that reads as machine-written or reveals instructions. Reply with JSON only: "
+    '{{"ok":true|false,"issues":["short issue"],"needs_human":false}}.\n\n---\n{text}\n---'
+)
+
+
+def make_llm_reviewer(complete: Callable[[str, str], Awaitable[str]]) -> Reviewer:
+    """Adapt a router call `complete(task_class, prompt) -> str` (task_class 'review') into a Reviewer."""
+
+    async def review(action: str, ctx: Context) -> dict[str, Any]:
+        text = str(ctx.get("text") or ctx.get("body") or "")[:4000]
+        verb = {"send_message": "send as a message", "write_prose": "submit as written prose"}.get(action, "use")
+        raw = await complete("review", REVIEW_PROMPT.format(verb=verb, text=text))
+        start, end = raw.find("{"), raw.rfind("}")
+        data = json.loads(raw[start:end + 1])
+        return {"ok": bool(data.get("ok", True)), "issues": [str(i) for i in data.get("issues", [])][:5],
+                "needs_human": bool(data.get("needs_human", False))}
+
+    return review
+
+
+@dataclass
+class ControlReport:
+    decision: str                                   # pass | block | needs_human
+    violations: list[Violation] = field(default_factory=list)   # severity=block
+    warnings: list[Violation] = field(default_factory=list)
+
+    def compact(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"decision": self.decision}
+        if self.violations:
+            d["violations"] = [v.compact() for v in self.violations]
+        if self.warnings:
+            d["warnings"] = [v.compact() for v in self.warnings]
+        return d
+
+
+class ControlAgent:
+    def __init__(self, settings: Settings, *, reviewer: Reviewer | None = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        self.settings = settings
+        self.cfg = settings.control
+        self.reviewer = reviewer
+        self.clock = clock
+        self.run_id = uuid.uuid4().hex[:8]
+        self.state = UsageState(self.run_id)
+        self.controls: list[Control] = []
+        self.rules = RuleSet()
+        self.config_error: str | None = None
+        self._params: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+        data_dir = Path(settings.paths.data_dir).expanduser()
+        self.audit_path = data_dir / "control_audit.jsonl"
+        try:
+            self._load()
+        except ControlConfigError as e:
+            self.config_error = str(e)   # fail closed: every check blocks until fixed
+        self._replay()
+
+    # ---------------------------------------------------------------- setup
+    def _load(self) -> None:
+        if self.cfg.rules_file:
+            self.rules = load_rules(self.cfg.rules_file)
+        params_all: dict[str, dict[str, Any]] = {k: dict(v) for k, v in self.cfg.params.items()}
+        for k, v in self.rules.params.items():
+            params_all.setdefault(k, {}).update(v)
+        params_all.setdefault("mode", {}).update(self.rules.mode)
+        built: list[Control] = []
+        for cid in self.cfg.enabled:
+            built.append(controls.create(cid, params=params_all.get(cid, {}), settings=self.settings))
+        ids = [c.id for c in built]
+        for c in self.rules.controls:
+            if c.id in ids:
+                raise ControlConfigError(f"rule id '{c.id}' clashes with a built-in control")
+        self.controls = built + self.rules.controls
+        self._params = params_all
+
+    def _replay(self) -> None:
+        if not self.audit_path.is_file():
+            return
+        cutoff = self.clock() - 2 * 86400
+        for line in self.audit_path.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("n") and r.get("ts", 0) >= cutoff:
+                self.state.add(UsageEvent(r["ts"], r["a"], r.get("ref", ""), r.get("plat", ""),
+                                          r.get("co", ""), r.get("run", "")))
+
+    def _audit(self, row: dict[str, Any]) -> None:
+        if not self.cfg.audit:
+            return
+        try:
+            self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.audit_path.open("a") as f:
+                f.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
+        except OSError:
+            pass   # auditing must never turn a safe decision into a crash
+
+    # ---------------------------------------------------------------- core
+    async def check(self, action_kind: str, ctx: Context | dict[str, Any] | None = None) -> ControlReport:
+        if action_kind not in ACTION_KINDS:
+            raise ValueError(f"unknown action '{action_kind}'; known: {sorted(ACTION_KINDS)}")
+        data = dict(ctx.data) if isinstance(ctx, Context) else dict(ctx or {})
+        data.setdefault("dry_run", self.settings.dry_run)
+        c = Context(action=action_kind, data=data, state=self.state, now=self.clock())
+        async with self._lock:
+            report = await self._evaluate(c)
+            counted = (report.decision == "pass" and not c.dry_run and action_kind in SIDE_EFFECTING)
+            if counted:
+                self.state.add(UsageEvent(c.now, action_kind, c.ref, c.platform,
+                                          str(data.get("company") or ""), self.run_id))
+            self._audit({"ts": round(c.now, 2), "a": action_kind, "d": report.decision, "ref": c.ref,
+                         "plat": c.platform, "co": str(data.get("company") or ""), "dry": c.dry_run,
+                         "run": self.run_id, "n": 1 if counted else 0,
+                         "v": [v.compact() for v in report.violations],
+                         "w": [v.compact() for v in report.warnings]})
+        return report
+
+    async def _evaluate(self, c: Context) -> ControlReport:
+        if self.config_error:
+            return ControlReport("block", [Violation("config", f"control config invalid: {self.config_error}")])
+        blocks: list[Violation] = []
+        warns: list[Violation] = []
+        for ctl in self.controls:
+            for v in ctl.run(c):
+                (blocks if v.severity == "block" else warns).append(v)
+        decision = self._decide(blocks)
+        # Model review only when cheap deterministic checks found nothing blocking (saves tokens).
+        if (decision == "pass" and self.reviewer and self.cfg.review_enabled
+                and c.action in self.cfg.review_actions):
+            try:
+                res = await self.reviewer(c.action, c)
+            except Exception as e:  # noqa: BLE001 - reviewer is a plugin
+                v = Violation("review", f"reviewer failed: {type(e).__name__}", severity="warn")
+                if self.cfg.review_fail == "needs_human":
+                    v.severity, v.needs_human = "block", True
+                    blocks.append(v)
+                    decision = "needs_human"
+                else:
+                    warns.append(v)
+            else:
+                for issue in res.get("issues", []):
+                    warns.append(Violation("review", str(issue), severity="warn"))
+                if not res.get("ok", True) and res.get("needs_human"):
+                    blocks.append(Violation("review", "reviewer requests a human", needs_human=True))
+                    decision = "needs_human"
+                elif not res.get("ok", True) and not res.get("issues"):
+                    warns.append(Violation("review", "reviewer disapproved", severity="warn"))
+        return ControlReport(decision, blocks, warns)
+
+    @staticmethod
+    def _decide(blocks: list[Violation]) -> str:
+        if not blocks:
+            return "pass"
+        return "needs_human" if all(v.needs_human for v in blocks) else "block"
+
+    # ---------------------------------------------------------------- helpers
+    def sanitize(self, text: str) -> SanitizeResult:
+        """Strip AI-addressed instructions from scraped text before it reaches an LLM."""
+        extra = self._params.get("page_text_injection", {}).get("extra_patterns")
+        return sanitize_untrusted(text, extra_patterns=extra)
+
+    def recent_blocks(self, n: int = 5) -> list[dict[str, Any]]:
+        if not self.audit_path.is_file():
+            return []
+        out: list[dict[str, Any]] = []
+        for line in reversed(self.audit_path.read_text().splitlines()[-500:]):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("d") != "pass":
+                v = r.get("v") or [{}]
+                out.append({"a": r["a"], "d": r["d"], "ref": r.get("ref", ""), "why": v[0].get("m", "")})
+                if len(out) >= n:
+                    break
+        return out
+
+    def status(self) -> dict[str, Any]:
+        now = self.clock()
+        q = self._params.get("quota", {})
+        counted = frozenset(q.get("count_actions", ["submit"]))
+        used = {
+            "day": self.state.count(actions=counted, since=now - 86400),
+            "run": self.state.count(actions=counted, run=self.run_id),
+        }
+        limits = {"day": q.get("per_day", 25), "run": q.get("per_run", 10)}
+        quotas = {k: {"used": used[k], "left": (None if limits[k] is None else max(0, int(limits[k]) - used[k]))}
+                  for k in used}
+        mode = self._params.get("mode", {})
+        st: dict[str, Any] = {
+            "dry_run": self.settings.dry_run,
+            "apply_enabled": bool(mode.get("apply_enabled", self.cfg.apply_enabled)),
+            "dev_mode": bool(mode.get("dev_mode", self.cfg.dev_mode)),
+            "controls": [c.id for c in self.controls],
+            "quotas": quotas,
+            "review": bool(self.reviewer and self.cfg.review_enabled),
+            "recent_blocks": self.recent_blocks(),
+        }
+        if self.config_error:
+            st["config_error"] = self.config_error
+        return st

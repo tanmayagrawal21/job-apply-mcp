@@ -1,0 +1,66 @@
+# job-apply-mcp configuration. Copy to ~/.config/job-apply-mcp/config.toml (or ./job-apply-mcp.toml).
+# Every value shown is the built-in default unless noted. Env override: JOB_APPLY__SECTION__KEY=value.
+
+dry_run = true                    # nothing is submitted until you set this to false
+response_budget_chars = 4000      # tool outputs are truncated/paginated under this size
+platforms_enabled = ["greenhouse", "lever", "ashby", "smartrecruiters", "workday", "generic"]
+
+[concurrency]
+global_limit = 16                 # max concurrent outbound tasks
+per_host = 4                      # max concurrent requests per host
+min_interval_s = 0.25             # polite spacing per host
+browser_workers = 2               # concurrent browser sessions (apply_batch default parallelism)
+[concurrency.llm_parallel]
+ollama = 1
+default = 4
+
+[paths]
+data_dir = "~/.local/share/job-apply-mcp"          # SQLite store lives here (applications.db, WAL mode)
+profile = "~/.config/job-apply-mcp/profile.toml"   # see examples/profile.example.toml
+# resume = "~/Documents/resume.pdf"
+
+[policy]
+dedupe_days = 180                 # skip a company+similar title already applied to within N days
+# max_years_required = 3          # skip postings whose minimum experience exceeds this
+# graduation = "2026-05"          # YYYY-MM; skip postings whose graduation window excludes it
+# graduation_flex_months = 0      # tolerance (months) around a posting's graduation window
+# requires_sponsorship = true     # true: skip postings that say they will not sponsor
+us_citizen = false                # false: skip "US citizen required" postings
+us_person = false                 # false (and not a citizen): skip ITAR / export-control / US-person roles
+has_clearance = false             # false: skip roles requiring a security clearance
+# salary_floor = 70000            # annual, in your home market; compares against the posting's top of range
+hours_per_year = 2080             # hourly rates are converted with this
+exclude_employer_patterns = []    # case-insensitive regexes on employer name, e.g.
+# exclude_employer_patterns = ["university", "college", "staffing", "recruit", "consulting group"]
+stop_phrases = ["personally completed", "my own work", "without the use of ai", "no ai", "ai policy"]
+# Matching text in the posting or form returns needs_human instead of auto-ticking an attestation.
+# Gate order/enablement. Omit to run all, in this order. Remove a name to disable that gate.
+# gates = ["employer", "years", "graduation", "sponsorship", "citizenship", "salary", "stop_phrases"]
+[policy.col_multipliers]          # cost-of-living: location substring -> multiplier on salary_floor
+# "San Francisco" = 1.3
+# "New York" = 1.25
+# "Remote" = 0.9
+
+[llm]
+allow_cloud = true                # false: 'large' tier falls back to the biggest local tier
+[llm.tiers.small]
+provider = "ollama"
+model = "qwen3:4b"
+max_tokens = 256
+[llm.tiers.medium]
+provider = "ollama"
+model = "qwen2.5:7b"
+max_tokens = 768
+[llm.tiers.large]
+provider = "client"
+model = "client-default"
+max_tokens = 1500
+[llm.providers.ollama]
+base_url = "http://127.0.0.1:11434"
+[llm.providers.openai_compat]
+base_url = ""
+api_key_env = "OPENAI_API_KEY"    # the key itself is read from the environment, never from this file
+[llm.providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+[llm.providers.hf_local]
+device = "mps"

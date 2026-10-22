@@ -17,6 +17,16 @@ class Services:
         self._engine = engine
         c = settings.concurrency
         self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s)
+        self._store = None
+
+    @property
+    def store(self):
+        """SQLite store, opened lazily so the server starts even if the data dir is unwritable."""
+        if self._store is None:
+            from .store.sqlite import SqliteStore
+
+            self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days)
+        return self._store
 
     @property
     def engine(self):
@@ -51,7 +61,10 @@ class Services:
         return {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
 
     async def list_applications(self, status: str, limit: int, cursor: int) -> dict[str, Any]:
-        raise NotImplementedError("store lands in feat/store-policy")
+        page = await self.store.list(status="" if status in ("", "all") else status, limit=limit, cursor=cursor)
+        rows = [{"ref": r["ref"], "co": r["company"], "title": r["title"], "st": r["status"],
+                 "at": r["created_at"][:10]} for r in page["rows"]]
+        return {"rows": rows, "next": page["next"], "total": page["total"]}
 
     async def health(self) -> dict[str, Any]:
         from .core import registry

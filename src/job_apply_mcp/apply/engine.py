@@ -370,12 +370,13 @@ class ApplyEngine:
             return dict(supplied), ""
         return None, "missing or invalid approval token; call plan_application and pass its token"
 
-    async def _control(self, action: str, ctx: _Ctx, dry: bool) -> str | None:
+    async def _control(self, action: str, ctx: _Ctx, dry: bool, eff: dict[str, Any] | None = None) -> str | None:
         """Optional control layer (ADR-0014). Returns a block reason, or None when allowed."""
         if self.control is None:
             return None
         res = await self.control.check(action, {"ref": ctx.form.ref, "company": ctx.posting.company,
-                                                "title": ctx.posting.title, "dry_run": dry})
+                                                "title": ctx.posting.title, "dry_run": dry,
+                                                "platform": ctx.posting.platform, "answers": eff or {}})
         verdict = res
         for attr in ("decision", "verdict", "status", "allowed", "ok"):
             v = res.get(attr) if isinstance(res, dict) else getattr(res, attr, None)
@@ -417,7 +418,7 @@ class ApplyEngine:
             missing = [f.key for f in ctx.form.fields if f.required and f.key not in eff]
             if missing:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"unresolved required: {missing[:8]}")
-            blocked = await self._control("submit", ctx, dry)
+            blocked = await self._control("submit", ctx, dry, eff)
             if blocked:
                 return SubmitResult(ref=ref, status="needs_human", detail=blocked)
             async with self._lock(ctx.posting.company):

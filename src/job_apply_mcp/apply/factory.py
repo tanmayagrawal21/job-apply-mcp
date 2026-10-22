@@ -64,10 +64,9 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
         except ImportError:
             router = None  # engine degrades to client_tasks for everything it cannot map deterministically
     if control is None:
-        try:  # optional: control layer, ADR-0014
-            ctl = importlib.import_module("job_apply_mcp.control")
-            control = getattr(ctl, "ControlAgent")(settings)  # noqa: B009
-        except (ImportError, AttributeError, TypeError):
+        try:  # control layer (ADR-0014): optional; fails closed on its own bad config
+            control = importlib.import_module("job_apply_mcp.control").ControlAgent(settings)
+        except ImportError:
             control = None
     return ApplyEngine(settings, resolve_adapter=resolve_adapter or adapter_resolver(settings), profile=profile,
                        router=router, gates=gates, store=store, driver_factory=driver_factory, control=control)
