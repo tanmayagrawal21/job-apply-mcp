@@ -610,6 +610,9 @@ _DIRECT_EMPLOY = re.compile(
 _CO_QUALIFIERS = frozenset(["state", "states", "federal", "government", "agency", "competitor", "competitors",
                             "affiliate", "affiliates", "parent", "subsidiary", "subsidiaries", "partner", "partners",
                             "client", "clients", "vendor", "vendors", "public", "national", "department"])
+# military / defence qualifiers: "worked for Army?" must never be read as the posting company "Army Labs"
+_CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|marines?|military|defen[cs]e|coast guard|national guard|"
+                                   r"veterans?)\b")
 _GENERIC_CO_WORDS = frozenset(["the", "global", "united", "american", "national", "general", "first", "international",
                                "data", "systems", "group", "technologies", "digital", "new", "world", "health"])
 
@@ -633,7 +636,8 @@ def _mark_company(words: list[str], name: str) -> tuple[list[str], bool]:
 def about_this_company(label: str, company: str, aliases: Sequence[str] = ()) -> bool:
     """True only for a direct-employment question about the posting company itself (or a configured alias)."""
     names = [x for x in (company, *aliases) if normalize(x)]
-    if not names or any(t in _CO_QUALIFIERS for x in names for t in normalize(x).split()):
+    if not names or any(t in _CO_QUALIFIERS for x in names for t in normalize(x).split()) \
+            or any(_CO_QUALIFIER_PHRASES.search(normalize(x)) for x in names):
         return False
     words = _SELF_REF.sub(_CO, normalize(label)).split()
     for name in names:

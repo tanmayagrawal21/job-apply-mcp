@@ -293,3 +293,21 @@ def test_prior_employee_requires_a_plain_direct_employment_question(label):
 def test_direct_employment_paraphrases_still_answered(label):
     assert about_this_company(label, "Acme Robotics")
     assert run(sel(label))[0] == ("No", "rule:prior_employee")
+
+
+@pytest.mark.parametrize("company", ["Army Labs", "Military Robotics", "Navy Pier Foods", "Air Force Analytics",
+                                     "Marine Systems Co", "Marines Outfitters", "Defense Dynamics", "Defence Works",
+                                     "Coast Guard Supply", "National Guard Partners", "Veterans Health Tech",
+                                     "Veteran Movers"])
+@pytest.mark.parametrize("label", ["Have you ever worked for Army?", "Have you ever worked for Military?",
+                                   "Have you ever worked for the military?", "Have you ever served in the armed forces?",
+                                   "Have you previously been employed by the Department of Defense?",
+                                   "Have you ever worked for the Navy?", "Are you a former employee of the Air Force?"])
+def test_military_qualifier_company_names_are_never_answered(company, label):
+    assert not about_this_company(label, company)
+    assert run(sel(label), company=company) == (None, ["q"])
+
+
+def test_military_qualifier_alias_is_never_answered():
+    assert not about_this_company("Have you ever worked for Acme Robotics?", "Acme Robotics", ["Acme Defense"])
+    assert about_this_company("Have you ever worked for Acme Robotics?", "Acme Robotics", ["Roadrunner Labs"])

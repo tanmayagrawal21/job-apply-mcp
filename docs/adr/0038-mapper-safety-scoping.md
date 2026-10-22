@@ -28,7 +28,8 @@ unlisted countries), so blocklists are not used to decide that an answer is safe
   (`_DIRECT_EMPLOY`: "have you (ever) (been employed|worked) by/for/at <company>", "were you employed by <company>",
   "are you a current or former employee of <company>"), with only tense/time words left over. If the company name or
   an alias contains a qualifier word (state, federal, government, agency, competitor, affiliate, parent, subsidiary,
-  partner, client, vendor, public, national, department) it is never answered, so "State Street" cannot turn "worked
+  partner, client, vendor, public, national, department, army, navy, air force, marine(s), military, defense/defence,
+  coast guard, national guard, veteran(s)) it is never answered, so "State Street" cannot turn "worked
   for a state agency?" into "No". Everything else uses only the user's own `[answers]` entry, else unresolved.
 - **Authorization.** `auth_place_ok` requires every word of the label to be in `_AUTH_VOCAB` (authorization,
   sponsorship and visa wording, visa types, stopwords, and US/U.S./USA/United States/America). Any other word, so any
