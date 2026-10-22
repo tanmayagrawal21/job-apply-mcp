@@ -755,8 +755,12 @@ class PlaywrightDriver(VerificationMixin):
         exactly (else an 'Other' option, else left empty); degree and discipline snap to the offered options;
         years are typed and read back. Anything not filled stays empty and the run reports `incomplete`."""
         row = answers.get("education:0")
-        if not isinstance(row, dict) or not await page.locator("[id='school--0']").count():
-            return
+        if not isinstance(row, dict) or not await page.locator(
+                "[id='school--0'], [id='degree--0'], [id='discipline--0'], [id='end-year--0']").count():
+            return                                   # some boards ask only degree / discipline / end year
+
+        async def present(el_id: str) -> bool:
+            return bool(await page.locator(f'[id="{el_id}"]').count())
 
         async def has_value(el_id: str) -> bool:
             try:
@@ -768,11 +772,11 @@ class PlaywrightDriver(VerificationMixin):
                 return False
 
         school, degree, disc = (str(row.get(k) or "").strip() for k in ("school", "degree", "discipline"))
-        if school and not await has_value("school--0"):
+        if school and await present("school--0") and not await has_value("school--0"):
             await self._rs_pick(page, "school--0", [school, "Other"], lambda t: pick_school(school, t))
-        if degree and not await has_value("degree--0"):
+        if degree and await present("degree--0") and not await has_value("degree--0"):
             await self._rs_pick(page, "degree--0", degree_queries(degree), lambda t: pick_degree(degree, t))
-        if disc and not await has_value("discipline--0"):
+        if disc and await present("discipline--0") and not await has_value("discipline--0"):
             await self._rs_pick(page, "discipline--0", discipline_queries(disc), lambda t: best_option(disc, t))
         for el_id, key in (("start-year--0", "start_year"), ("end-year--0", "end_year")):
             want = str(row.get(key) or "")
