@@ -45,6 +45,8 @@ Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical ap
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `mode` | `str` | `"id_first"` |  |
+| `company_aliases` | `dict[str, str]` | `{}` |  |
+| `title_threshold` | `float` | `0.6` | token-Jaccard for the company+title fallback |
 
 ## `[improve]`
 

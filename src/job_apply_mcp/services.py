@@ -68,7 +68,9 @@ class Services:
             from .store.sqlite import SqliteStore
 
             self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days,
-                                 dedupe_mode=self.settings.dedupe.mode)
+                                 dedupe_mode=self.settings.dedupe.mode,
+                                      company_aliases=self.settings.dedupe.company_aliases,
+                                      title_threshold=self.settings.dedupe.title_threshold)
         return self._store
 
     @property
