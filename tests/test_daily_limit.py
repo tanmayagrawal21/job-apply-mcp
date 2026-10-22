@@ -1,5 +1,6 @@
 """ADR-0035: optional submission caps (0 = no limit), trust rules, legacy params, status."""
 import json
+import os
 
 import pytest
 from pydantic import ValidationError
@@ -101,6 +102,12 @@ def test_env_and_project_cannot_loosen_but_can_tighten(tmp_path, monkeypatch, ca
     assert s.apply.daily_limit == 7
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_world_writable_user_config_cannot_loosen(tmp_path, monkeypatch):
+    s = _cfg(tmp_path, monkeypatch, user="[apply]\ndaily_limit = 0\n", mode=0o666)
+    assert s.apply.daily_limit == 25
+
+
 def test_trusted_user_config_may_loosen(tmp_path, monkeypatch):
     user = "[apply]\ndaily_limit = 0\ndaily_limit_per_platform = 40\n[control.params.quota]\nper_run = 0\n"
     s = _cfg(tmp_path, monkeypatch, user=user)
@@ -109,8 +116,6 @@ def test_trusted_user_config_may_loosen(tmp_path, monkeypatch):
     s = _cfg(tmp_path, monkeypatch, user=user, via_env=True)                 # JOB_APPLY_MCP_CONFIG is untrusted
     assert (s.apply.daily_limit, s.apply.daily_limit_per_platform) == (25, 10)
     assert s.control.params.get("quota", {}) == {}
-    s = _cfg(tmp_path, monkeypatch, user=user, mode=0o666)                   # group/world-writable is untrusted
-    assert s.apply.daily_limit == 25
     s = _cfg(tmp_path, monkeypatch, user=user, proj="[apply]\ndaily_limit = 5\n")
     assert s.apply.daily_limit == 5                                          # a project file may still tighten
 
