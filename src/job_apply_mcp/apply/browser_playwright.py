@@ -306,9 +306,9 @@ class PlaywrightDriver:
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
         failed: list[str] = []
-        if any(canonical_key(f.label) == "phone" or "phone" in normalize(f.label) for f, _ in texty):
-            if not await self._ensure_phone_country(page):
-                failed.append("phone_country")
+        has_phone = any(canonical_key(f.label) == "phone" or "phone" in normalize(f.label) for f, _ in texty)
+        if has_phone and not await self._ensure_phone_country(page):
+            failed.append("phone_country")
         for f, v in texty:
             if not await self._fill(page, ats, f, v):
                 failed.append(f.key)
