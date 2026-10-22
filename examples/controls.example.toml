@@ -1,0 +1,89 @@
+# Example user rules file for the control layer. All names and values are fictional.
+# Point to your own copy (outside the repo) with:  [control] rules_file = "~/.config/job-apply-mcp/controls.toml"
+# Action kinds: apply, submit, send_message, write_prose, merge.  severity: block | warn.
+
+[mode]                       # mode switches
+apply_enabled = true         # false blocks every side-effecting action
+dev_mode = false             # true allows dry-run actions only
+
+[params.quota]               # override built-in control params
+per_day = 20
+per_run = 8
+per_platform_per_day = 6
+
+[params.prose_lint]          # lexicons, templates and length for generated prose
+ban_contractions = true
+gap_phrases = ["although i lack", "despite my limited"]
+enthusiasm_phrases = ["thrilled", "dream job", "huge fan"]
+required_opening = ["^Dear\\b"]
+required_closing = ["Sincerely,?\\s+\\w+(\\s\\w+)?"]
+min_words = 120
+max_words = 320
+
+[params.recipient_deny]
+deny = ["noreply@example.com", "@spam-recruiters.example"]
+match = "domain"
+
+[params.attestation]
+extra_phrases = ["written without assistance"]
+
+[[rule]]                     # phrase lexicon: banned
+id = "no-buzzwords"
+type = "phrases_banned"
+applies_to = ["write_prose", "send_message"]
+severity = "block"
+phrases = ["synergy", "rockstar", "ninja", "leverage my passion"]
+
+[[rule]]                     # phrase lexicon: required
+id = "mention-company"
+type = "phrases_required"
+applies_to = ["write_prose"]
+severity = "warn"
+phrases = ["Acme Robotics"]
+message = "cover letter should name the company"
+
+[[rule]]                     # regex check
+id = "no-placeholder"
+type = "regex"
+applies_to = ["write_prose", "send_message"]
+pattern = "\\[(?:company|name|your [a-z ]+)\\]"
+message = "unfilled template placeholder"
+
+[[rule]]                     # numeric threshold
+id = "salary-floor"
+type = "threshold"
+applies_to = ["apply", "submit"]
+field = "salary_max"
+min = 60000
+message = "posted pay is below my floor"
+
+[[rule]]                     # deny-list of companies
+id = "avoid-companies"
+type = "deny_list"
+applies_to = ["apply", "submit"]
+field = "company"
+match = "substring"
+values = ["Globex Staffing", "Initech Outsourcing"]
+
+[[rule]]                     # allow-list of recipients (messages only go to these domains)
+id = "known-recipients"
+type = "allow_list"
+applies_to = ["send_message"]
+field = "recipient"
+match = "domain"
+values = ["acme-robotics.example", "hooli.example"]
+
+[[rule]]                     # quota per platform per day
+id = "greenhouse-cap"
+type = "quota"
+applies_to = ["apply", "submit"]
+scope = "platform"
+limit = 5
+count_actions = ["submit"]
+
+[[rule]]                     # quota per run
+id = "run-cap"
+type = "quota"
+applies_to = ["apply", "submit"]
+scope = "run"
+limit = 8

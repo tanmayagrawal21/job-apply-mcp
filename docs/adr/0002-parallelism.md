@@ -16,4 +16,4 @@ Status: accepted · Date: 2026-10-22
   lock. This prevents the "two agents applied to the same job" failure seen in manual runs.
 
 ## Verify / revert
-`pytest tests/test_concurrency.py` (ordering, cap enforcement, per-host spacing, error isolation).
+`pytest tests/test_core.py -k "bounded_gather or host_limiter"` (ordering, cap enforcement, per-host spacing, error isolation).

@@ -281,7 +281,7 @@ async def test_known_answer_skips_llm():
 
 
 async def test_batch_one_call_for_short_fields():
-    f = all_fake(responses=['{"city": "Tucson", "pronouns": "they", "notice": "2 weeks"}'])
+    f = all_fake(responses=['{"city": "Springfield", "pronouns": "they", "notice": "2 weeks"}'])
     r = mk(f)
     tasks = [Task(prompt="City?", key="city", question="City?", field_kind="text"),
              Task(prompt="Pronouns?", key="pronouns", question="Pronouns?", field_kind="text"),
@@ -289,7 +289,7 @@ async def test_batch_one_call_for_short_fields():
              Task(prompt="email", key="email", known="x@y.z")]
     res = await r.run_batch(tasks)
     assert len(f["ollama"].calls) == 1
-    assert [x.text for x in res] == ["Tucson", "they", "2 weeks", "x@y.z"]
+    assert [x.text for x in res] == ["Springfield", "they", "2 weeks", "x@y.z"]
     assert f["ollama"].calls[0]["think"] is False and f["ollama"].calls[0]["num_ctx"] == 4096
 
 

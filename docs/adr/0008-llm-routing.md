@@ -27,7 +27,7 @@ model per task, automatic fallback, and no hidden hard-coding. Cloud use is a us
    litellm, client), so tiers degrade to local fallbacks.
 4. **Calling**: per-provider semaphore from `concurrency.llm_parallel`; models flagged `heavy` also share one
    global semaphore (`llm.heavy_parallel`, default 1) so a single big model is resident. `ollama.keep_alive`
-   (default `5m`) is passed on every request. Timeout `llm.timeout_s`; transient errors retry `llm.retries` times
+   (default `30m`) is passed on every request. Timeout `llm.timeout_s`; transient errors retry `llm.retries` times
    with exponential backoff `llm.backoff_s`.
 5. **Validation**: with `json_schema` (or a `validator`), a bad reply gets one repair attempt on the same model,
    then escalates one tier (field tasks) or to the last tier (narrative/review). The top tier failing returns

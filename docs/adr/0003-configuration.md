@@ -10,4 +10,4 @@ LLM tiers, providers and models, policy gates, stop phrases, enabled platforms, 
 run. Secrets are read only from the environment or a user-level `.env`, never from project files.
 
 ## Verify / revert
-`pytest tests/test_config.py` covers precedence, env coercion and nested keys.
+`pytest tests/test_core.py -k config_precedence` covers precedence (env coercion and nested-key tests are planned).
