@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -40,6 +41,8 @@ from .mapper import (
     privacy_ack_value,
 )
 from .verification import VerificationMixin
+
+log = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ pure helpers (unit-tested offline)
 
@@ -416,24 +419,52 @@ _MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
     if (own.length) rows = own; }
   if (!CONS.test(fl)) rows = rows.filter(r => !CONS.test(r.text) && !CONS.test(r.name) && !CONS.test(r.value));
   return rows; }"""
-# Every visible required control that is still empty, CHECKBOX AND RADIO GROUPS INCLUDED (ADR-0039). A group is a
+# Every visible required control that is still empty (ADR-0039). Text inputs / react-selects: required markup or the
+# API marks them required. Radio/checkbox groups and sets (wrapped or not; unnamed boxes grouped by field container)
+# and native selects follow the INVERTED rule: nothing selected -> gap, unless the API form marks that exact field
+# required:false. Only an explicit allowlist (marketing / SMS opt-ins, job-alert widgets) is exempt, and is logged. A group is a
 # fieldset / role=group / role=radiogroup / consent block holding choice inputs; it is required when the group or a
 # member says so (required, aria-required) or its legend/heading carries an asterisk or a "required" class; an
 # unanswered consent radio group always counts. Custom-drawn boxes hide the real input, so visibility is the group's.
-_EMPTY_REQUIRED_JS = """(rk) => { const REQK = new Set(rk || []);
-  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
+_EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || [])], REQK = new Set(a.req || []);
+  const vis = e => !!e && !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
   const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
   const labelOf = e => { let t = '';
     const lb = e.getAttribute('aria-labelledby'); if (lb) t = lb.split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
     if (!t && e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
     if (!t) { const l = e.closest('label'); if (l) t = (l.querySelector('.application-label') || l).textContent.split('✱')[0]; }
     if (!t) t = e.getAttribute('aria-label') || e.name || e.id || ''; return t; };
-  const req = e => e.required || e.getAttribute('aria-required') === 'true' || /\\*\\s*$/.test(labelOf(e).trim());
+  const req = e => e.required || e.getAttribute('aria-required') === 'true' || /\\*\\s*$/.test(labelOf(e).trim())
+    || REQK.has(e.id) || REQK.has(e.name);
   const CH = 'input[type=checkbox], input[type=radio]';
   const GS = 'fieldset, [role=group], [role=radiogroup], [class*=consentRadioGroup i], [class*=consent-radio i]';
+  // Explicit allowlist of groups that are not application questions (left empty on purpose; logged by the caller).
+  const ALLOW = /\\b(sms|text messag\\w*|marketing|newsletters?|promotion\\w*|opt[ -]?in|job alerts?|create (a )?job alert|talent (community|network|pool)|future (opportunities|openings|roles)|consent to (receive|be contacted))\\b/i;
+  const keyMatch = (x, k) => x === k || x.endsWith('_' + k) || x.startsWith(k + '_') || x.includes('_' + k + '-labeled-');
+  const apiOptional = xs => xs.filter(Boolean).some(x => OPTK.some(k => keyMatch(x, k)));
+  const optText = m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '');
+  const HEAD = 'legend, label, h1, h2, h3, h4, h5, h6, strong, b, .application-label, [class*=label i], [class*=question i], [class*=title i]';
+  const HELP = 'small, [class*=help i], [class*=desc i], [class*=hint i], [class*=instruction i], [class*=subtitle i]';
   const out = [], seen = new Set(), done = new Set();
   document.querySelectorAll('[data-jam-group]').forEach(x => x.removeAttribute('data-jam-group'));
   let gi = 0;
+  // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
+  // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
+  const emit = (members, container, text, idCands, consent) => {
+    if (members.some(m => m.checked)) return;
+    const names = members.flatMap(m => [m.name, m.id]);
+    if (apiOptional(idCands.concat(names))) return;
+    const opts = members.map(optText).slice(0, 12);
+    const exempt = ALLOW.test(clean(text) + ' ' + members.map(m => m.name).join(' '))
+      || (opts.some(o => ALLOW.test(o)) && opts.every(o => ALLOW.test(o) || /^(yes|no)\\b/i.test(o)));
+    const id = idCands.find(Boolean) || '';
+    const sk = 'c:' + id + ':' + gi + ':' + names.join(','); if (seen.has(sk)) return; seen.add(sk);
+    let gid = '';
+    if (container && [...container.querySelectorAll(CH)].filter(x => !x.disabled).length === members.length) {
+      container.setAttribute('data-jam-group', String(gi)); gid = String(gi); gi++; }
+    out.push({id, label: (clean(text) || 'unlabelled choice set ' + id).slice(0, 80), text: clean(text).slice(0, 1500),
+              rs: false, group: gid, kind: members[0].type, consent: !!consent, opts, exempt});
+  };
   for (const g of document.querySelectorAll(GS)) {
     const members = [...g.querySelectorAll(CH)].filter(m => m.closest(GS) === g && !m.disabled);
     if (!members.length || !vis(g)) continue;
@@ -447,94 +478,96 @@ _EMPTY_REQUIRED_JS = """(rk) => { const REQK = new Set(rk || []);
     let text = head ? head.textContent : (g.getAttribute('aria-label') || '');
     if (consent && !clean(text)) { const d = g.parentElement && g.parentElement.querySelector('[class*=consent i]:not(input)');
       text = d && d !== g ? d.textContent : members.map(m => (m.closest('label') || {}).textContent || '').join(' / '); }
-    const required = g.getAttribute('aria-required') === 'true' || g.hasAttribute('required')
-      || members.some(m => m.required || m.getAttribute('aria-required') === 'true')
-      || /[*✱]/.test(text || '') || !!(head && (/required/i.test(head.className) || head.querySelector('[class*=required i]')))
-      || consent;
-    if (!required || members.some(m => m.checked)) continue;
     const fp = g.closest('[data-field-path]');
-    const id = g.id || (fp && !consent && fp.getAttribute('data-field-path')) || members[0].name || '';
-    if (seen.has('g:' + id + gi)) continue; seen.add('g:' + id + gi);
-    g.setAttribute('data-jam-group', String(gi));
-    const opts = members.map(m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '')).slice(0, 12);
-    out.push({id, label: clean(text).slice(0, 80), text: clean(text).slice(0, 1500), rs: false, group: String(gi), kind: members[0].type, consent, opts});
-    gi++;
+    emit(members, g, text, [g.id, fp && !consent && fp.getAttribute('data-field-path'), members[0].name], consent);
   }
-  // Radio / checkbox sets OUTSIDE any group container: members share a name (an unnamed box is its own set).
-  // DENY BY DEFAULT (ADR-0039). A set is required if ANY of: a member is required / aria-required; an ancestor up
-  // to the field wrapper has aria-required / required / data-required; the nearest preceding text of ANY element
-  // kind (option labels excluded) ends with "*" / "✱" or contains "(required)"; the API form marks the field
-  // required. When no question text can be found inside the field wrapper, requiredness is UNCLEAR -> required.
+  // Sets outside any group container: named members share a name; UNNAMED boxes are grouped by their nearest
+  // common field container (never one set per box).
+  const FC = '[data-field-path], .field-wrapper, .application-question, .form-group, .form-field, [class*=question i], [class*=field-entry i]';
+  const fieldOf = e => e.closest(FC) || (e.closest('ul, ol') || {}).parentElement
+    || (e.parentElement && e.parentElement.parentElement) || e;
   const sets = new Map();
   for (const e of document.querySelectorAll(CH)) { if (done.has(e) || e.disabled) continue;
-    const k = e.name ? e.type + ':' + e.name : 'solo:' + sets.size;
+    const k = e.name ? e.type + ':' + e.name : fieldOf(e);
     if (!sets.has(k)) sets.set(k, []); sets.get(k).push(e); }
-  const REQTXT = t => /[*✱]\\s*$/.test((t || '').trim()) || /[*✱]/.test(t || '') && (t || '').trim().length < 3 || /\\(required\\)/i.test(t || '');
-  const REQATTR = n => n.getAttribute && (n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
-    || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false'));
   for (const [k, members] of sets) {
     members.forEach(m => done.add(m));
-    if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement || m))) continue;
+    if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement))) continue;
     const ids = new Set(members.map(m => m.id).filter(Boolean));
-    const optLabel = n => { const l = n && n.closest && n.closest('label');
-      return !!(l && (l.querySelector(CH) || ids.has(l.htmlFor))); };
+    const optLabel = n => { const l = n && n.closest && n.closest('label'); return !!(l && (l.querySelector(CH) || ids.has(l.htmlFor))); };
     let c = members[0].parentElement; while (c && !members.every(m => c.contains(m))) c = c.parentElement;
-    // the field wrapper: the highest ancestor (max 6 levels, below form/body) holding no other question's inputs
-    let wrap = c, anc = false;
+    let wrap = c;
     for (let n = c, d = 0; n && n !== document.body && n.tagName !== 'FORM' && d < 6; n = n.parentElement, d++) {
       if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;
-      if (REQATTR(n)) anc = true;
       wrap = n; }
-    // nearest preceding text, any element kind, skipping option labels / scripts
-    let text = '', hel = null;
+    // question text: nearest preceding heading-like element inside the wrapper (help text skipped), else nearest text
+    let text = '', any = '';
     const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     tw.currentNode = members[0];
     for (let n = tw.previousNode(); n; n = tw.previousNode()) {
       const el = n.parentElement; const t = (n.textContent || '').trim();
       if (!t || !el || el.closest('script, style, noscript') || optLabel(el)) continue;
-      if (!wrap || !wrap.contains(n)) break;                     // outside the field wrapper: not this question's
-      hel = el; text = t; break; }
-    let full = hel ? hel.textContent : '';
-    if (hel && clean(full).length < 3 && hel.parentElement && wrap.contains(hel.parentElement)) full = hel.parentElement.textContent;
-    if (k.startsWith('solo:') && !hel) { full = labelOf(members[0]); text = full; }
-    const keys = members.flatMap(m => [m.name, m.id]).filter(Boolean);
-    const apiReq = keys.some(x => REQK.has(x) || [...REQK].some(r => x.endsWith('_' + r) || x.startsWith(r + '_') || x.includes('_' + r + '-labeled-')));
-    const unclear = !clean(full);
-    const required = unclear || apiReq || anc || members.some(m => m.required || m.getAttribute('aria-required') === 'true')
-      || REQTXT(text) || REQTXT(full) || !!(hel && (/required/i.test(hel.className) || hel.querySelector('[class*=required i]')));
-    if (!required || members.some(m => m.checked)) continue;
-    const id = members[0].name || members[0].id || '';
-    if (seen.has('s:' + id + k)) continue; seen.add('s:' + id + k);
-    const opts = members.map(m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '')).slice(0, 12);
-    let gid = '';
-    if (c && [...c.querySelectorAll(CH)].length === members.length) { c.setAttribute('data-jam-group', String(gi)); gid = String(gi); gi++; }
-    const lab = clean(full) || (unclear ? 'unlabelled choice set ' + id : id);
-    out.push({id, label: lab.slice(0, 80), text: clean(full).slice(0, 1500), rs: false, group: gid,
-              kind: members[0].type, consent: false, opts});
+      if (!wrap || !wrap.contains(n)) break;
+      if (/^[(\\[]?\\s*(required|\\*|✱)\\s*[)\\]]?$/i.test(t)) continue;           // a bare marker / badge, not the question
+      const blk = el.closest(HEAD); if (blk && wrap.contains(blk) && !el.closest(HELP)) { text = blk.textContent; break; }
+      if (!any && !el.closest(HELP)) any = (clean(t).length < 3 && el.parentElement ? el.parentElement.textContent : t); }
+    if (!text) text = any;
+    if (!text && members.length === 1) text = labelOf(members[0]);
+    const fp = members[0].closest('[data-field-path]');
+    emit(members, c, text, [fp && fp.getAttribute('data-field-path'), (typeof k === 'string' ? members[0].name : '') || (c && c.id)], false);
   }
   for (const e of document.querySelectorAll('input, textarea, select')) {
     if (done.has(e)) continue;
     const type = (e.type || '').toLowerCase();
-    if (['hidden', 'submit', 'button', 'file', 'search'].includes(type) || e.disabled || e.readOnly) continue;
+    if (['hidden', 'submit', 'button', 'file', 'search', 'checkbox', 'radio'].includes(type) || e.disabled || e.readOnly) continue;
     if (e.closest('.iti__dropdown-content') || e.getAttribute('aria-hidden') === 'true') continue;
-    const choice = type === 'checkbox' || type === 'radio';
     const rs = e.getAttribute('role') === 'combobox' && e.closest('[class*=select__control]');
-    if (!vis(e) && !rs && !(choice && vis(e.closest('label') || e.parentElement || e))) continue;
-    if (!req(e)) continue;
-    let empty = false, grp = '';
+    if (!vis(e) && !rs) continue;
+    const native = e.tagName === 'SELECT';
+    // native selects follow the inverted rule too: empty -> gap unless the API marks the field required:false
+    if (!(native ? (req(e) || !apiOptional([e.id, e.name])) : req(e))) continue;
+    let empty = false;
     if (rs) { const sh = e.closest('[class*=select__control]').parentElement;
       empty = !sh.querySelector('[class*=select__single-value], [class*=select__multi-value]'); }
-    else if (choice) continue;                                  // handled as sets above
-    else if (e.tagName === 'SELECT') empty = !e.value;
+    else if (native) empty = !e.value;
     else empty = !(e.value || '').trim();
     if (!empty) continue;
-    const lab = grp || clean(labelOf(e)) || e.id; const sk = grp ? e.name : (e.id || lab); if (seen.has(sk)) continue; seen.add(sk);
-    out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs});
+    const lab = clean(labelOf(e)) || e.id; const sk = e.id || lab; if (seen.has(sk)) continue; seen.add(sk);
+    out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs, exempt: ALLOW.test(lab + ' ' + (e.name || ''))});
   }
   return out.slice(0, 40); }"""
+# Native constraint check of the APPLICATION form only (control review 3): form.checkValidity(); never
+# reportValidity, never submit. Invalid controls inside allowlisted opt-in / job-alert blocks are reported as exempt.
+_VALIDITY_JS = """(a) => { a = a || {}; const keys = new Set(a.keys || []);
+  const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
+  const ALLOW = /\\b(sms|text messag\\w*|marketing|newsletters?|promotion\\w*|opt[ -]?in|job alerts?|create (a )?job alert|talent (community|network|pool)|future (opportunities|openings|roles)|consent to (receive|be contacted))\\b/i;
+  const labelOf = e => { let t = ''; if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
+    if (!t) { const l = e.closest('label'); if (l) t = l.textContent; }
+    return clean(t || e.getAttribute('aria-label') || e.name || e.id || ''); };
+  const bad = [], exempt = [];
+  for (const f of document.querySelectorAll('form')) {
+    const els = [...f.elements];
+    if (!els.some(e => keys.has(e.id) || keys.has(e.name))) continue;          // only the application form
+    const constrained = els.some(e => e.required || e.pattern || e.min || e.max || e.minLength > 0
+      || ['email', 'url', 'number', 'tel'].includes((e.type || '').toLowerCase()));
+    if (!constrained || f.checkValidity()) continue;                            // checkValidity only: no UI, no submit
+    // a checkbox GROUP whose members each carry `required` (Greenhouse) is satisfied by one ticked member
+    const grpOk = e => e.type === 'checkbox' && e.name && !!f.querySelector('input[type=checkbox][name="' + CSS.escape(e.name) + '"]:checked');
+    const raw = els.filter(e => e.willValidate && !e.validity.valid);
+    const inv = raw.filter(e => !(e.validity.valueMissing && grpOk(e)));
+    for (const e of inv) {
+      const ctx = (e.closest('fieldset, [role=group], [data-field-path], .field-wrapper, .application-question') || e.parentElement || e).textContent || '';
+      const lab = labelOf(e);
+      if (ALLOW.test(lab + ' ' + (e.name || '') + ' ' + ctx.slice(0, 400))) { exempt.push(lab.slice(0, 80)); continue; }
+      bad.push(lab.slice(0, 80) || 'invalid field');
+    }
+    if (!raw.length) bad.push('form failed native validation');
+  }
+  return {bad: [...new Set(bad)].slice(0, 20), exempt: [...new Set(exempt)].slice(0, 20)}; }"""
 # Visible, still-empty selects (react-select comboboxes and native <select>), required or not, with their labels.
 # Used only for DOM-only voluntary self-identification questions (_fill_demographics).
-_DOM_SELECTS_JS = """() => {
+_DOM_SELECTS_JS = """(a) => { const OPTK = (a && a.opt) || [];
+  const apiOpt = xs => xs.filter(Boolean).some(x => OPTK.includes(x));
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
   const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
   const labelOf = e => { let t = '';
@@ -550,7 +583,8 @@ _DOM_SELECTS_JS = """() => {
     const empty = ctl ? !ctl.parentElement.querySelector('[class*=select__single-value], [class*=select__multi-value]') : !e.value;
     if (!empty) continue;
     const raw = labelOf(e);
-    const required = e.required || e.getAttribute('aria-required') === 'true' || /[*✱]\\s*$/.test(raw.trim());
+    const required = e.required || e.getAttribute('aria-required') === 'true' || /[*✱]\\s*$/.test(raw.trim())
+      || (e.tagName === 'SELECT' && !apiOpt([e.id, e.name]));          // native: inverted rule (ADR-0039)
     out.push({id: e.id, label: clean(raw).slice(0, 120), required, native: e.tagName === 'SELECT'});
   }
   return out.slice(0, 40); }"""
@@ -569,7 +603,8 @@ class PlaywrightDriver(VerificationMixin):
         self._handoff_pages: set[int] = set()
         self._net: dict[int, list[dict[str, Any]]] = {}
         self._tasks: dict[int, list[asyncio.Task]] = {}
-        self._req_keys: dict[int, list[str]] = {}         # page -> keys the API form marks required (ADR-0039)
+        self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
+        self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
 
     # -- lifecycle ------------------------------------------------------------------------------
     async def _context(self):
@@ -623,7 +658,8 @@ class PlaywrightDriver(VerificationMixin):
         except Exception as e:
             return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
         finally:
-            self._req_keys.pop(id(page), None)
+            self._api_keys.pop(id(page), None)
+            self._exempt.pop(id(page), None)
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
@@ -646,7 +682,9 @@ class PlaywrightDriver(VerificationMixin):
         if (hit := stop_phrase_hit(scope, self.s.policy.stop_phrases)):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"attestation: '{hit}'")
 
-        self._req_keys[id(page)] = [f.key for f in form.fields if f.required and f.kind != FieldKind.file]
+        self._api_keys[id(page)] = {"req": [f.key for f in form.fields if f.required and f.kind != FieldKind.file],
+                                    "opt": [f.key for f in form.fields if not f.required],
+                                    "keys": [f.key for f in form.fields]}
         steps = fill_order(form, answers, files)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
@@ -694,6 +732,9 @@ class PlaywrightDriver(VerificationMixin):
                     await self._fill(page, ats, f, v)
             empty = await self._empty_required(page)
         empty += [{"id": "", "label": f"{lab} (self-ID read-back mismatch)"} for lab in demo_bad]
+        known = {e["label"] for e in empty}
+        empty += [{"id": "", "label": f"{lab} (native validation)"} for lab in await self._native_invalid(page)
+                  if lab not in known]
         if empty:                                   # never submit (or call a dry run complete) with required gaps
             labels = [e["label"] for e in empty]
             ev = await self._save_evidence(page, ref, "incomplete", extra={"required_empty": labels})
@@ -726,7 +767,7 @@ class PlaywrightDriver(VerificationMixin):
                                         detail=f"form filled and verified in the open browser tab; a human must click "
                                                f"Submit (captcha-protected){ev}")
         if dry_run:
-            ev = await self._save_evidence(page, ref, "dry-run")
+            ev = await self._save_evidence(page, ref, "dry-run", extra={"exempt_optin": self._exempt.get(id(page), [])})
             return SubmitResult(ref=ref, status="dry_run", via="browser",
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
         return await self._submit(page, ats, ref, attempt=attempt)
@@ -1206,9 +1247,31 @@ class PlaywrightDriver(VerificationMixin):
         """Every visible required control (asterisk label / aria-required / required) that is still empty. Fields the
         API form marks required count too. A scan that fails is itself reported (never an empty, 'verified' list)."""
         try:
-            return list(await page.evaluate(_EMPTY_REQUIRED_JS, self._req_keys.get(id(page), [])))
+            rows = list(await page.evaluate(_EMPTY_REQUIRED_JS, self._api_keys.get(id(page), {})))
         except Exception as e:
             return [{"id": "", "label": f"required-field scan failed ({type(e).__name__})", "rs": False}]
+        ex = [r["label"] for r in rows if r.get("exempt")]
+        if ex:
+            self._note_exempt(page, ex)
+        return [r for r in rows if not r.get("exempt")]
+
+    def _note_exempt(self, page, labels: list[str]) -> None:
+        cur = self._exempt.setdefault(id(page), [])
+        new = [x for x in labels if x not in cur]
+        if new:
+            cur.extend(new)
+            log.info("left empty on purpose (opt-in / job-alert allowlist): %s", new)
+
+    async def _native_invalid(self, page) -> list[str]:
+        """form.checkValidity() on the application form (only when it has native constraints). Never reportValidity,
+        never submit. A failing check is itself reported."""
+        try:
+            res = await page.evaluate(_VALIDITY_JS, {"keys": self._api_keys.get(id(page), {}).get("keys", [])})
+        except Exception as e:
+            return [f"native validity check failed ({type(e).__name__})"]
+        if res.get("exempt"):
+            self._note_exempt(page, list(res["exempt"]))
+        return list(res.get("bad") or [])
 
     async def _fill_demographics(self, page, answers: dict[str, Any]) -> list[str]:
         """Voluntary EEO / self-ID selects that exist only in the DOM (not in the job API; planned fields are left to
@@ -1220,7 +1283,7 @@ class PlaywrightDriver(VerificationMixin):
         blanked, and a required one (or one that cannot be blanked) is returned as a problem -> `incomplete`."""
         bad: list[str] = []
         try:
-            rows = list(await page.evaluate(_DOM_SELECTS_JS))
+            rows = list(await page.evaluate(_DOM_SELECTS_JS, self._api_keys.get(id(page), {})))
         except Exception:
             return bad
         for row in rows:

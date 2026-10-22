@@ -141,14 +141,16 @@ PHONE_FORM = ApplicationForm(ref="ashby:acme:job3", fields=[
 
 
 @pytest.mark.parametrize("opt_in", [False, True])
-async def test_sms_consent_radio_is_never_answered_and_stops_the_run(drv, opt_in):
+async def test_sms_consent_radio_is_never_answered_and_is_an_exempt_logged_optin(drv, opt_in, caplog):
+    """SMS opt-ins are on the explicit allowlist: never ticked, left empty on purpose, and logged."""
+    caplog.set_level("INFO")
     base, posts = _serve(_consent_page(SMS_CONSENT))
     res = await drv.fill_and_submit(f"{base}/acme/job3/application", PHONE_FORM,
                                     {"q-phone": "555-0101", "pref:acknowledge_privacy_notices": opt_in}, {},
                                     dry_run=True)
-    assert res.status == "incomplete", res.detail
-    assert "text message" in res.detail
+    assert res.status == "dry_run", res.detail
     assert _checked(posts) == []
+    assert "left empty on purpose" in caplog.text and "text message" in caplog.text
 
 
 @pytest.mark.parametrize("opt_in", [False, True])
@@ -199,11 +201,14 @@ async def test_unchecked_required_group_is_incomplete_not_dry_run(drv, attrs, le
     assert "How did you hear about us?" in res.detail
 
 
-async def test_optional_unmarked_group_does_not_block(drv):
+@pytest.mark.parametrize("api_optional", [True, False])
+async def test_unmarked_group_blocks_unless_the_api_says_optional(drv, api_optional):
+    """Inverted rule: no required markup at all, yet an empty group is a gap unless the API marks it required:false."""
     base, _ = _serve(_gh_group("", "", ""))
-    res = await drv.fill_and_submit(f"{base}/acme/jobs/7", ApplicationForm(ref="greenhouse:acme:7", fields=[GH_FIRST]),
+    fields = [GH_FIRST] + ([GH_GROUP.model_copy(update={"required": False})] if api_optional else [])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/7", ApplicationForm(ref="greenhouse:acme:7", fields=fields),
                                     {"first_name": "Alex"}, {}, dry_run=True)
-    assert res.status == "dry_run", res.detail
+    assert res.status == ("dry_run" if api_optional else "incomplete"), res.detail
 
 
 async def test_required_group_with_hidden_inputs_is_filled_and_verified(drv):
@@ -274,7 +279,7 @@ async def test_sms_group_next_to_the_real_group_is_never_ticked(drv):
     res = await drv.fill_and_submit(f"{base}/acme/job9/application", form, {"q-contact": "Yes"}, {}, dry_run=True)
     assert _checked(posts) == ["e1_q-contact-labeled-radio-0"]
     assert "sms-yes" not in _checked(posts)
-    assert res.status == "incomplete" and "Text messages" in res.detail, res.detail   # consent left for the user
+    assert res.status == "dry_run", res.detail                    # the SMS opt-in is allowlisted: left empty, logged
 
 
 @pytest.mark.parametrize("value,opts", [("Female", ["Male", "Non-binary"]), ("Woman", ["Man", "Non-binary"]),
@@ -362,11 +367,14 @@ async def test_set_the_api_marks_required_is_incomplete(drv):
     assert res.status == "incomplete" and "Shirt size" in res.detail, res.detail
 
 
-async def test_clearly_optional_set_still_does_not_block(drv):
+@pytest.mark.parametrize("api_optional", [True, False])
+async def test_unmarked_set_blocks_unless_the_api_says_optional(drv, api_optional):
     base, _ = _serve(_set_page(f"<div><p>Shirt size</p>{RADIOS}</div>"))
-    res = await drv.fill_and_submit(f"{base}/acme/jobs/12", ApplicationForm(ref="greenhouse:acme:12", fields=[GH_FIRST]),
+    fields = [GH_FIRST] + ([FormField(key="size", label="Shirt size", kind=FieldKind.select, options=["Small", "Large"],
+                                      required=False)] if api_optional else [])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/12", ApplicationForm(ref="greenhouse:acme:12", fields=fields),
                                     {"first_name": "Alex"}, {}, dry_run=True)
-    assert res.status == "dry_run", res.detail
+    assert res.status == ("dry_run" if api_optional else "incomplete"), res.detail
 
 
 # ---- native self-ID read-back (control review 2)
@@ -386,7 +394,9 @@ document.getElementById('f').onsubmit = e => e.preventDefault();</script></body>
 async def test_native_self_id_mismatch_is_blanked(drv, required):
     html = NATIVE_EEO.replace("__MARK__", " *" if required else "").replace("__REQ__", "required" if required else "")
     base, posts = _serve(html)
-    res = await drv.fill_and_submit(f"{base}/acme/jobs/13", ApplicationForm(ref="greenhouse:acme:13", fields=[GH_FIRST]),
+    fields = [GH_FIRST] + ([] if required else [FormField(key="gender", label="Gender", kind=FieldKind.select,
+                                                         options=["Male", "Female"], required=False)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/13", ApplicationForm(ref="greenhouse:acme:13", fields=fields),
                                     {"first_name": "Alex", "demographic:gender": "Female"}, {}, dry_run=True)
     assert [p for p in posts if p[0] == "/state"][-1][1] == ""                  # never left showing "Male"
     assert res.status == ("incomplete" if required else "dry_run"), res.detail
@@ -424,3 +434,89 @@ def test_same_country_is_exact():
     assert same_country("United States", "United States: +1") and same_country("India", "India (+91)")
     assert not same_country("United States", "United States Minor Outlying Islands: +1")
     assert not same_country("India", "British Indian Ocean Territory +246")
+
+
+# ---- control review 3: inverted rule. Every shape below has NO API data, so an empty choice group / set / native
+# select is a gap whatever the markup says.
+
+SHAPES_3 = {
+    "legend-required-word": f"<fieldset><legend>Shirt size (Required)</legend>{RADIOS}</fieldset>",
+    "ancestor-required-class": f'<div class="field required"><p>Shirt size</p>{RADIOS}</div>',
+    "aria-describedby": ('<div><p>Shirt size</p><span id=size-help>Required</span>'
+                         '<label><input type=radio name=size value=s aria-describedby=size-help> Small</label>'
+                         '<label><input type=radio name=size value=l aria-describedby=size-help> Large</label></div>'),
+    "css-only-asterisk": f"<style>.req::after{{content:' *'}}</style><div><p class=req>Shirt size</p>{RADIOS}</div>",
+    "required-badge": f'<div><p>Shirt size <span class=badge>Required</span></p>{RADIOS}</div>',
+    "leading-asterisk": f"<div><p>* Shirt size</p>{RADIOS}</div>",
+    "no-markup-at-all": f"<div><p>Shirt size</p>{RADIOS}</div>",
+    "native-select": ('<div><label for=size>Shirt size</label><select id=size name=size><option value="">Select...</option>'
+                      '<option>Small</option><option>Large</option></select></div>'),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES_3))
+async def test_any_empty_choice_without_api_optional_is_incomplete(drv, shape):
+    base, _ = _serve(_set_page(SHAPES_3[shape]))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/15", ApplicationForm(ref="greenhouse:acme:15", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete" and "Shirt size" in res.detail, (shape, res.detail)
+
+
+async def test_native_select_api_optional_does_not_block(drv):
+    base, _ = _serve(_set_page(SHAPES_3["native-select"]))
+    form = ApplicationForm(ref="greenhouse:acme:15", fields=[
+        GH_FIRST, FormField(key="size", label="Shirt size", kind=FieldKind.select, options=["Small", "Large"], required=False)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/15", form, {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+
+
+async def test_unnamed_checkboxes_are_one_set_per_field_container(drv):
+    block = ('<div class=q><p>Skills</p><label><input type=checkbox> Python</label>'
+             '<label><input type=checkbox> Rust</label><label><input type=checkbox> SQL</label></div>')
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/16", ApplicationForm(ref="greenhouse:acme:16", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", res.detail
+    assert res.detail.count("Skills") == 1, res.detail                 # one gap for the field, not one per box
+
+
+async def test_asterisk_heading_followed_by_unstarred_help_text(drv):
+    block = f'<div><b>Shirt size *</b><p class=help>Pick the closest fit</p>{RADIOS}</div>'
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/17", ApplicationForm(ref="greenhouse:acme:17", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", res.detail
+    assert "Shirt size" in res.detail and "closest fit" not in res.detail   # the question, not the help text
+
+
+async def test_job_alert_widget_is_allowlisted_and_logged(drv, caplog):
+    caplog.set_level("INFO")
+    block = ('<div class=job-alert><p>Create a Job Alert</p>'
+             '<label><input type=checkbox name=alert_opt> Send me job alerts for similar roles</label></div>')
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/18", ApplicationForm(ref="greenhouse:acme:18", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+    assert "left empty on purpose" in caplog.text
+
+
+VALIDITY_HTML = """<html><body>
+<form id=alert><label for=alert_email>Email me job alerts</label><input id=alert_email type=email required></form>
+<form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>
+<label for=zip>Postal code</label><input id=zip name=zip pattern="[0-9]{5}">
+<button type=submit>Submit application</button></form>
+<script>let calls = 0; document.getElementById('f').onsubmit = e => { e.preventDefault(); fetch('/submitted', {method: 'POST'}); };
+HTMLFormElement.prototype.reportValidity = function () { fetch('/reported', {method: 'POST'}); return true; };
+</script></body></html>"""
+
+
+@pytest.mark.parametrize("zip_value,expect", [("abc", "incomplete"), ("62701", "dry_run")])
+async def test_native_check_validity_on_the_application_form_only(drv, zip_value, expect):
+    base, posts = _serve(VALIDITY_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:19", fields=[GH_FIRST, FormField(key="zip", label="Postal code", kind=FieldKind.text)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/19", form, {"first_name": "Alex", "zip": zip_value}, {}, dry_run=True)
+    assert res.status == expect, res.detail
+    if expect == "incomplete":
+        assert "Postal code (native validation)" in res.detail
+    assert "alert" not in (res.detail or "").lower()                  # the separate job-alert form is never checked
+    assert not [p for p in posts if p[0] in ("/submitted", "/reported")]   # never submit, never reportValidity

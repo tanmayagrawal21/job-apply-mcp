@@ -258,7 +258,9 @@ async def test_dom_only_self_id_uses_profile_or_decline_and_never_invents(drv):
     ans = {"first_name": "Alex", "demographic:gender": "Female", "demographic:disability": "No",
            "demographic:hispanic": "Martian"}           # not an offered option -> decline, never a guess
     res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/5", form, ans, {}, dry_run=True)
-    assert res.status == "dry_run", res.detail
+    # the native Disability select is DOM-only (no API required:false) and "No" has no equal option: left blank,
+    # and under the inverted rule a blank DOM-only native select is a gap
+    assert res.status == "incomplete" and "Disability Status" in res.detail, res.detail
     st = json.loads([p for p in posts if p[0] == "/state"][-1][1])
     assert st == {"gender": "Female",                                   # profile value, exact option
                   "race": "",                                           # optional, no profile value: blank
