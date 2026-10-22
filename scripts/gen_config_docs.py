@@ -87,7 +87,7 @@ def render() -> str:
         "`JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). "
         "Secrets (API keys, IMAP passwords) are only ever read from the environment."), "",
         ("**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, "
-        "`dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the "
+        "`dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, `browser.captcha_policy="attempt"`) are honored only from the "
         "platform-default user config, owned by you and not group/world-writable. A file selected via "
         "`JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter."), "",
         ("**Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and "
