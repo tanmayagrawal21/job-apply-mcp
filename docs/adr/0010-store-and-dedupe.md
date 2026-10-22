@@ -27,3 +27,15 @@ matching may rarely merge distinct roles at one company; raise the threshold or 
 
 ## Verify / revert
 `uv run pytest tests/test_store.py -q`. Revert: delete `store/sqlite.py` and the `Services.store` wiring.
+
+## Amendment 1 (2026-10-22): identity-first dedupe
+Company + fuzzy title merged distinct requisitions that share a title. Now `applications` has nullable `req_id`
+(canonical `<platform>:<board>:<job_id>` ref) and `url_key` (canonical application URL: lowercase host, no `www`,
+fragment, trailing slash or tracking params such as `utm_*`, `gh_src`, `ref`; job-identifying params like `gh_jid`
+kept). `dedupe.mode = "id_first"` (default): a match on `req_id` or `url_key` is authoritative, and a known id/URL
+that matches nothing is NOT a duplicate. Company + title applies only when the candidate has neither identifier, or
+against stored rows that have neither (mail-ingested or CSV-imported). `dedupe.mode = "title"` is the legacy
+behavior. `store.seen_why(...)` returns the matched reason (`req_id:...`, `url:...`, `title`); `seen()` stays a bool.
+Existing databases are migrated on open with `ALTER TABLE ADD COLUMN` (nullable, idempotent) and `req_id` is
+backfilled from `ref`. The engine passes `ref=` and `url=` to `seen`/`record`. Revert: `dedupe.mode = "title"`.
+Verify: `uv run pytest tests/test_store.py tests/test_search_ranking.py::test_old_db_migrates -q`.

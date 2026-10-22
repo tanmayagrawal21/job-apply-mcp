@@ -103,11 +103,11 @@ class FakeStore:
         self._seen, self.records = seen, []
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def seen(self, company, title, *, within_days=180):
+    async def seen(self, company, title, *, within_days=180, **_):
         return self._seen or any(r.status == "submitted" and c == company and t == title
                                  for r, c, t in self.records)
 
-    async def record(self, result, *, company, title):
+    async def record(self, result, *, company, title, **_):
         self.records.append((result, company, title))
 
     def company_lock(self, company):

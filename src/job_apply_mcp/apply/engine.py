@@ -191,7 +191,8 @@ class ApplyEngine:
         with self._stage(ref, "gate"):  # policy gates and the dedupe lookup run concurrently
             gate, dup = await asyncio.gather(
                 self.gates.evaluate(ctx.posting, ctx.form),
-                self.store.seen(ctx.posting.company, ctx.posting.title, within_days=self.s.policy.dedupe_days))
+                self.store.seen(ctx.posting.company, ctx.posting.title, within_days=self.s.policy.dedupe_days,
+                                ref=ref, url=ctx.posting.apply_url or ctx.posting.url))
         reasons = list(gate.reasons)
         decision = gate.decision
         hits = self._stop_hits(ctx.form)
@@ -559,7 +560,8 @@ class ApplyEngine:
                                         detail=err)
             async with self._lock(ctx.posting.company):
                 if await self.store.seen(ctx.posting.company, ctx.posting.title,
-                                         within_days=self.s.policy.dedupe_days):
+                                         within_days=self.s.policy.dedupe_days, ref=ref,
+                                         url=ctx.posting.apply_url or ctx.posting.url):
                     return SubmitResult(ref=ref, status="duplicate", detail="already applied")
                 if not dry:
                     self.approvals.audit("submit_attempt", ref=ref, approval_id=approval_id, actor=by,
@@ -584,7 +586,8 @@ class ApplyEngine:
                     self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
                                           evidence_path(self.s.paths.data_dir, ref))
                 if result.status in ("submitted", "needs_human", "roadblock"):
-                    await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title)
+                    await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title,
+                                            url=ctx.posting.apply_url or ctx.posting.url)
                 if result.status == "submitted":
                     self._plans.pop(ref, None)
                 return result
