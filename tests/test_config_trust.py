@@ -26,6 +26,7 @@ CASES = [
     ("grants", "otp_window_min", "60", "", lambda s: s.grants.otp_window_min, 10),
     ("grants", "use_keyring", "false", "", lambda s: s.grants.use_keyring, True),
     ("browser", "captcha_handoff", "false", "", lambda s: s.browser.captcha_handoff, True),
+    ("browser", "captcha_policy", "attempt", "", lambda s: s.browser.captcha_policy, "handoff"),
 ]
 IDS = [f"{c[0]}.{c[1]}" if c[0] else c[1] for c in CASES]
 

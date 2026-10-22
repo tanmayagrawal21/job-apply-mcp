@@ -411,3 +411,15 @@ def test_group_or_world_writable_default_config_cannot_relax(tmp_path, monkeypat
     assert s.dry_run and s.apply.approval_mode == "human" and "writable" in caplog.text
     s = _cfg(tmp_path, monkeypatch, user=_RELAX, mode=0o644)         # owner-only-writable default file is trusted
     assert not s.dry_run and s.apply.approval_mode == "agent"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix permission model")
+def test_captcha_attempt_only_from_trusted_user_config(tmp_path, monkeypatch):
+    attempt = '[browser]\ncaptcha_policy = "attempt"\n'
+    assert _cfg(tmp_path, monkeypatch, user="").browser.captcha_policy == "handoff"
+    assert _cfg(tmp_path, monkeypatch, user=attempt).browser.captcha_policy == "attempt"            # trusted user file
+    assert _cfg(tmp_path, monkeypatch, user=attempt, via_env=True).browser.captcha_policy == "handoff"
+    assert _cfg(tmp_path, monkeypatch, user=attempt, mode=0o666).browser.captcha_policy == "handoff"
+    assert _cfg(tmp_path, monkeypatch, proj=attempt).browser.captcha_policy == "handoff"
+    env = {"JOB_APPLY__BROWSER__CAPTCHA_POLICY": "attempt"}
+    assert _cfg(tmp_path, monkeypatch, env=env).browser.captcha_policy == "handoff"
