@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.45,<2"]
+agent = ["playwright>=1.45,<2", "browser-use>=0.3"]
 hf = ["transformers>=4.44,<5"]
 mlx = ["mlx-lm>=0.18"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
@@ -34,6 +35,8 @@ exclude-newer = "2026-10-08T00:00:00Z"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-m 'not live'"
+markers = ["live: needs a real browser / network; run with `pytest -m live`"]
 testpaths = ["tests"]
 
 [tool.ruff]

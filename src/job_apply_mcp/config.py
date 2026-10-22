@@ -69,11 +69,69 @@ class PathsCfg(BaseModel):
     resume: str | None = None
 
 
+class ApplyCfg(BaseModel):
+    auto_approve: bool = False          # True skips the hash-bound approval token (ADR-0011)
+    short_text_max: int = 200           # unresolved fields up to this length go to the local LLM
+    llm_min_confidence: float = 0.6     # below this an LLM answer is treated as unresolved
+    plan_ttl_s: int = 1800              # how long a plan (and its token) stays valid
+    context_chars: int = 900            # cap on the posting summary inside client_tasks
+    plan_workers: int = 4               # concurrent planners; separate from browser_workers (pipelining)
+    write_optional: bool = False        # also write optional long free-text fields (default: skip them)
+
+
+class BrowserCfg(BaseModel):
+    driver: str = "playwright"
+    fallback_driver: str | None = "browser_use"   # used for sites the primary driver does not know
+    user_data_dir: str = "~/.local/share/job-apply-mcp/browser-profile"
+    headless: bool = False
+    keep_pages_open: bool = False       # debugging: leave the job's tab open
+    channel: str | None = None          # e.g. "chrome" to use the installed Chrome
+    timeout_s: float = 30.0
+    upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)
+    confirmation_wait_s: float = 10.0
+    agent_max_steps: int = 40
+    agent_tier: str = "medium"          # llm tier whose model drives the generic agent
+    block_resources: list[str] = Field(default_factory=lambda: ["image", "font", "media"])
+    block_hosts: list[str] = Field(default_factory=lambda: [
+        "google-analytics.com", "googletagmanager.com", "segment.io", "segment.com", "hotjar.com",
+        "doubleclick.net", "facebook.net", "fullstory.com", "mixpanel.com", "sentry.io"])
+    agent_dry_run_fill: bool = False    # the generic agent cannot be guaranteed to stop before submit
+
+
+class WritingCfg(BaseModel):
+    enabled: bool = True
+    style_exemplar: str | None = None   # path outside the repo; few-shot by structure and tone only
+    paragraphs_min: int = 4
+    paragraphs_max: int = 6
+    max_rounds: int = 3
+    reviewer: str = "client"            # "client" = review is a client_task; "router" = task_class="review"
+    rules: list[str] = Field(default_factory=lambda: [
+        "Formal register; no contractions.",
+        "Every factual claim must map to a provided profile fact.",
+        "Never state gaps, missing skills, or what the candidate lacks.",
+        "Never claim feelings or motivations (excited, passionate, drawn to) and never flatter the company.",
+        "Connect the company's stated problem to concrete profile facts.",
+    ])
+    banned_phrases: list[str] = Field(default_factory=lambda: [
+        "excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "what excites",
+        "dream job", "admire", "world-class", "cutting-edge", "innovative company", "leading company",
+        "i am eager", "i'm eager", "honored", "humbled",
+    ])
+    gap_patterns: list[str] = Field(default_factory=lambda: [
+        r"\bI have not\b", r"\bI haven't\b", r"\bI lack\b", r"\bI would need to learn\b",
+        r"\bI do not have (?:experience|a background)\b", r"\blimited experience\b", r"\bI am still learning\b",
+        r"\bnew to\b", r"\bdespite (?:my )?(?:lack|limited)\b",
+    ])
+
+
 class Settings(BaseModel):
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     paths: PathsCfg = Field(default_factory=PathsCfg)
+    apply: ApplyCfg = Field(default_factory=ApplyCfg)
+    browser: BrowserCfg = Field(default_factory=BrowserCfg)
+    writing: WritingCfg = Field(default_factory=WritingCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this
