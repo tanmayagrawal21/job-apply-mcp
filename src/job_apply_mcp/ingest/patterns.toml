@@ -1,0 +1,116 @@
+# Built-in confirmation patterns (ADR-0016). Users extend these with `ingest.patterns_file`
+# (same schema, see examples/ingest-patterns.example.toml); no code change is needed.
+#
+# Regexes are case-insensitive. `extract` rules need named groups `company` and/or `role`, and run against
+# the subject first, then the snippet. Earlier rules win; later rules only fill fields still missing.
+
+[defaults]
+subject_positive = [
+  "thank(s| you) for (applying|your application|your interest)",
+  "(we|they)('ve| have)? received your application",
+  "application (received|submitted|confirmation|confirmed|complete)",
+  "your application (to|for|was (sent|submitted|received)|has been (received|submitted))",
+  "you('ve| have)? (successfully )?applied",
+  "^applied\\b",
+  "successfully (applied|submitted)",
+]
+subject_negative = [
+  "job alert", "jobs? (for you|you may|recommendations?)", "new jobs?", "recommended",
+  "unfortunately", "not (be )?moving forward", "interview (invitation|request)", "schedule (an|your) interview",
+  "complete your application", "finish your application", "application (deadline|reminder)", "similar jobs",
+]
+body_positive = [
+  "(we|they)('ve| have)? (successfully )?received your application",
+  "thank(s| you) for (applying|your interest)",
+  "your application (has been|was) (successfully )?(received|submitted|sent)",
+  "application (was )?(successfully )?(submitted|sent)",
+]
+# Words removed from a sender display name when it is used as the company ("Acme Careers" -> "Acme").
+company_strip_words = [
+  "careers", "career", "recruiting", "recruitment", "talent", "jobs", "hiring", "hr", "team", "no-?reply",
+  "noreply", "notifications?", "do not reply", "workday", "greenhouse", "lever", "ashby", "icims", "taleo",
+  "applicant tracking", "people", "acquisition", "via",
+]
+
+[[defaults.extract]]
+regex = "your application (?:for|to) (?:the )?(?P<role>[^|!]{3,90}?) (?:position |role )?(?:at|with) (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[defaults.extract]]
+regex = "applied (?:for|to) (?:the )?(?P<role>[^|!]{3,90}?) (?:position |role )?(?:at|with) (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[defaults.extract]]
+regex = "(?:for|to) the (?P<role>[^.!|]{3,90}?) (?:position|role|opening) (?:at|with) (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[defaults.extract]]
+regex = "application (?:for|to) (?P<role>[^|!]{3,90}?) (?:at|with) (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[defaults.extract]]
+regex = "thank(?:s| you) for (?:applying|your application|your interest) (?:to|at|with|in) (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[defaults.extract]]
+regex = "(?:application|applied|sent) (?:was )?(?:sent |submitted |received )?(?:to|at) (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[defaults.extract]]
+regex = "(?:position|role|job title|job|requisition title)\\s*:\\s*(?P<role>[^.|!]{3,90}?)(?=\\s{2,}|\\s+(?:company|location|req|requisition|job id|date)\\b|[.|!]|$)"
+[[defaults.extract]]
+regex = "(?:applying|applied) (?:for|to) (?:the )?(?P<role>[^.|!]{3,90}?) (?:position|role)"
+[[defaults.extract]]
+regex = "(?:for|to) the (?P<role>[^.!|]{3,90}?) (?:position|role)"
+[[defaults.extract]]
+regex = "(?:company|employer)\\s*:\\s*(?P<company>[^.|!]{2,60}?)(?=\\s{2,}|\\s+(?:location|req|position|role)\\b|[.|!]|$)"
+
+# --- Platforms: sender domains (suffix match) identify the system; extra rules refine extraction. ---
+
+[[platform]]
+name = "greenhouse"
+sender_domains = ["greenhouse.io", "greenhouse-mail.io", "us.greenhouse-mail.io"]
+company_from_sender = true
+
+[[platform]]
+name = "lever"
+sender_domains = ["lever.co", "hire.lever.co"]
+company_from_sender = true
+
+[[platform]]
+name = "ashby"
+sender_domains = ["ashbyhq.com", "ashby.email"]
+company_from_sender = true
+
+[[platform]]
+name = "workday"
+sender_domains = ["myworkday.com", "workday.com", "myworkdayjobs.com"]
+company_from_sender = true
+
+[[platform]]
+name = "icims"
+sender_domains = ["icims.com"]
+company_from_sender = true
+
+[[platform]]
+name = "smartrecruiters"
+sender_domains = ["smartrecruiters.com"]
+company_from_sender = true
+
+[[platform]]
+name = "taleo"
+sender_domains = ["taleo.net", "oracle.com", "oraclecloud.com"]
+company_from_sender = true
+
+[[platform]]
+name = "successfactors"
+sender_domains = ["successfactors.com", "successfactors.eu", "sap.com"]
+company_from_sender = true
+
+[[platform]]
+name = "linkedin"
+sender_domains = ["linkedin.com"]
+subject_positive = ["your application was sent"]
+company_from_sender = false
+[[platform.extract]]
+regex = "your application was sent to (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[platform.extract]]
+regex = "application was sent to (?P<company>[^\\u00b7|]{2,60}?) (?P<role>[^\\u00b7|]{3,90}?) (?P=company)\\s*(?:\\u00b7|\\|)"
+
+[[platform]]
+name = "handshake"
+sender_domains = ["joinhandshake.com", "handshake.com"]
+subject_positive = ["^applied"]
+company_from_sender = false
+[[platform.extract]]
+regex = "applied:?\\s+(?P<role>.{3,90}?)\\s+(?:at|@)\\s+(?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"
+[[platform.extract]]
+regex = "you applied to (?P<role>.{3,90}?) at (?P<company>[^!.,|:]{2,60}?)(?=[!.,|:]|\\s+-\\s|\\s*$)"

@@ -135,12 +135,12 @@ def analyze(events: list[dict], *, min_count: int = 3, p95_slow_ms: int = 60000)
     for e in events:
         plat = e.get("platform") or "generic"
         status = e.get("status", "")
-        label = norm_label(e.get("field_label", ""))
-        err = norm_text(e.get("error", "") or e.get("detail", "") or "")
+        label = norm_label(scrub(e.get("field_label", ""), 80))
+        err = norm_text(scrub(e.get("error", "") or e.get("detail", "") or "", 160))
         if e.get("duration_ms") and e.get("stage"):
             durations[(plat, e["stage"])].append(int(e["duration_ms"]))
         if e.get("gate_reason"):
-            gate[(plat, norm_text(e["gate_reason"]))] += 1
+            gate[(plat, norm_text(scrub(e["gate_reason"], 160)))] += 1
         if e.get("event") == "unresolved_field" or status == "unresolved":
             if label:
                 unresolved[label] += 1

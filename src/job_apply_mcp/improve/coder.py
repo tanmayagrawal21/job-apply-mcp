@@ -50,6 +50,13 @@ def claude_code(p: FeatureProposal, cfg: ImproveCfg, s: Settings) -> CoderCall:
                       "--max-turns", str(cfg.claude_max_turns), "--permission-mode", "acceptEdits"])
 
 
+def _plain_allowed(path: str, cfg: ImproveCfg) -> bool:
+    from .service import path_ok
+
+    return path.endswith(".py") and "*" not in path and "NNNN" not in path and path_ok(
+        path, cfg.allowed_paths, cfg.forbidden_paths)
+
+
 _AIDER_PREFIX = {"ollama": "ollama_chat", "openai_compat": "openai", "anthropic": "anthropic"}
 _AIDER_BASE_ENV = {"ollama": "OLLAMA_API_BASE", "openai_compat": "OPENAI_API_BASE"}
 
@@ -69,8 +76,13 @@ def resolve_aider_model(cfg: ImproveCfg, s: Settings) -> tuple[str, dict[str, st
 @backend("aider")
 def aider(p: FeatureProposal, cfg: ImproveCfg, s: Settings) -> CoderCall:
     model, env = resolve_aider_model(cfg, s)
-    return CoderCall([cfg.aider_cmd, "--yes-always", "--no-auto-commits", "--no-gitignore", "--model", model,
-                      "--message", build_prompt(p, cfg)], env or None)
+    # --yes-always is required headless; scope is bounded by an explicit --file allowlist (existing, allowed
+    # paths only) and the harness re-checks every changed path. aider never commits: the harness does.
+    files = [f for f in p.files if _plain_allowed(f, cfg)]
+    argv = [cfg.aider_cmd, "--yes-always", "--no-auto-commits", "--no-gitignore", "--model", model]
+    for f in files:
+        argv += ["--file", f]
+    return CoderCall(argv + ["--message", build_prompt(p, cfg)], env or None)
 
 
 @backend("none")

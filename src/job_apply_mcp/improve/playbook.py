@@ -12,9 +12,17 @@ from pathlib import Path
 
 _SCRUBS = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
-    (re.compile(r"https?://\S+"), "<url>"),
+    (re.compile(r"https?://\S+|www\.\S+"), "<url>"),
+    (re.compile(r"(?:/Users|/home)/[^/\s'\"]+|[A-Za-z]:\\Users\\[^\\\s]+"), "<home>"),
     (re.compile(r"\+?\d[\d\s().-]{7,}\d"), "<num>"),
 ]
+
+
+def redact(text: str) -> str:
+    """Remove emails/URLs/home paths/phone-like numbers but keep layout (for multi-line PR bodies)."""
+    for rx, rep in _SCRUBS:
+        text = rx.sub(rep, text)
+    return text
 
 
 def scrub(text: str, limit: int = 240) -> str:

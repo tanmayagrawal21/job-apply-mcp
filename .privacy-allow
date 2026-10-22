@@ -1,0 +1,6 @@
+# Regexes matched against "<path>:<added line>" (or the path alone). Only for fictional fixtures.
+# Single-letter placeholder addresses (a@b.c) used in tests.
+^tests/test_(control|llm)\.py:.*\b[a-z]@[a-z]\.[a-z]{1,2}\b
+# Scanner self-test fixtures and this file's own comments.
+^\.privacy-allow:
+^tests/test_privacy_scan\.py:

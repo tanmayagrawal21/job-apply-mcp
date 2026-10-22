@@ -14,7 +14,7 @@ from . import coder as coders
 from . import context as ctxmod
 from . import proposal as prop
 from .classify import classify
-from .playbook import PlaybookStore
+from .playbook import PlaybookStore, redact, scrub
 from .runner import CommandRunner, SubprocessRunner
 
 SECRET_RX = re.compile(r"(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|"
@@ -117,7 +117,7 @@ class ImproveService:
         pu = await self._git(["push", "-u", cfg.remote, f"{branch}:{branch}"], wt)
         if not pu.ok:
             return res | {"status": "push_failed", "detail": pu.err[-300:], "worktree": str(wt)}
-        body = prop.to_markdown(p) + f"\n---\n{PR_FOOTER}.\n"
+        body = redact(prop.to_markdown(p) + f"\n---\n{PR_FOOTER}.\n")
         bf = pdir / "pr_body.md"
         bf.write_text(body)
         argv = ["gh", "pr", "create", "--base", cfg.base_branch, "--head", branch,
@@ -189,7 +189,8 @@ class ImproveService:
                 [e for e in events if float(e.get("ts", 0)) >= rec["ts"]], min_count=1)}
             outcomes.append({"id": rec["id"], "before_n": rec["metrics_before"]["count"],
                              "after_n": after.get(rec["id"], 0), "days": round((time.time() - rec["ts"]) / 86400, 1)})
-        return {"proposals": [p.compact() | ({"suggest": p.suggest} if p.suggest else {}) for p in props[:limit]],
+        rows = [p.compact() | ({"suggest": scrub(p.suggest, 300)} if p.suggest else {}) for p in props[:limit]]
+        return {"proposals": rows,
                 "total": len(props), "auto_applied": applied_now, "applied_outcomes": outcomes[-5:],
                 "playbooks_updated": changed, "events": len(events)}
 

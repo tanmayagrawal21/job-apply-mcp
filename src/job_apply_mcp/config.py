@@ -156,6 +156,34 @@ class ControlCfg(BaseModel):
     review_fail: str = "warn"           # what to do when the reviewer errors: warn | needs_human
 
 
+class ImapCfg(BaseModel):
+    """Read-only IMAP (ADR-0016). Holds only *names* of environment variables / a keychain service: the
+    username and password themselves are never read from config files."""
+
+    host: str = ""
+    port: int = 993
+    folder: str = "INBOX"
+    user_env: str = "JOB_APPLY_IMAP_USER"
+    password_env: str = "JOB_APPLY_IMAP_PASSWORD"
+    keyring_service: str = "job-apply-mcp"   # optional `keyring` extra; used when the env vars are unset
+    senders: list[str] = Field(default_factory=list)     # extra FROM terms (union with subjects)
+    subjects: list[str] = Field(default_factory=lambda: ["application", "applying", "applied"])
+    max_messages: int = 500
+
+
+class IngestCfg(BaseModel):
+    """Mail-confirmation dedupe (ADR-0016). `client` needs no credentials in the server."""
+
+    source: str = "client"              # client | mbox | imap
+    path: str | None = None             # mbox file or directory of .eml files (source = mbox)
+    patterns_file: str | None = None    # user TOML extending the built-in sender/subject patterns
+    since_days: int = 90
+    min_confidence: float = 0.6
+    max_new_shown: int = 10             # compact outputs list at most this many new matches
+    max_messages_per_call: int = 300
+    imap: ImapCfg = Field(default_factory=ImapCfg)
+
+
 class PathsCfg(BaseModel):
     data_dir: str = "~/.local/share/job-apply-mcp"
     profile: str = "~/.config/job-apply-mcp/profile.toml"
@@ -181,7 +209,7 @@ class ImproveCfg(BaseModel):
         ["uv", "run", "--extra", "dev", "ruff", "check", "."], ["uv", "run", "--extra", "dev", "pytest", "-q"]])
     claude_cmd: str = "claude"
     claude_allowed_tools: list[str] = Field(default_factory=lambda: [
-        "Read", "Edit", "Write", "Glob", "Grep", "Bash(uv run:*)", "Bash(git diff:*)", "Bash(git status:*)"])
+        "Read", "Edit", "Write", "Glob", "Grep"])   # file tools only: the harness runs tests/git
     claude_max_turns: int = 40
     aider_cmd: str = "aider"
     aider_model: str = "medium"                 # a router tier name (llm.tiers) or an explicit aider model id
@@ -190,6 +218,11 @@ class ImproveCfg(BaseModel):
     auto_apply_low_risk: bool = False           # apply config/profile-pattern proposals without a PR
     min_cluster_count: int = 3                  # failures needed before the analyzer proposes anything
     window_days: int = 30
+
+
+class ProvenanceCfg(BaseModel):
+    db_path: str | None = None          # default: <paths.data_dir>/provenance.db
+    export_tagging: str = "sidecar"     # none | sidecar | metadata  (see provenance/export.py)
 
 
 class ApplyCfg(BaseModel):
@@ -271,11 +304,13 @@ class Settings(BaseModel):
     llm: LLMCfg = Field(default_factory=LLMCfg)
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     paths: PathsCfg = Field(default_factory=PathsCfg)
+    provenance: ProvenanceCfg = Field(default_factory=ProvenanceCfg)
     apply: ApplyCfg = Field(default_factory=ApplyCfg)
     browser: BrowserCfg = Field(default_factory=BrowserCfg)
     writing: WritingCfg = Field(default_factory=WritingCfg)
     platforms: PlatformsCfg = Field(default_factory=PlatformsCfg)
     control: ControlCfg = Field(default_factory=ControlCfg)
+    ingest: IngestCfg = Field(default_factory=IngestCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this

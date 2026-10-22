@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .classify import risk_for, slugify
+from .playbook import redact, scrub
 
 PKG = "src/job_apply_mcp"
 
@@ -79,16 +80,16 @@ def build(description: str, kind: str, context: dict, pid: str | None = None) ->
 def to_markdown(p: FeatureProposal) -> str:
     ctx = p.context
     tmpl = ctx.get("template") or {}
-    return "\n".join([
+    return redact("\n".join([
         f"# Proposal {p.id} ({p.kind}, risk: {p.risk})", "", "## Spec", p.spec, "",
         "## Files to touch", *[f"- {f}" for f in p.files], "",
         "## Test plan", *[f"- {t}" for t in p.test_plan], "",
         "## Context", f"Protocols: {', '.join(ctx.get('protocols', []))}",
         "Relevant: " + ", ".join(ctx.get("relevant_files", [])),
         "ADRs: " + "; ".join(ctx.get("adrs", [])),
-        "Run evidence: " + ("; ".join(ctx.get("evidence", [])) or "none"),
+        "Run evidence: " + ("; ".join(scrub(x) for x in ctx.get("evidence", [])) or "none"),
         f"Template: {tmpl.get('path', 'n/a')}", "",
-        "## ADR draft", p.adr_draft, ""])
+        "## ADR draft", p.adr_draft, ""]))
 
 
 def save(p: FeatureProposal, root: Path) -> Path:

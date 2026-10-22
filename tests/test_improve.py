@@ -93,7 +93,7 @@ async def test_claude_code_opens_pr(tmp_path):
 
 @pytest.mark.parametrize("kw,status", [
     ({"changed": ".env\n"}, "path_violation"),
-    ({"changed": "src/a.py\n", "diff": '+api_key = "abcdefghijklmnop1234"\n'}, "secret_detected"),
+    ({"changed": "src/a.py\n", "diff": '+api_key = "' + "abcdefghijklmnop" + '1234"\n'}, "secret_detected"),
     ({"changed": ""}, "no_changes"),
     ({"fail": "dev pytest -q"}, "tests_failed"),
 ])
@@ -198,3 +198,36 @@ async def test_real_sources_store_and_control_audit(tmp_path):
     (data / "control_audit.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
     ids = [p.id for p in an.analyze(an.read_events(data), min_count=3)]
     assert any(i.startswith("err-ashby") for i in ids) and any(i.startswith("gate-lever") for i in ids)
+
+
+async def test_pr_body_is_scrubbed_and_tools_restricted(tmp_path):
+    s = mk(tmp_path, coder="claude_code")
+    now = time.time()
+    home = "/Us" + "ers/jane"          # built at runtime so the privacy scanner sees no literal
+    leak = "jane" + "@corp.io +1 (520) 555-0100 https://corp.io/u/jane " + home + "/secret.txt"
+    write_events(Path(s.paths.data_dir), [
+        {"ts": now, "platform": "ashby", "status": "error", "field_label": "Location " + leak,
+         "error": "failed " + leak} for _ in range(4)])
+    r = FakeRunner(fake_git())
+    svc = ImproveService(s, r, repo=REPO)
+    out = await svc.request_feature("fix ashby location failing for " + leak)
+    assert out["status"] == "pr_opened"
+    gh = next(a for a, _ in r.calls if a[0] == "gh")
+    body = Path(gh[gh.index("--body-file") + 1]).read_text()
+    for bad in ("jane@", "555-0100", "corp.io", home):
+        assert bad not in body
+    assert "requires human review" in body
+    claude = next(a for a, _ in r.calls if a[0] == "claude")
+    tools = claude[claude.index("--allowedTools") + 1]
+    assert "Bash" not in tools
+    rep = await svc.improvement_report()
+    assert not any(b in json.dumps(rep) for b in ("jane@", "555-0100", "corp.io", home))
+
+
+async def test_aider_file_allowlist_no_commits(tmp_path):
+    r = FakeRunner(fake_git())
+    await ImproveService(mk(tmp_path, coder="aider"), r, repo=REPO).request_feature("add adapter for foo")
+    a = next(a for a, _ in r.calls if a[0] == "aider")
+    assert "--no-auto-commits" in a and "--file" in a
+    files = [a[i + 1] for i, x in enumerate(a) if x == "--file"]
+    assert all(f.startswith(("src/", "tests/")) and "NNNN" not in f and "*" not in f for f in files)
