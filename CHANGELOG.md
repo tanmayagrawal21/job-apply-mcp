@@ -12,6 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - Browser driver: Ashby radio/checkbox groups are selected and verified; the required-field scan counts radio/checkbox groups (an unchecked required group is `incomplete`, never `dry_run`); DOM-only consent radios stop the run unless they are an opted-in privacy-notice acknowledgement; server-rendered forms are filled only after hydration (`browser.hydrate_wait_s`); the phone-widget country comes from the profile; DOM-only self-ID selects use only the profile value or the decline option (optional ones without a profile value stay blank); select read-backs are scoped to the field (ADR-0039).
 
 ### Added
+- `writing.timeout_s` hard budget for all prose of one plan (timed-out fields become `client_tasks` with any partial draft, never answers), per-call provider timeouts, `llm.heavy_classes` semaphore with `llm_wait` / `llm_gen` in `timings`, `writing.mode = "deferred"` plus the `draft_answers` tool (ADR-0041).
 - Optional submission caps `apply.daily_limit` / `daily_limit_per_platform` / `run_limit` (`0` = no limit; loosening only from the trusted user config), `daily_limit` block in `control_status` and `doctor` (ADR-0035).
 - Resume-first fact precedence, placeholder/addressee/temporal/degeneration/closing lint, comparative quality gate,
   `facts_report` tool, `writing.cover_letter_policy`, tuning degeneration/leakage hard gates (ADR-0023).

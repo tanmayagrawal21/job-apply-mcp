@@ -82,6 +82,13 @@ async def plan_application(ref_or_url: str) -> str:
     return _out(await svc().plan(ref_or_url))
 
 
+@mcp.tool()
+async def draft_answers(ref_or_url: str) -> str:
+    """Draft the prose fields a plan left open (writing.mode="deferred", or ones that timed out): local writer +
+    reviewer under writing.timeout_s. Returns the same shape as plan_application with a fresh approval_id."""
+    return _out(await svc().draft(ref_or_url))
+
+
 class _Confirm(BaseModel):
     approve: bool = Field(description="Submit this application?")
 

@@ -3,13 +3,14 @@
 1. classify: "review" / "narrative" / "field" (explicit or by cheap rules);
 2. fields: score complexity -> tier (small/medium/large); narrative/review use their own configured tier;
 3. pick the first available (provider, model) among primary + fallbacks, honoring allow_cloud;
-4. call with per-provider semaphores, timeouts, retries with backoff;
+4. call with per-provider + heavy-class semaphores (queue wait vs generation timed), timeouts, retries;
 5. validate JSON (+ optional validator): one repair attempt, then escalate one tier;
 6. record token/latency stats per provider:model for health().
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -27,6 +28,7 @@ from .base import (
     LLMResult,
     ProviderError,
     Task,
+    add_timing,
     estimate_tokens,
     extract_json,
     validate_schema,
@@ -168,7 +170,8 @@ class LLMRouter:
         return out
 
     # ---- calling ---------------------------------------------------------------------------------
-    async def _call_once(self, c: LLMTier, prompt: str, task: Task, schema: dict | None) -> Completion:
+    async def _call_once(self, c: LLMTier, prompt: str, task: Task, schema: dict | None,
+                         timeout_s: float | None = None) -> Completion:
         p = self.provider(c.provider)
         kw: dict[str, Any] = {"model": c.model, "system": task.system, "json_schema": schema,
                                   "max_tokens": task.max_tokens or c.max_tokens,
@@ -178,26 +181,38 @@ class LLMRouter:
         if getattr(p, "supports_options", False):
             kw["think"] = c.think
             kw["num_ctx"] = c.num_ctx
+        if timeout_s and getattr(p, "supports_timeout", False):
+            kw["timeout_s"] = timeout_s   # per-call HTTP timeout in the provider itself (ADR-0041)
         fn = getattr(p, "complete_ex", None)
         if fn is None:
             text = await p.complete(prompt, **kw)
             return Completion(text, estimate_tokens(prompt), estimate_tokens(text))
         return await fn(prompt, **kw)
 
+    def _is_heavy(self, c: LLMTier, task: Task) -> bool:
+        """Big local models are serialized router-wide: tiers flagged `heavy`, plus every local call of the
+        llm.heavy_classes task classes (narrative, review). Cloud and client calls never queue here."""
+        if c.provider == "client":
+            return False
+        return c.heavy or (task.task_class in self.cfg.heavy_classes and not self._is_cloud(c.provider))
+
     async def _call_cand(self, c: LLMTier, prompt: str, task: Task, schema: dict | None) -> Completion:
         key = f"{c.provider}:{c.model}"
         st = self.stats[key]
         last: Exception | None = None
         budget = c.timeout_s or self.cfg.timeout_s
+        heavy = self._is_heavy(c, task)
         for attempt in range(self.cfg.retries + 1):
-            t0 = time.monotonic()
+            tq = time.monotonic()
+            t0: float | None = None
             try:
-                async with self._sem(c.provider, c.model):
-                    if c.heavy and c.provider != "client":
-                        async with self._heavy:
-                            comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema), budget)
-                    else:
-                        comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema), budget)
+                async with self._sem(c.provider, c.model), (self._heavy if heavy else contextlib.nullcontext()):
+                    t0 = time.monotonic()
+                    st.wait_ms += (t0 - tq) * 1000
+                    add_timing("llm_wait", (t0 - tq) * 1000)
+                    # the per-call budget bounds generation only; queue wait is bounded by the caller's
+                    # deadline (writing.timeout_s), so contention is visible instead of silently eating it
+                    comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema, budget), budget)
             except ClientTaskRequired:
                 raise
             except (ProviderError, TimeoutError) as e:
@@ -210,6 +225,12 @@ class LLMRouter:
                 if attempt < self.cfg.retries:
                     await asyncio.sleep(self.cfg.backoff_s * (2 ** attempt))
                 continue
+            finally:
+                now = time.monotonic()
+                if t0 is None:          # cancelled (or failed) while still queued
+                    add_timing("llm_wait", (now - tq) * 1000)
+                else:
+                    add_timing("llm_gen", (now - t0) * 1000)
             st.calls += 1
             ms = (time.monotonic() - t0) * 1000
             st.total_ms += ms
@@ -265,6 +286,8 @@ class LLMRouter:
         self.class_counts[d["task_class"]] += 1
         if task.system is None:   # stable per-class prefix -> Ollama KV-cache reuse
             task = task.model_copy(update={"system": self.cfg.system_prefix.get(d["task_class"])})
+        if task.task_class != d["task_class"]:   # the class decides heavy-semaphore membership in _call_cand
+            task = task.model_copy(update={"task_class": d["task_class"]})
         base = {"task_class": d["task_class"], "score": d["score"], "reasons": d["reasons"]}
         order = self._order(d["tier"])
         schema = task.json_schema

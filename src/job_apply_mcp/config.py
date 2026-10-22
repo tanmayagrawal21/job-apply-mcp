@@ -128,6 +128,8 @@ class LLMCfg(BaseModel):
         "review": "You review application drafts for specificity, accuracy and tone.",
     })
     heavy_parallel: int = 1         # concurrent calls to `heavy` local models (one big model resident on 16 GB)
+    # Task classes whose LOCAL calls always share the heavy semaphore, whatever the tier's `heavy` flag (ADR-0041).
+    heavy_classes: list[str] = Field(default_factory=lambda: ["narrative", "review"])
     providers: dict[str, dict[str, Any]] = Field(default_factory=lambda: {
         "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
@@ -352,6 +354,12 @@ class WritingCfg(BaseModel):
     paragraphs_max: int = 6
     max_rounds: int = 3
     reviewer: str = "client"            # "client" = review is a client_task; "router" = task_class="review"
+    # Hard wall-clock budget (seconds) for ALL prose fields of one plan: writer and reviewer rounds together.
+    # Unfinished fields come back as client_tasks marked `timed_out` with any partial draft (ADR-0041). <=0 = off.
+    timeout_s: float = 90.0
+    # "inline": plan_application drafts prose. "deferred": plan lists prose as client_tasks and the separate
+    # draft_answers tool runs writer + reviewer later, so batch planning stays fast (ADR-0041).
+    mode: Literal["inline", "deferred"] = "inline"
     rules: list[str] = Field(default_factory=lambda: [
         "Formal register; no contractions.",
         "Every factual claim must map to a provided profile fact.",
