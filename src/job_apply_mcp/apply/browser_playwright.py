@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 from ..config import Settings
 from ..core import registry
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
+from .geo import location_queries, pick_location
 from .mapper import (
     _DEMOGRAPHIC_LABEL,
     DEMOGRAPHIC_KEYS,
@@ -213,6 +214,7 @@ _ERRORS_JS = """() => {
 
 # ------------------------------------------------------------------ Playwright layer (live-tested only)
 
+_BENIGN_ALERT = re.compile(r"cookie|privacy notice|job alert|future opportunities", re.IGNORECASE)
 _MENU_OPTS = "[class*=select__menu] [role=option], [role=listbox] [role=option], [role=option], [class*=option]"
 _SELECT_VALUES = "[class*=select__single-value], [class*=select__multi-value__label]"
 _MENU_SCOPED = "[class*=select__menu] [role=option], [role=listbox] [role=option], [role=option]"
@@ -449,7 +451,7 @@ class PlaywrightDriver(VerificationMixin):
     async def _validation_errors(self, page) -> list[str]:
         try:
             errs = list(await page.evaluate(_ERRORS_JS))
-            return [e for e in errs if not re.search(r"cookie|privacy notice", e, re.IGNORECASE)]  # consent banners
+            return [e for e in errs if not _BENIGN_ALERT.search(e)]  # consent banners, job-alert sign-ups
         except Exception:
             return []
 
@@ -588,26 +590,33 @@ class PlaywrightDriver(VerificationMixin):
         async_lookup = f.kind == FieldKind.location or not f.options
         snapped = best_option(value, f.options) if f.options else None
         flt = value if async_lookup else (snapped or value)
-        await loc.click()
-        await loc.press_sequentially(flt, delay=15)             # type a filter
-        try:
-            await opts.first.wait_for(state="visible", timeout=3500 if async_lookup else 2000)
-        except Exception:
-            if f.options:                                       # filter matched nothing: widen
-                await loc.press("ControlOrMeta+a")
-                await loc.press("Backspace")
-                try:
-                    await opts.first.wait_for(state="visible", timeout=1500)
-                except Exception:
-                    await self._close_menu(page)
-                    return False
-            else:
+        if f.kind == FieldKind.location:                        # geocoder: "City, ST" often returns nothing
+            pick = await self._geo_pick(page, loc, opts, value)
+            if pick is None:
                 await self._close_menu(page)
                 return False
-        texts = [t.strip() for t in await opts.all_inner_texts()]
-        pick = best_option(value, texts) if texts else None
-        if pick is None and async_lookup and texts:
-            pick = texts[0]
+            texts = [t.strip() for t in await opts.all_inner_texts()]
+        else:
+            await loc.click()
+            await loc.press_sequentially(flt, delay=15)         # type a filter
+            try:
+                await opts.first.wait_for(state="visible", timeout=3500 if async_lookup else 2000)
+            except Exception:
+                if f.options:                                   # filter matched nothing: widen
+                    await loc.press("ControlOrMeta+a")
+                    await loc.press("Backspace")
+                    try:
+                        await opts.first.wait_for(state="visible", timeout=1500)
+                    except Exception:
+                        await self._close_menu(page)
+                        return False
+                else:
+                    await self._close_menu(page)
+                    return False
+            texts = [t.strip() for t in await opts.all_inner_texts()]
+            pick = best_option(value, texts) if texts else None
+            if pick is None and async_lookup and texts:
+                pick = texts[0]
         if pick is None:
             await self._close_menu(page)
             return False
@@ -623,6 +632,25 @@ class PlaywrightDriver(VerificationMixin):
         if not committed:
             await self._close_menu(page)
         return committed
+
+    @staticmethod
+    async def _geo_pick(page, loc, opts, value: str) -> str | None:
+        """Try location_queries() in order; return the first suggestion pick_location() accepts (never a guess
+        that contradicts the state/country given)."""
+        for q in location_queries(value):
+            await loc.click()
+            await loc.press("ControlOrMeta+a")
+            await loc.press("Backspace")
+            await loc.press_sequentially(q, delay=15)
+            try:
+                await opts.first.wait_for(state="visible", timeout=3500)
+            except Exception:
+                continue
+            texts = [t.strip() for t in await opts.all_inner_texts()]
+            pick = pick_location(value, texts)
+            if pick is not None:
+                return pick
+        return None
 
     @staticmethod
     async def _close_menu(page) -> None:
