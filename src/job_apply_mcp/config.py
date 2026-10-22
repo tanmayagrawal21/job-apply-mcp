@@ -69,7 +69,38 @@ class PathsCfg(BaseModel):
     resume: str | None = None
 
 
+class ImproveCfg(BaseModel):
+    """Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and path scope is tunable."""
+
+    coder: str = "none"                         # claude_code | aider | client | none
+    repo_path: str | None = None                # git checkout used as the base; default: package source repo
+    remote: str = "origin"
+    base_branch: str = "main"
+    branch_prefix: str = "auto/"
+    gh_repo: str | None = None                  # "owner/name"; default: gh infers from the remote
+    open_pr: bool = True
+    worktree_dir: str | None = None             # default: <data_dir>/improve/worktrees
+    cleanup_worktree: bool = True               # remove the worktree after a PR is opened
+    allowed_paths: list[str] = Field(default_factory=lambda: ["src/", "tests/", "docs/", "examples/"])
+    forbidden_paths: list[str] = Field(default_factory=lambda: [
+        ".env", ".github/", "uv.lock", "pyproject.toml", "*.pem", "*.key", "secrets", "profile.toml", "config.toml"])
+    test_commands: list[list[str]] = Field(default_factory=lambda: [
+        ["uv", "run", "--extra", "dev", "ruff", "check", "."], ["uv", "run", "--extra", "dev", "pytest", "-q"]])
+    claude_cmd: str = "claude"
+    claude_allowed_tools: list[str] = Field(default_factory=lambda: [
+        "Read", "Edit", "Write", "Glob", "Grep", "Bash(uv run:*)", "Bash(git diff:*)", "Bash(git status:*)"])
+    claude_max_turns: int = 40
+    aider_cmd: str = "aider"
+    aider_model: str = "medium"                 # a router tier name (llm.tiers) or an explicit aider model id
+    coder_timeout_s: int = 1800
+    context_max_chars: int = 6000
+    auto_apply_low_risk: bool = False           # apply config/profile-pattern proposals without a PR
+    min_cluster_count: int = 3                  # failures needed before the analyzer proposes anything
+    window_days: int = 30
+
+
 class Settings(BaseModel):
+    improve: ImproveCfg = Field(default_factory=ImproveCfg)
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     policy: PolicyCfg = Field(default_factory=PolicyCfg)

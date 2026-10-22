@@ -80,6 +80,19 @@ async def list_applications(status: str = "", limit: int = 50, cursor: int = 0) 
 
 
 @mcp.tool()
+async def request_feature(description: str, kind: str | None = None) -> str:
+    """Propose (and, if a coder backend is configured, implement as a PR for human review) a change to this tool.
+    kind: platform_adapter | control | config | new_tool | bug (auto-detected if omitted)."""
+    return _out(await svc().request_feature(description, kind))
+
+
+@mcp.tool()
+async def improvement_report(limit: int = 10) -> str:
+    """Ranked improvement proposals learned from recent run failures (compact)."""
+    return _out(await svc().improvement_report(limit))
+
+
+@mcp.tool()
 async def health() -> str:
     """Report enabled platforms, LLM providers and which local models are reachable."""
     return _out(await svc().health())
