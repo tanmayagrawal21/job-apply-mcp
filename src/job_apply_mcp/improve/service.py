@@ -69,7 +69,7 @@ class ImproveService:
     def _finish(self, pdir: Path, out: dict, status: str | None) -> dict:
         if status:
             out["status"] = status
-        (pdir / "status.json").write_text(json.dumps(out, indent=1))
+        (pdir / "status.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
         return out
 
     async def _git(self, args: list[str], cwd: Path, timeout: float = 120):
@@ -90,7 +90,7 @@ class ImproveService:
         res: dict[str, Any] = {"branch": branch}
         call = coders.BACKENDS[cfg.coder](p, cfg, self.s)
         c = await self.runner.run(call.argv, cwd=str(wt), timeout=cfg.coder_timeout_s, env=call.env)
-        (pdir / "coder.log").write_text((c.out + "\n" + c.err)[-8000:])
+        (pdir / "coder.log").write_text((c.out + "\n" + c.err)[-8000:], encoding="utf-8")
         if not c.ok:
             return res | {"status": "coder_failed", "detail": c.err[-300:], "worktree": str(wt)}
         await self._git(["add", "-A"], wt)
@@ -106,7 +106,7 @@ class ImproveService:
         for cmd in cfg.test_commands:
             t = await self.runner.run(cmd, cwd=str(wt), timeout=cfg.coder_timeout_s)
             if not t.ok:
-                (pdir / "tests.log").write_text((t.out + t.err)[-8000:])
+                (pdir / "tests.log").write_text((t.out + t.err)[-8000:], encoding="utf-8")
                 return res | {"status": "tests_failed", "cmd": " ".join(cmd), "worktree": str(wt)}
         msg = f"{p.kind}: {p.description.strip()[:60]}\n\n{PR_FOOTER}.\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
         cm = await self._git(["commit", "-q", "-m", msg], wt)
@@ -119,7 +119,7 @@ class ImproveService:
             return res | {"status": "push_failed", "detail": pu.err[-300:], "worktree": str(wt)}
         body = redact(prop.to_markdown(p) + f"\n---\n{PR_FOOTER}.\n")
         bf = pdir / "pr_body.md"
-        bf.write_text(body)
+        bf.write_text(body, encoding="utf-8")
         argv = ["gh", "pr", "create", "--base", cfg.base_branch, "--head", branch,
                 "--title", f"[auto] {p.description.strip()[:70]}", "--body-file", str(bf)]
         if cfg.gh_repo:
@@ -138,7 +138,7 @@ class ImproveService:
 
     def _applied(self) -> list[dict]:
         p = self._applied_path()
-        return [json.loads(x) for x in p.read_text().splitlines() if x.strip()] if p.is_file() else []
+        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()] if p.is_file() else []
 
     def _current(self, key: str):
         cur: Any = self.s
@@ -149,7 +149,7 @@ class ImproveService:
     def _apply(self, p: an.Proposal, n_events: int) -> dict | None:
         ch = p.change or {}
         overlay_p = self.root / "overlay.json"
-        ov = json.loads(overlay_p.read_text()) if overlay_p.is_file() else {"config": {}, "profile_patterns": []}
+        ov = json.loads(overlay_p.read_text(encoding="utf-8")) if overlay_p.is_file() else {"config": {}, "profile_patterns": []}
         if ch.get("op") == "add_profile_pattern":
             before, after = len(ov["profile_patterns"]), None
             if ch["label"] in ov["profile_patterns"]:
@@ -166,11 +166,11 @@ class ImproveService:
         else:
             return None
         self.root.mkdir(parents=True, exist_ok=True)
-        overlay_p.write_text(json.dumps(ov, indent=1, sort_keys=True))
+        overlay_p.write_text(json.dumps(ov, indent=1, sort_keys=True), encoding="utf-8")
         rec = {"id": p.id, "ts": time.time(), "change": ch, "before": before, "after": after,
                "metrics_before": {"count": p.count, "window_days": self.cfg.window_days},
                "revert": "delete this id's key from overlay.json"}
-        with self._applied_path().open("a") as f:
+        with self._applied_path().open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
         return rec
 

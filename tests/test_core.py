@@ -34,7 +34,7 @@ async def test_host_limiter_spacing():
     for _ in range(3):
         async with await lim("https://example.com/a"):
             pass
-    assert time.monotonic() - t0 >= 0.1
+    assert time.monotonic() - t0 >= 0.08  # slack for coarse Windows timers
 
 
 def test_registry_duplicate_and_unknown():

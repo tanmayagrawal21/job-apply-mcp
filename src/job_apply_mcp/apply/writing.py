@@ -61,7 +61,7 @@ def load_exemplar(path: str | None, limit: int = 3500) -> str:
     if not path:
         return ""
     try:
-        return Path(path).expanduser().read_text()[:limit]
+        return Path(path).expanduser().read_text(encoding="utf-8")[:limit]
     except OSError:
         return ""
 

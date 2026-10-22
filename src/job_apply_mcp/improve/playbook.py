@@ -46,7 +46,7 @@ class PlaybookStore:
         p = self.path(platform)
         if p.is_file():
             try:
-                return json.loads(p.read_text())
+                return json.loads(p.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 pass
         return {"platform": _safe_name(platform), "lessons": []}
@@ -84,7 +84,7 @@ class PlaybookStore:
     def _save(self, pb: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         p = self.path(pb["platform"])
-        p.write_text(json.dumps(pb, indent=1, sort_keys=True))
+        p.write_text(json.dumps(pb, indent=1, sort_keys=True), encoding="utf-8")
         md = [f"# {pb['platform']} playbook (mechanics only)", ""]
         md += [f"- {x['text']} (seen {x['evidence']}x)" for x in sorted(pb["lessons"], key=lambda x: -x["evidence"])]
-        p.with_suffix(".md").write_text("\n".join(md) + "\n")
+        p.with_suffix(".md").write_text("\n".join(md) + "\n", encoding="utf-8")

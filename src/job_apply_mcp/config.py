@@ -2,7 +2,7 @@
 
 Precedence, lowest to highest:
   1. built-in defaults (this file)
-  2. user file   ~/.config/job-apply-mcp/config.toml   (or $JOB_APPLY_MCP_CONFIG)
+  2. user file   <config dir>/config.toml (see paths.py; or $JOB_APPLY_MCP_CONFIG)
   3. project file ./job-apply-mcp.toml
   4. environment variables  JOB_APPLY__SECTION__KEY=value   (double underscore = nesting)
   5. per-call tool arguments (where a tool exposes them)
@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from . import paths
 
 
 class ConcurrencyCfg(BaseModel):
@@ -113,7 +115,7 @@ class LLMCfg(BaseModel):
         "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
         "anthropic": {"api_key_env": "ANTHROPIC_API_KEY"},
-        "hf_local": {"device": "mps"},
+        "hf_local": {"device": "auto"},
     })
 
 
@@ -193,8 +195,8 @@ class IngestCfg(BaseModel):
 
 
 class PathsCfg(BaseModel):
-    data_dir: str = "~/.local/share/job-apply-mcp"
-    profile: str = "~/.config/job-apply-mcp/profile.toml"
+    data_dir: str = Field(default_factory=paths.default_data_dir_str)
+    profile: str = Field(default_factory=lambda: paths.default_config_dir_str() + "/profile.toml")
     resume: str | None = None
 
 
@@ -249,7 +251,7 @@ class ApplyCfg(BaseModel):
 class BrowserCfg(BaseModel):
     driver: str = "playwright"
     fallback_driver: str | None = "browser_use"   # used for sites the primary driver does not know
-    user_data_dir: str = "~/.local/share/job-apply-mcp/browser-profile"
+    user_data_dir: str = Field(default_factory=lambda: paths.default_data_dir_str() + "/browser-profile")
     headless: bool = False
     keep_pages_open: bool = False       # debugging: leave the job's tab open
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
@@ -408,9 +410,9 @@ def _coerce(v: str) -> Any:
 
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
-    user = Path(os.environ.get("JOB_APPLY_MCP_CONFIG", "~/.config/job-apply-mcp/config.toml")).expanduser()
+    user = paths.config_file()
     for p in (user, (project_dir or Path.cwd()) / "job-apply-mcp.toml"):
         if p.is_file():
-            data = _deep_merge(data, tomllib.loads(p.read_text()))
+            data = _deep_merge(data, tomllib.loads(p.read_text(encoding="utf-8")))
     data = _deep_merge(data, _env_overrides())
     return Settings.model_validate(data)

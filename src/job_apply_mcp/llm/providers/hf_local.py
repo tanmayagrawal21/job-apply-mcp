@@ -14,7 +14,7 @@ class HFLocalProvider:
     name = "hf_local"
     is_cloud = False
 
-    def __init__(self, device: str = "mps", **_):
+    def __init__(self, device: str = "auto", **_):
         self.device = device
         self._pipes: dict[str, Any] = {}
         self._lock = asyncio.Lock()
@@ -28,7 +28,22 @@ class HFLocalProvider:
     def _load(self, model: str):
         from transformers import pipeline  # lazy: optional dependency
 
-        return pipeline("text-generation", model=model, device=self.device)
+        return pipeline("text-generation", model=model, device=self._resolve_device())
+
+    def _resolve_device(self) -> str:
+        """'auto' picks cuda, then Apple mps, then cpu (no macOS assumption, ADR-0020)."""
+        if self.device != "auto":
+            return self.device
+        try:
+            import torch  # installed with transformers
+
+            if torch.cuda.is_available():
+                return "cuda"
+            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                return "mps"
+        except Exception:  # noqa: BLE001, S110 - detection must never break loading
+            pass
+        return "cpu"
 
     async def complete_ex(self, prompt: str, *, model: str, system: str | None = None, max_tokens: int = 512,
                           temperature: float = 0.2, json_schema: dict | None = None) -> Completion:

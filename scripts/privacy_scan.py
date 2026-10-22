@@ -220,11 +220,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.diff is not None or a.staged:
         if a.staged:
-            diff = git(root, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff")
+            diff = git(root, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--no-textconv")
             added = git(root, "diff", "--cached", "--name-only", "--diff-filter=A").split()
         else:
             base = git(root, "merge-base", a.diff, "HEAD").strip()
-            diff = git(root, "diff", "-U0", "--no-color", "--no-ext-diff", base)
+            diff = git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", base)
             added = git(root, "diff", "--name-only", "--diff-filter=A", base).split()
         for path, lines in parse_diff(diff).items():
             findings += scan_text(path, lines, terms, allow)

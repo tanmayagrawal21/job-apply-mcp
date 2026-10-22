@@ -42,5 +42,5 @@ def tag_export(store: ProvenanceStore, ids: list[str], mode: str, target: str | 
     if not target:
         raise ValueError("sidecar mode needs the exported file path as `target`")
     side = Path(target).expanduser().with_name(Path(target).name + ".provenance.json")
-    side.write_text(json.dumps(m, indent=1))
+    side.write_text(json.dumps(m, indent=1), encoding="utf-8")
     return {"mode": mode, "sidecar": str(side), "llm_ids": m["llm_ids"]}

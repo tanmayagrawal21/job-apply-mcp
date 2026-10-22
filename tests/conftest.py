@@ -25,14 +25,16 @@ async def http(tmp_path):
 def _isolated_data_dir(tmp_path, monkeypatch):
     """No test may touch the real ~/.local/share/job-apply-mcp (audit log, store, profile, evidence):
     every Settings() built during a test points its data and browser-profile dirs at tmp_path."""
+    from job_apply_mcp import paths
     from job_apply_mcp.config import Settings
     orig = Settings.__init__
 
     def init(self, *a, **kw):
         orig(self, *a, **kw)
-        if self.paths.data_dir.startswith("~"):
+        default_data = paths.default_data_dir_str()
+        if self.paths.data_dir.startswith("~") or self.paths.data_dir == default_data:
             self.paths.data_dir = str(tmp_path / "data")
-        if self.browser.user_data_dir.startswith("~"):
+        if self.browser.user_data_dir.startswith("~") or self.browser.user_data_dir == default_data + "/browser-profile":
             self.browser.user_data_dir = str(tmp_path / "profile")
 
     monkeypatch.setattr(Settings, "__init__", init)

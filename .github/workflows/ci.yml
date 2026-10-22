@@ -7,14 +7,51 @@ permissions:
   contents: read
 jobs:
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync --locked --extra dev --python ${{ matrix.python }}
+      - run: uv run ruff check .
+      # Live tests (real Ollama / browser) are skipped unless JAM_LIVE=1, which CI never sets.
+      - run: uv run pytest -q
+      - name: Generated docs are current
+        if: runner.os == 'Linux' && matrix.python == '3.12'
+        run: uv run python scripts/gen_config_docs.py --check
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/cfg" XDG_DATA_HOME="$RUNNER_TEMP/data"
+          export APPDATA="$RUNNER_TEMP/appdata" LOCALAPPDATA="$RUNNER_TEMP/localappdata"
+          uv run job-apply-mcp --version
+          uv run python -m job_apply_mcp version
+          uv run job-apply-mcp init --yes
+          uv run job-apply-mcp doctor --offline --json
+  package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-      - run: uv python install 3.12
-      - run: uv sync --locked --extra dev
-      - run: uv run ruff check .
-      - run: uv run pytest -q
+      - run: uv build
+      - name: Wheel installs and runs in a clean environment
+        run: |
+          uv venv /tmp/wheelenv
+          uv pip install --python /tmp/wheelenv/bin/python dist/*.whl
+          /tmp/wheelenv/bin/job-apply-mcp --version
+          XDG_CONFIG_HOME=/tmp/cfg /tmp/wheelenv/bin/job-apply-mcp init --yes
+          test -f /tmp/cfg/job-apply-mcp/config.toml
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t jam .
+      - run: docker run --rm jam --version
   privacy:
     runs-on: ubuntu-latest
     steps:

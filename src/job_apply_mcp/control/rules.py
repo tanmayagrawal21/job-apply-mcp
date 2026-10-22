@@ -164,7 +164,7 @@ def load_rules(path: str | Path) -> RuleSet:
     if not p.is_file():
         raise ControlConfigError(f"rules file not found: {p}")
     try:
-        data = tomllib.loads(p.read_text())
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise ControlConfigError(f"rules file {p}: {e}") from None
     return parse_rules(data)
