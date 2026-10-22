@@ -138,7 +138,7 @@ def rank_postings(postings: Sequence[Posting], query: str, skills: Sequence[str]
         max_total = sum(w[k] for k in ("query", "skills", "seniority", "location", "comp", "recency")
                         if w.get(k)) or 1.0
         score = 100 * max(0.0, sum(c for c, _ in parts)) / max_total
-        why = [r for c, r in sorted(parts, key=lambda x: -abs(x[0])) if abs(c) > 1e-9][: cfg.max_why]
+        why = [r[:60] for c, r in sorted(parts, key=lambda x: -abs(x[0])) if abs(c) > 1e-9][: cfg.max_why]
         out.append(Ranked(p, round(score, 1), why, q_hit))
     out.sort(key=lambda r: (r.score, r.posting.posted_at or "", r.posting.ref), reverse=True)
     return out

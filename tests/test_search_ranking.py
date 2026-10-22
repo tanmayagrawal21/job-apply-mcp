@@ -28,7 +28,7 @@ def test_bm25_prefers_rarer_and_repeated_terms():
 
 
 def test_description_only_match_ranks_and_explains():
-    s = cfg(skills=["Python"], seniority="entry", location_order=["remote", "tucson"])
+    s = cfg(skills=["Python"], seniority="entry", location_order=["remote", "springfield"])
     ps = [post(1, "Software Engineer", "We use Python and Postgres daily."),
           post(2, "Software Engineer", "Java shop.", loc="Berlin")]
     r = rank_postings(ps, "python", s.search.skills, s.search, s.policy, NOW)
@@ -38,10 +38,10 @@ def test_description_only_match_ranks_and_explains():
 
 
 def test_seniority_location_comp_signals():
-    s = cfg(seniority="entry", location_order=["tucson", "remote"], weights={
+    s = cfg(seniority="entry", location_order=["springfield", "remote"], weights={
         "query": 0, "skills": 0, "seniority": 1, "location": 1, "comp": 1, "recency": 0})
     s.policy.salary_floor = 100_000
-    good = post(1, "Junior Engineer", loc="Tucson, AZ", sal="$110k - $130k")
+    good = post(1, "Junior Engineer", loc="Springfield, IL", sal="$110k - $130k")
     bad = post(2, "Senior Engineer", loc="Berlin", sal="$60k - $70k")
     a, b = rank_postings([good, bad], "", [], s.search, s.policy, NOW)
     assert a.posting is good and a.score > b.score
@@ -144,3 +144,18 @@ def test_old_db_migrates(tmp_path):
     row = st._db.execute("SELECT req_id,url_key FROM applications").fetchone()
     assert row["req_id"] == "greenhouse:acmeco:7" and row["url_key"] is None
     st.close()
+
+
+@respx.mock
+async def test_reasons_short_and_output_within_budget(tmp_path):
+    jobs = [gh(i, f"Data Engineer {i}", "Rust and Kafka " + "filler " * 50) for i in range(1, 201)]
+    respx.get("https://boards-api.greenhouse.io/v1/boards/acmeco/jobs").respond(json={"jobs": jobs})
+    for j in jobs:
+        respx.get(f"https://boards-api.greenhouse.io/v1/boards/acmeco/jobs/{j['id']}").respond(json=j)
+    s = mk(tmp_path, location_order=["a very long preferred location name " * 3, "remote"])
+    out = await s.search(query="rust kafka engineer", since_days=0, apply_policy=False)
+    assert out["total"] == 200 and 0 < len(out["rows"]) <= 25 and out["next"] == len(out["rows"])
+    assert all(len(w) <= 60 and len(r["why"]) <= 3 for r in out["rows"] for w in r["why"])
+    import json
+    assert len(json.dumps(out, separators=(",", ":"))) <= s.settings.response_budget_chars
+    await s.aclose()

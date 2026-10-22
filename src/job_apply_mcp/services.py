@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,10 @@ class Services:
             out["filtered"] = dropped
         if errors:
             out["errors"] = errors[:10]
+        budget = self.settings.response_budget_chars   # shrink the page rather than let the server truncate JSON
+        while len(out_rows) > 1 and len(json.dumps(out, separators=(",", ":"), default=str)) > budget:
+            out_rows.pop()
+            out["next"] = cursor + len(out_rows)
         return out
 
     # ------------------------------------------------------------------ relevance ranking (ADR-0022)
