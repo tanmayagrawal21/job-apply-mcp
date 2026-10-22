@@ -62,9 +62,10 @@ async def plan_application(ref_or_url: str) -> str:
 
 @mcp.tool()
 async def submit_application(ref_or_url: str, answers: dict[str, Any] | None = None,
-                             dry_run: bool | None = None) -> str:
-    """Submit using the best available path (platform API, else browser driver). Honors global dry_run."""
-    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run))
+                             dry_run: bool | None = None, token: str | None = None) -> str:
+    """Submit using the best available path (platform API, else browser driver). Honors global dry_run.
+    `token` is the approval token from plan_application (required for real submits unless auto_approve)."""
+    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, token=token))
 
 
 @mcp.tool()
@@ -80,6 +81,40 @@ async def list_applications(status: str = "", limit: int = 50, cursor: int = 0) 
 
 
 @mcp.tool()
+async def request_feature(description: str, kind: str | None = None) -> str:
+    """Propose (and, if a coder backend is configured, implement as a PR for human review) a change to this tool.
+    kind: platform_adapter | control | config | new_tool | bug (auto-detected if omitted)."""
+    return _out(await svc().request_feature(description, kind))
+
+
+@mcp.tool()
+async def improvement_report(limit: int = 10) -> str:
+    """Ranked improvement proposals learned from recent run failures (compact)."""
+    return _out(await svc().improvement_report(limit))
+
+
+@mcp.tool()
+async def record_text(kind: str, text: str, origin: str, parent: str | None = None, model: str | None = None,
+                      prompt: str | None = None, context: str | None = None) -> str:
+    """Record provenance for a text artifact (kind: resume_bullet|cover_letter|answer|profile_fact).
+    origin: user_written | llm_generated (llm_generated needs `model`). `context` = job/question the text answers."""
+    return _out(await svc().record_text(kind, text, origin, parent=parent, model=model, prompt=prompt,
+                                        context=context))
+
+
+@mcp.tool()
+async def verify_text(id: str, edited_text: str | None = None, verified_by: str = "user") -> str:
+    """User approves LLM text. Without edited_text -> user_verified; with it -> user_edited child plus diff."""
+    return _out(await svc().verify_text(id, edited_text=edited_text, verified_by=verified_by))
+
+
+@mcp.tool()
+async def provenance(id: str, include_text: bool = False) -> str:
+    """Origin, model, prompt hash and ancestor chain for a text id."""
+    return _out(await svc().provenance(id, include_text=include_text))
+
+
+@mcp.tool()
 async def health() -> str:
     """Report enabled platforms, LLM providers and which local models are reachable."""
     return _out(await svc().health())
@@ -91,6 +126,10 @@ _register_control(mcp, lambda: svc().settings)
 from .tuning.tools import register as _register_tune
 
 _register_tune(mcp, lambda: svc().settings)
+
+from .ingest.tools import register as _register_ingest
+
+_register_ingest(mcp, svc)
 
 
 def main() -> None:

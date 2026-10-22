@@ -13,7 +13,7 @@ from . import guards
 from .dataset import build_dataset
 from .evalgate import evaluate
 from .export import export_ollama
-from .source import trusted_items
+from .source import TuningRefused, trusted_items
 from .trainer import Trainer, TrainSpec, has_adapter, trainers
 
 _lock = threading.Lock()
@@ -44,6 +44,10 @@ class TuneManager:
         tmp = self.root / "state.json.tmp"
         tmp.write_text(json.dumps(st, indent=1))
         tmp.replace(self.root / "state.json")
+
+    def _source_label(self) -> str:
+        p = self.settings.provenance.db_path or str(Path(self.settings.paths.data_dir).expanduser() / "provenance.db")
+        return f"provenance:{p}"
 
     def adapter_dir(self, run_id: str | None) -> Path | None:
         return self.root / run_id / "adapter" if run_id else None
@@ -93,6 +97,8 @@ class TuneManager:
             return {"status": "skipped", "reason": "a tuning run is already in progress"}
         try:
             return self._run(trigger, force)
+        except TuningRefused as e:
+            return {"status": "refused", "reason": str(e)}
         finally:
             _lock.release()
 
@@ -110,7 +116,7 @@ class TuneManager:
 
         run_id = time.strftime("%Y%m%d-%H%M%S")
         run_dir = self.root / run_id
-        ds = build_dataset(self.source, c, run_dir)
+        ds = build_dataset(self.source, c, run_dir, source_label=self._source_label())
         if not ds.train:
             return {"status": "skipped", "reason": "no usable training examples", "dataset": ds.summary()}
         st["running"] = run_id

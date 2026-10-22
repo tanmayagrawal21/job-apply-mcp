@@ -1,33 +1,21 @@
-"""Dataset source for tuning (ADR-0017). Codes against the provenance `DatasetSource` (ADR-0007, PR #7).
+"""Dataset source for tuning (ADR-0017): the provenance `DatasetSource` (ADR-0007).
 
-If the provenance package is absent (PR #7 not merged yet) a structurally identical local fallback is used, so
-this package works and is testable either way. Either way ONLY user_written / user_verified / user_edited
-records are reachable; `llm_generated` text can never enter a dataset.
+Only user_written / user_verified / user_edited records may be trained on. Rather than silently filtering, a
+source that yields anything else is REFUSED, so a mislabeled or leaking source is loud, not quiet.
 """
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
-from pydantic import BaseModel
+from ..provenance import USER_TRUSTED, DatasetSource, ProvenanceRecord
 
-TRUSTED = frozenset({"user_written", "user_verified", "user_edited"})
+TRUSTED = frozenset(o.value for o in USER_TRUSTED)
 
-try:  # pragma: no cover - exercised once PR #7 is on main
-    from ..provenance import DatasetSource, ProvenanceRecord  # type: ignore[attr-defined]
-except ImportError:
-    class ProvenanceRecord(BaseModel):  # type: ignore[no-redef]
-        id: str
-        kind: str
-        text: str
-        origin: str
-        created_at: str = ""
-        parent_id: str | None = None
-        diff_from_parent: str | None = None
-        context: str | None = None
+__all__ = ["TRUSTED", "DatasetSource", "ProvenanceRecord", "TuningRefused", "origin_of", "trusted_items"]
 
-    @runtime_checkable
-    class DatasetSource(Protocol):  # type: ignore[no-redef]
-        def items(self, kinds: list[str] | None = None) -> list[Any]: ...
+
+class TuningRefused(RuntimeError):
+    """Training input failed the provenance guard."""
 
 
 def origin_of(rec: Any) -> str:
@@ -36,5 +24,9 @@ def origin_of(rec: Any) -> str:
 
 
 def trusted_items(source: Any, kinds: list[str] | None = None) -> list[Any]:
-    """Defense in depth: even a buggy source cannot smuggle llm_generated text into training."""
-    return [r for r in source.items(kinds) if origin_of(r) in TRUSTED and r.text and r.text.strip()]
+    """Every item must carry a trusted origin; any other origin aborts (defense in depth over ADR-0007)."""
+    items = list(source.items(kinds))
+    bad = sorted({f"{r.id}:{origin_of(r)}" for r in items if origin_of(r) not in TRUSTED})
+    if bad:
+        raise TuningRefused(f"untrusted origin in training input, refusing to train: {bad[:5]}")
+    return [r for r in items if r.text and r.text.strip()]

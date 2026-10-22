@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from ..config import Settings
@@ -21,16 +22,10 @@ def set_source(source: Any) -> None:
 
 
 def _default_source(settings: Settings) -> Any:
-    try:
-        from pathlib import Path
+    from ..provenance import ProvenanceDatasetSource, ProvenanceStore
 
-        from ..provenance import ProvenanceDatasetSource, ProvenanceStore  # type: ignore[attr-defined]
-        return ProvenanceDatasetSource(ProvenanceStore(Path(settings.paths.data_dir).expanduser() / "provenance.db"))
-    except Exception:  # noqa: BLE001 # provenance not available yet: empty source, tools still answer
-        class _Empty:
-            def items(self, kinds=None):
-                return []
-        return _Empty()
+    return ProvenanceDatasetSource(ProvenanceStore(settings.provenance.db_path
+                                                   or Path(settings.paths.data_dir).expanduser() / "provenance.db"))
 
 
 def get_manager(settings: Settings) -> TuneManager:

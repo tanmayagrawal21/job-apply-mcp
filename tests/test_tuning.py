@@ -1,15 +1,18 @@
 import difflib
 
+import pytest
+
 from job_apply_mcp.config import Settings
+from job_apply_mcp.provenance import ProvenanceRecord
 from job_apply_mcp.tuning import TuneManager, build_dataset
 from job_apply_mcp.tuning.dataset import reverse_unified_diff
 from job_apply_mcp.tuning.evalgate import lint_violations
-from job_apply_mcp.tuning.source import ProvenanceRecord, trusted_items
+from job_apply_mcp.tuning.source import TuningRefused, trusted_items
 from job_apply_mcp.tuning.trainer import TrainResult
 
 
 def rec(i, text, origin="user_written", kind="cover_letter", **kw):
-    return ProvenanceRecord(id=i, kind=kind, text=text, origin=origin, context=f"role {i}", **kw)
+    return ProvenanceRecord(id=i, kind=kind, text=text, origin=origin, context=f"role {i}", created_at="2026-01-01", **kw)
 
 
 def body(n, seed):
@@ -59,23 +62,36 @@ def many(n=6, extra=()):
 
 
 def test_llm_generated_never_enters(tmp_path):
-    src = many(4, [rec("llm", body(40, "z"), origin="llm_generated")])
-    assert "llm" not in {r.id for r in trusted_items(src)}
-    ds = build_dataset(src, settings(tmp_path).tune, tmp_path / "d")
-    assert "llm" not in ds.source_ids
-    assert "zword" not in (tmp_path / "d" / "train.jsonl").read_text()
+    src = many(4, [rec("llm", body(40, "z"), origin="llm_generated", model="m")])
+    with pytest.raises(TuningRefused):
+        trusted_items(src)
+    with pytest.raises(TuningRefused):
+        build_dataset(src, settings(tmp_path).tune, tmp_path / "d", source_label="test")
+    m = TuneManager(settings(tmp_path), src, FakeTrainer(), battery=lambda: False, resident=lambda s: [])
+    assert m.run("manual")["status"] == "refused"
+    assert m.trainer.trained == []
+
+
+def test_manifest_records_source_and_hash(tmp_path):
+    import json
+    build_dataset(many(4), settings(tmp_path).tune, tmp_path / "d", source_label="provenance:/x/p.db")
+    man = json.loads((tmp_path / "d" / "manifest.json").read_text())
+    assert man["source"] == "provenance:/x/p.db" and len(man["items"]) == 4
+    assert all(len(i["sha256"]) == 64 and i["origin"] == "user_written" and i["source"] for i in man["items"])
+    with pytest.raises(TuningRefused):
+        build_dataset(many(4), settings(tmp_path).tune, tmp_path / "d2")
 
 
 def test_dataset_dedupe_filters_split_and_facts(tmp_path):
     same = body(40, "q")
     src = Src([rec("a", same), rec("b", same), rec("c", "too short"), rec("d", body(40, "d")), rec("e", body(40, "e")),
                rec("f", "I live in Tucson and build things.", kind="profile_fact")])
-    ds = build_dataset(src, settings(tmp_path, eval_fraction=0.34).tune, tmp_path / "d")
+    ds = build_dataset(src, settings(tmp_path, eval_fraction=0.34).tune, tmp_path / "d", source_label="test")
     assert ds.dropped == {"duplicate": 1, "length": 1}
     assert len(ds.train) + len(ds.eval) == 3 and len(ds.eval) == 1 and len(ds.train) >= 1
     assert "Tucson" in ds.train[0]["messages"][1]["content"]
     assert (tmp_path / "d" / "valid.jsonl").read_text().count("\n") == 1
-    ds2 = build_dataset(src, settings(tmp_path, eval_fraction=0.34).tune, tmp_path / "d2")
+    ds2 = build_dataset(src, settings(tmp_path, eval_fraction=0.34).tune, tmp_path / "d2", source_label="test")
     assert ds2.eval == ds.eval        # deterministic
 
 
@@ -85,12 +101,12 @@ def test_preference_pairs_from_user_edited(tmp_path):
     diff = "\n".join(difflib.unified_diff(draft.splitlines(), edited.splitlines(), "p", "c", lineterm=""))
     assert reverse_unified_diff(edited, diff) == draft
     src = many(3, [rec("e1", edited + " " + body(30, "k"), origin="user_edited", diff_from_parent=None)])
-    ds = build_dataset(src, settings(tmp_path, min_words=3).tune, tmp_path / "d")
+    ds = build_dataset(src, settings(tmp_path, min_words=3).tune, tmp_path / "d", source_label="test")
     assert ds.prefs == []     # no diff -> no pair
     full = edited + " " + body(30, "k")
     d2 = "\n".join(difflib.unified_diff((draft + " " + body(30, "k")).splitlines(), full.splitlines(), lineterm=""))
     src = many(3, [rec("e1", full, origin="user_edited", diff_from_parent=d2)])
-    ds = build_dataset(src, settings(tmp_path, min_words=3).tune, tmp_path / "d3")
+    ds = build_dataset(src, settings(tmp_path, min_words=3).tune, tmp_path / "d3", source_label="test")
     assert len(ds.prefs) == 1 and "thrilled" in ds.prefs[0]["rejected"] and "thrilled" not in ds.prefs[0]["chosen"]
 
 

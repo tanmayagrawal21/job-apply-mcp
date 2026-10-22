@@ -7,9 +7,11 @@ Owner-approved: adapt a LOCAL open model to the end user's own writing style, co
 text anywhere. Training data must be authored or approved by the user (ADR-0007 provenance), never raw LLM output.
 
 ## Decisions
-1. **Data only via `DatasetSource`** (`tuning/source.py`). Codes against ADR-0007's Protocol (PR #7); if
-   `job_apply_mcp.provenance` is absent, a structurally identical local fallback is used. `trusted_items()` re-filters
-   to `user_written|user_verified|user_edited` as defense in depth, so `llm_generated` text cannot enter a dataset.
+1. **Data only via the provenance `DatasetSource`** (ADR-0007). `trusted_items()` REFUSES (does not silently filter)
+   any source that yields a non-user origin (`TuningRefused`; run status `refused`). Every run writes
+   `manifest.json`: source label (provenance db path) plus, per item, id, kind, origin, sha256 of the text and its
+   source ref, so mislabeled inputs are auditable. A missing source label also refuses. Training on files outside
+   provenance (e.g. a "sample letter") is not supported: record it via `record_text` with its true origin first.
 2. **Dataset builder** (`dataset.py`): SFT chat pairs (instruction = kind + compact `context` + compact facts from
    `profile_fact` records; output = the user's text). Normalised-text/3-gram-Jaccard dedupe, word-length filters,
    deterministic hash-based train/eval split (held-out set is stable as data grows), JSONL in

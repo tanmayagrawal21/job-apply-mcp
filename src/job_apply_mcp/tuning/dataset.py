@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import TuneCfg
-from .source import origin_of, trusted_items
+from .source import TuningRefused, origin_of, trusted_items
 
 SYSTEM = "You write in the user's own voice: plain, concrete, first person, no filler."
 
@@ -94,8 +94,11 @@ def _chat(instr: str, out: str) -> dict:
                          {"role": "assistant", "content": out}]}
 
 
-def build_dataset(source: Any, cfg: TuneCfg, run_dir: Path, exclude_ids: set[str] | None = None) -> Dataset:
+def build_dataset(source: Any, cfg: TuneCfg, run_dir: Path, exclude_ids: set[str] | None = None,
+                  source_label: str = "") -> Dataset:
     """Pure function of (source, cfg): deterministic, writes JSONL into run_dir."""
+    if not source_label:
+        raise TuningRefused("no source path/label supplied; the run manifest must record where data came from")
     ds = Dataset(run_dir=run_dir)
     drop = ds.dropped
     bump = lambda k: drop.__setitem__(k, drop.get(k, 0) + 1)
@@ -156,5 +159,12 @@ def build_dataset(source: Any, cfg: TuneCfg, run_dir: Path, exclude_ids: set[str
     run_dir.mkdir(parents=True, exist_ok=True)
     for name, rows in (("train", ds.train), ("valid", ds.eval), ("preferences", ds.prefs)):
         (run_dir / f"{name}.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in rows))
+    used = set(ds.source_ids) | {r.id for r in recs if r.kind == cfg.facts_kind} \
+        | {r.id for r in recs if origin_of(r) == "user_edited" and r.kind in cfg.kinds}
+    manifest = [{"id": r.id, "kind": r.kind, "origin": origin_of(r),
+                 "sha256": hashlib.sha256(r.text.encode()).hexdigest(),
+                 "source": getattr(r, "source", None) or f"{source_label}#{r.id}"}
+                for r in sorted(recs, key=lambda r: r.id) if r.id in used]
+    (run_dir / "manifest.json").write_text(json.dumps({"source": source_label, "items": manifest}, indent=1))
     (run_dir / "dataset.json").write_text(json.dumps({**ds.summary(), "source_ids": ds.source_ids}))
     return ds

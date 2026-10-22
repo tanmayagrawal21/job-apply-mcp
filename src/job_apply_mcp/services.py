@@ -5,6 +5,7 @@ message) until its component lands, so the server always starts.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,13 +19,39 @@ from .platforms.textflags import grad_window_conflict, years_required
 
 
 class Services:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, engine: Any = None):
         self.settings = settings
+        self._engine = engine
         c = settings.concurrency
+        self._prov = None
         self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s)
         self._http: HttpClient | None = None
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
+        self._llm = None
+
+    @property
+    def improve(self):
+        from .improve.service import ImproveService
+
+        if getattr(self, "_improve", None) is None:
+            self._improve = ImproveService(self.settings)
+        return self._improve
+
+    async def request_feature(self, description: str, kind: str | None = None) -> dict[str, Any]:
+        return await self.improve.request_feature(description, kind)
+
+    async def improvement_report(self, limit: int = 10) -> dict[str, Any]:
+        return await self.improve.improvement_report(limit)
+
+    @property
+    def llm(self):
+        """Task-class + complexity router (ADR-0008), created lazily."""
+        if self._llm is None:
+            from .llm import LLMRouter
+
+            self._llm = LLMRouter(self.settings)
+        return self._llm
 
     @property
     def store(self):
@@ -34,6 +61,18 @@ class Services:
 
             self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days)
         return self._store
+
+    @property
+    def engine(self):
+        """Apply engine, built lazily (ADR-0011); raises ComponentMissing with a clear message if a
+        required sibling component is not installed."""
+        if self._engine is None:
+            from .apply.adapters import RouterView
+            from .apply.factory import build_engine
+
+            self._engine = build_engine(self.settings, store=self.store, resolve_adapter=self.resolve,
+                                        router=RouterView(self.llm))
+        return self._engine
 
     # ------------------------------------------------------------------ platform plumbing
     @property
@@ -171,15 +210,17 @@ class Services:
         return {"ref": f.ref, "via": f.submit_via, "fields": rows}
 
     async def plan(self, ref_or_url: str) -> dict[str, Any]:
-        raise NotImplementedError("apply engine lands in feat/apply-engine")
+        return (await self.engine.plan(ref_or_url)).compact()
 
-    async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None) -> dict[str, Any]:
-        raise NotImplementedError("apply engine lands in feat/apply-engine")
+    async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None,
+                     token: str | None = None) -> dict[str, Any]:
+        r = await self.engine.submit(ref_or_url, answers, token, dry_run)
+        row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
+               "t": self.engine.timings.get(ref_or_url)}
+        return {k: v for k, v in row.items() if v}
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        limit = max_parallel or self.settings.concurrency.browser_workers
-        rows = await bounded_gather((self.submit(r, {}, dry_run) for r in refs), limit)
-        return {"results": [r if not isinstance(r, BaseException) else {"error": str(r)} for r in rows]}
+        return {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
 
     async def list_applications(self, status: str, limit: int, cursor: int) -> dict[str, Any]:
         page = await self.store.list(status="" if status in ("", "all") else status, limit=limit, cursor=cursor)
@@ -187,8 +228,49 @@ class Services:
                  "at": r["created_at"][:10]} for r in page["rows"]]
         return {"rows": rows, "next": page["next"], "total": page["total"]}
 
+    # --- provenance + tuning (feat/provenance) ---
+    @property
+    def prov(self):
+        if self._prov is None:
+            from .provenance import ProvenanceStore
+
+            cfg, data = self.settings.provenance, Path(self.settings.paths.data_dir).expanduser()
+            self._prov = ProvenanceStore(cfg.db_path or data / "provenance.db")
+        return self._prov
+
+    async def record_text(self, kind: str, text: str, origin: str, parent: str | None = None,
+                          model: str | None = None, prompt: str | None = None,
+                          context: str | None = None) -> dict[str, Any]:
+        rec = await asyncio.to_thread(self.prov.record_text, kind, text, origin, parent=parent, model=model,
+                                      prompt=prompt, context=context)
+        return rec.compact()
+
+    async def verify_text(self, id: str, edited_text: str | None = None, verified_by: str = "user",
+                          ) -> dict[str, Any]:
+        rec = await asyncio.to_thread(self.prov.verify_text, id, edited_text=edited_text, verified_by=verified_by)
+        return {**rec.compact(), **({"diff": rec.diff_from_parent} if rec.diff_from_parent else {})}
+
+    async def provenance(self, id: str, include_text: bool = False) -> dict[str, Any]:
+        chain = await asyncio.to_thread(self.prov.lineage, id)
+        if not chain:
+            return {"error": f"unknown record {id}"}
+        rows = [r.compact() for r in chain]
+        if include_text:
+            rows[0]["text"] = chain[0].text
+        return {"record": rows[0], "ancestors": rows[1:],
+                "llm_generated": chain[0].llm_generated, **({"diff": chain[0].diff_from_parent}
+                                                           if chain[0].diff_from_parent else {})}
+
+    async def export_provenance(self, ids: list[str], target: str | None = None,
+                                mode: str | None = None) -> dict[str, Any]:
+        from .provenance import tag_export
+
+        return await asyncio.to_thread(tag_export, self.prov, ids, mode or self.settings.provenance.export_tagging,
+                                       target)
+
     async def health(self) -> dict[str, Any]:
         from .core import registry
 
         return {"platforms": registry.platforms.names(), "llm": registry.llm_providers.names(),
-                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run}
+                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run,
+                "llm_router": await self.llm.health()}

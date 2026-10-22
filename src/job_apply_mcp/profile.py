@@ -24,6 +24,8 @@ class Contact(BaseModel):
     region: str = ""
     country: str = ""
     postal_code: str = ""
+    lat: float | None = None       # optional coordinates of the configured location (derived geo fields)
+    lon: float | None = None
 
     @property
     def full_name(self) -> str:

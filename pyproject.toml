@@ -14,9 +14,12 @@ dependencies = [
 [project.optional-dependencies]
 jobspy = ["python-jobspy>=1.1"]
 browser = ["playwright>=1.45,<2"]
+agent = ["playwright>=1.45,<2", "browser-use>=0.3"]
 hf = ["transformers>=4.44,<5"]
+litellm = ["litellm>=1.83.0"]
 mlx = ["mlx-lm>=0.18"]
 tune = ["mlx-lm>=0.18"]
+keyring = ["keyring>=25,<26"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
 
 [project.scripts]
@@ -37,6 +40,7 @@ exclude-newer = "2026-10-08T00:00:00Z"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["live: needs a real local Ollama or browser (run with JAM_LIVE=1)"]
 
 [tool.ruff]
 line-length = 110

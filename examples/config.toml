@@ -64,3 +64,16 @@ api_key_env = "OPENAI_API_KEY"    # the key itself is read from the environment,
 api_key_env = "ANTHROPIC_API_KEY"
 [llm.providers.hf_local]
 device = "mps"
+
+[ingest]                          # duplicate prevention from your own confirmation emails (ADR-0016)
+source = "client"                 # client (agent passes summaries; no credentials) | mbox | imap
+# path = "~/Mail/confirmations"   # source = "mbox": an .mbox file or a directory of .eml files
+# patterns_file = "~/.config/job-apply-mcp/ingest-patterns.toml"   # see examples/ingest-patterns.example.toml
+since_days = 90
+min_confidence = 0.6
+max_new_shown = 10
+[ingest.imap]                     # read-only EXAMINE; credentials ONLY from env vars or the OS keychain
+# host = "imap.example.com"       # export JOB_APPLY_IMAP_USER / JOB_APPLY_IMAP_PASSWORD, or
+folder = "INBOX"                  #   `pip install job-apply-mcp[keyring]` and store the password under
+# senders = []                    #   service "job-apply-mcp"; extra FROM filters (union with subjects)
+# subjects = ["application", "applying", "applied"]
