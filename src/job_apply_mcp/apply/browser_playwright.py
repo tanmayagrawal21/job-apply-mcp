@@ -14,8 +14,12 @@ Deterministic, no LLM. Mechanics distilled from real runs:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -35,15 +39,21 @@ class AtsProfile:
     confirm_text: tuple[str, ...] = ("thank you for applying", "application submitted", "submitted successfully",
                                      "thanks for applying", "your application has been")
     upload_settle_extra_s: float = 0.0
+    submit_markers: tuple[str, ...] = ()      # URL fragments of the submit request (network signal)
+    require_upload_chip: bool = False         # wait for the filename to show before submit
 
 
 ATS: dict[str, AtsProfile] = {
     "greenhouse": AtsProfile("greenhouse", confirm_urls=("/confirmation",),
-                             confirm_text=("thank you for applying", "thank you for your interest")),
-    "lever": AtsProfile("lever", confirm_urls=("/thanks",), confirm_text=("application submitted",),
-                        upload_settle_extra_s=3.0),  # resume parse re-renders the form
+                             confirm_text=("thank you for applying", "thank you for your interest"),
+                             submit_markers=("/applications", "/jobs/")),
+    "lever": AtsProfile("lever", confirm_urls=("/thanks",), confirm_text=("application submitted", "thanks for applying", "application has been received"),
+                        upload_settle_extra_s=3.0, submit_markers=("/apply",)),  # resume parse re-renders the form
     "ashby": AtsProfile("ashby", typing="keys", confirm_urls=("/success", "/confirmation"),
-                        confirm_text=("application submitted", "thanks for applying", "successfully submitted")),
+                        confirm_text=("application submitted", "thanks for applying", "thank you for applying",
+                                     "successfully submitted", "your application was successfully submitted"),
+                        submit_markers=("apisubmit", "submitapplication"),
+                        require_upload_chip=True),
 }
 
 
@@ -119,9 +129,76 @@ def same_value(kind: FieldKind, label: str, want: Any, got: str) -> bool:
     return normalize(str(want)) == normalize(got)
 
 
+# ---- evidence + network signal (pure, unit-tested)
+
+_ERR_WORDS = re.compile(r"error|invalid|failed|required|captcha|spam|denied|not allowed", re.IGNORECASE)
+
+
+def evidence_dir(data_dir: str | Path, ref: str) -> Path:
+    """<data_dir>/evidence/<ref-hash>; always under the data dir, never in a repo."""
+    return Path(data_dir).expanduser() / "evidence" / hashlib.sha256(ref.encode()).hexdigest()[:12]
+
+
+def is_submit_request(ats: AtsProfile, url: str, method: str) -> bool:
+    low = url.lower()
+    return method.upper() == "POST" and any(m in low for m in ats.submit_markers)
+
+
+def network_verdict(ats: AtsProfile, records: list[dict[str, Any]]) -> str | None:
+    """'success' | 'failure' | None from recorded ATS submit responses (latest decisive record wins)."""
+    for r in reversed([r for r in records if r.get("submit")]):
+        status, body = int(r.get("status", 0)), str(r.get("body", ""))
+        low = body.lower()
+        if status >= 400:
+            return "failure"
+        if ats.name == "ashby":
+            if '"errors"' in low and not re.search(r'"errors"\s*:\s*(\[\s*\]|null)', low):
+                return "failure"
+            if "formsubmitsuccess" in low or re.search(r'"success"\s*:\s*true', low) or "submitsuccess" in low:
+                return "success"
+            if _ERR_WORDS.search(body.replace('"errors":null', "").replace('"errors":[]', "")):
+                return "failure"
+            continue                                   # ambiguous: fall back to URL/text
+        if status < 400 and not _ERR_WORDS.search(body):
+            return "success"
+        return "failure"
+    return None
+
+
+def decide_outcome(ats: AtsProfile, url: str, text: str, form_present: bool,
+                   records: list[dict[str, Any]]) -> str | None:
+    """'submitted' | 'failed' | None. The network response outranks page text; URL/text are the fallback."""
+    net = network_verdict(ats, records)
+    if net == "success":
+        return "submitted"
+    if net == "failure":
+        return "failed"
+    return "submitted" if detect_confirmation(ats, url, text, form_present) else None
+
+
+def trim(s: str, n: int) -> str:
+    s = re.sub(r"[ \t]+", " ", s or "").strip()
+    return s if len(s) <= n else s[:n] + "...[truncated]"
+
+
+# JS: visible validation errors; returns keys/messages only, never input values.
+_ERRORS_JS = """() => {
+  const vis = e => { const r = e.getBoundingClientRect(); const st = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none'; };
+  const out = [];
+  const key = e => e.getAttribute('name') || e.id || e.getAttribute('aria-label') || e.tagName.toLowerCase();
+  document.querySelectorAll('[aria-invalid=true]').forEach(e => { if (vis(e)) out.push('invalid:' + key(e)); });
+  document.querySelectorAll('[role=alert], [class*=banner i], [class*=alert i]').forEach(e => { const t = (e.innerText || '').trim();
+    if (t && vis(e)) out.push('alert:' + t.slice(0, 120)); });
+  document.querySelectorAll('[class*=error i]').forEach(e => { const t = (e.innerText || '').trim();
+    if (t && t.length < 200 && vis(e) && !e.querySelector('[class*=error i]')) out.push('error:' + t.slice(0, 120)); });
+  return Array.from(new Set(out)).slice(0, 20);
+}"""
+
+
 # ------------------------------------------------------------------ Playwright layer (live-tested only)
 
-_MENU_OPTS = "[class*=select__menu] [role=option], [role=listbox] [role=option], [class*=option]"
+_MENU_OPTS = "[class*=select__menu] [role=option], [role=listbox] [role=option], [role=option], [class*=option]"
 _SELECT_VALUES = "[class*=select__single-value], [class*=select__multi-value__label]"
 _SUBMIT_NAME = re.compile(r"^\s*(submit( application)?|send application|apply( now)?)\s*$", re.IGNORECASE)
 
@@ -135,6 +212,8 @@ class PlaywrightDriver:
         self._pw: Any = None
         self._ctx: Any = None
         self._lock = asyncio.Lock()
+        self._net: dict[int, list[dict[str, Any]]] = {}
+        self._tasks: dict[int, list[asyncio.Task]] = {}
 
     # -- lifecycle ------------------------------------------------------------------------------
     async def _context(self):
@@ -181,12 +260,15 @@ class PlaywrightDriver:
         ats = ATS[ats_name]
         ctx = await self._context()
         page = await ctx.new_page()
+        self._attach_recorder(page, ats)
         try:
             return await self._run(page, ats, greenhouse_embed_url(apply_url, ref) if ats_name == "greenhouse"
                                    else apply_url, form, answers, files, dry_run)
         except Exception as e:
             return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
         finally:
+            self._net.pop(id(page), None)
+            self._tasks.pop(id(page), None)
             if not self.b.keep_pages_open:
                 await page.close()
 
@@ -217,20 +299,119 @@ class PlaywrightDriver:
                 failed.append(f.key)
         if uploads:
             await self._settle_upload(page, ats)
-        bad = await self._verify(page, texty)
+            if ats.require_upload_chip:
+                for f, v in uploads:
+                    if f.key not in failed and not await self._wait_chip(page, v):
+                        failed.append(f.key)
+        bad = await self._verify(page, texty, ats)
         if bad:                                     # uploads/parsers can wipe fields: one refill pass
             for f, v in texty:
                 if f.key in bad:
                     await self._fill(page, ats, f, v)
-            bad = await self._verify(page, [(f, v) for f, v in texty if f.key in bad])
+            bad = await self._verify(page, [(f, v) for f, v in texty if f.key in bad], ats)
         problems = sorted(set(failed) | set(bad))
         if problems:
+            ev = await self._save_evidence(page, ref, "fill-failed", extra={"fields": problems[:20]})
             return SubmitResult(ref=ref, status="needs_human", via="browser",
-                                detail=f"could not fill/verify: {problems[:8]}")
+                                detail=f"could not fill/verify: {problems[:8]}{ev}")
+        if self.b.presubmit_validation:
+            errs = await self._validation_errors(page)
+            if errs:
+                ev = await self._save_evidence(page, ref, "presubmit-errors", extra={"errors": errs})
+                return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                    detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
         if dry_run:
+            ev = await self._save_evidence(page, ref, "dry-run")
             return SubmitResult(ref=ref, status="dry_run", via="browser",
-                                detail=f"filled and verified {len(steps)} fields; not submitted")
+                                detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
         return await self._submit(page, ats, ref)
+
+    # -- evidence / network ---------------------------------------------------------------------
+    def _attach_recorder(self, page, ats: AtsProfile) -> None:
+        recs: list[dict[str, Any]] = []
+        tasks: list[asyncio.Task] = []
+        self._net[id(page)], self._tasks[id(page)] = recs, tasks
+
+        async def grab(resp) -> None:
+            try:
+                req = resp.request
+                if req.method.upper() != "POST" or len(recs) >= 30:
+                    return
+                url = resp.url
+                rec: dict[str, Any] = {"url": trim(url.split("#")[0], 200), "status": resp.status,
+                                       "submit": is_submit_request(ats, url, req.method)}
+                if rec["submit"]:
+                    try:
+                        rec["body"] = trim(await asyncio.wait_for(resp.text(), 3), self.b.evidence_body_chars)
+                    except Exception:
+                        rec["body"] = ""
+                recs.append(rec)
+            except Exception:
+                pass
+
+        page.on("response", lambda r: tasks.append(asyncio.ensure_future(grab(r))))
+
+    async def _records(self, page) -> list[dict[str, Any]]:
+        pending = self._tasks.get(id(page), [])
+        if pending:
+            await asyncio.wait(pending, timeout=4)
+        return list(self._net.get(id(page), []))
+
+    async def _validation_errors(self, page) -> list[str]:
+        try:
+            return list(await page.evaluate(_ERRORS_JS))
+        except Exception:
+            return []
+
+    async def _captcha_widgets(self, page) -> list[str]:
+        """Invisible-captcha / bot-check widgets present on the page (explains silent rejections)."""
+        try:
+            return list(await page.evaluate("""() => {
+              const o = [];
+              if (document.querySelector('.grecaptcha-badge, iframe[src*=recaptcha], script[src*=recaptcha]')) o.push('recaptcha');
+              if (document.querySelector('iframe[src*=hcaptcha], .h-captcha, script[src*=hcaptcha]')) o.push('hcaptcha');
+              if (document.querySelector('iframe[src*=turnstile], .cf-turnstile, script[src*=turnstile]')) o.push('turnstile');
+              return o; }"""))
+        except Exception:
+            return []
+
+    async def _button_summary(self, page) -> list[str]:
+        try:
+            return list(await page.evaluate("""() => Array.from(document.querySelectorAll('button, input[type=submit]'))
+              .filter(b => b.getBoundingClientRect().width > 0)
+              .map(b => ((b.innerText || b.value || '').trim().slice(0, 40)) + '|' + (b.type || '') + '|' +
+                        (b.disabled ? 'disabled' : 'enabled') + '|' + (b.closest('form') ? 'in-form' : 'outside'))
+              .slice(0, 15)"""))
+        except Exception:
+            return []
+
+    async def _save_evidence(self, page, ref: str, stage: str, extra: dict[str, Any] | None = None) -> str:
+        """Screenshot, trimmed visible text, URL, validation errors, submit responses. Returns ' evidence=<dir>'."""
+        if not self.b.evidence:
+            return ""
+        try:
+            d = evidence_dir(self.s.paths.data_dir, ref)
+            d.mkdir(parents=True, exist_ok=True)
+            tag = f"{stage}-{int(time.time())}"
+            try:
+                await page.screenshot(path=str(d / f"{tag}.png"), full_page=True)
+            except Exception:
+                pass
+            try:
+                text = await page.locator("body").inner_text()
+            except Exception:
+                text = ""
+            meta = {"ref": ref, "stage": stage, "url": trim(page.url, 300),
+                    "errors": await self._validation_errors(page), "network": await self._records(page),
+                    "captcha_widgets": await self._captcha_widgets(page),
+                    "submit_buttons": await self._button_summary(page),
+                    "text": trim(text, self.b.evidence_text_chars), **(extra or {})}
+            (d / f"{tag}.json").write_text(json.dumps(meta, indent=1))
+            home = str(Path.home())
+            shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
+            return f" evidence={shown}"
+        except Exception:
+            return ""
 
     # -- field operations -----------------------------------------------------------------------
     async def _form_text(self, page) -> str:
@@ -275,6 +456,7 @@ class PlaywrightDriver:
                 await loc.press("ControlOrMeta+a")
                 await loc.press("Backspace")
                 await loc.press_sequentially(text, delay=5)
+                await loc.blur()                  # commit React state / surface validation
             else:
                 await loc.fill(text)
             return True
@@ -338,9 +520,47 @@ class PlaywrightDriver:
         for role in ("radio", "button"):
             btn = group.get_by_role(role, name=pat)
             if await btn.count():
-                await btn.first.click()
-                return True
+                for _ in range(2):                 # real click, then confirm the pressed/checked state
+                    await btn.first.click()
+                    st = await self._btn_state(btn.first)
+                    if st is None or st:
+                        return True
+                return False
         return False
+
+    @staticmethod
+    async def _btn_state(btn) -> bool | None:
+        try:
+            pressed = await btn.get_attribute("aria-pressed")
+            if pressed is not None:
+                return pressed == "true"
+            checked = await btn.get_attribute("aria-checked")
+            if checked is not None:
+                return checked == "true"
+            if (await btn.get_attribute("type")) == "radio":
+                return await btn.is_checked()
+        except Exception:
+            pass
+        return None
+
+    async def _bool_state(self, page, f: FormField, loc) -> bool | None:
+        """Current Yes/No state of a boolean field (checkbox, radio pair, or aria-pressed buttons); None if unknown."""
+        try:
+            if loc is not None and (await loc.get_attribute("type")) == "checkbox":
+                return await loc.is_checked()
+        except Exception:
+            pass
+        label = re.sub(r"\s*\*\s*$", "", f.label).strip()
+        group = page.get_by_role("group", name=re.compile(re.escape(label), re.IGNORECASE))
+        if not await group.count():
+            group = page.locator("fieldset, [role=group], div[class*=question], div[class*=field]").filter(
+                has_text=label).last
+        for role in ("radio", "button"):
+            for want, pat in ((True, r"^\s*yes\s*$"), (False, r"^\s*no\s*$")):
+                btn = group.get_by_role(role, name=re.compile(pat, re.IGNORECASE))
+                if await btn.count() and await self._btn_state(btn.first):
+                    return want
+        return None
 
     async def _upload(self, page, f: FormField, path: str) -> bool:
         cands = [page.locator(f'input[type=file][id="{f.key}"]'), page.locator(f'input[type=file][name="{f.key}"]')]
@@ -369,13 +589,41 @@ class PlaywrightDriver:
             await asyncio.sleep(0.4)
             waited += 0.4
 
-    async def _verify(self, page, rows: list[tuple[FormField, Any]]) -> list[str]:
+    async def _wait_chip(self, page, path: str) -> bool:
+        """Ashby shows the chosen filename once the upload finished; submit only after it appears."""
+        name = Path(path).name.lower()
+        stem = Path(path).stem.lower()[:20]
+        deadline = time.monotonic() + max(self.b.upload_settle_s, 4.0) + 6.0
+        while time.monotonic() < deadline:
+            try:
+                low = (await page.locator("body").inner_text()).lower()
+            except Exception:
+                low = ""
+            if name in low or (stem and stem in low):
+                return True
+            await asyncio.sleep(0.4)
+        return False
+
+    async def _verify(self, page, rows: list[tuple[FormField, Any]], ats: AtsProfile | None = None) -> list[str]:
         bad: list[str] = []
         shown = " | ".join(normalize(t) for t in await page.locator(_SELECT_VALUES).all_inner_texts())
         for f, v in rows:
             if f.kind == FieldKind.boolean:
+                state = await self._bool_state(page, f, await self._locate(page, f))
+                if (state is None and ats is not None and ats.name == "ashby") or \
+                        (state is not None and state != bool(v)):
+                    bad.append(f.key)
                 continue
-            if f.kind in (FieldKind.select, FieldKind.multiselect, FieldKind.location) or f.options:
+            if f.kind == FieldKind.location:
+                loc = await self._locate(page, f)
+                try:
+                    got = normalize(await loc.input_value()) if loc is not None else ""
+                except Exception:
+                    got = ""
+                if not got or normalize(str(v)).split(" ")[0] not in (got + " " + shown):
+                    bad.append(f.key)
+                continue
+            if f.kind in (FieldKind.select, FieldKind.multiselect) or f.options:
                 loc = await self._locate(page, f)
                 try:
                     if loc is not None and (await loc.evaluate("e => e.tagName")).upper() == "SELECT":
@@ -404,34 +652,76 @@ class PlaywrightDriver:
         return bad
 
     # -- submit ---------------------------------------------------------------------------------
+    async def _pick_submit(self, page):
+        """The real submit button: visible, enabled, preferring ones inside the application <form> whose text is
+        'Submit application'/'Submit'. Still refuses (None, count) if more than one candidate remains."""
+        async def usable(loc) -> list:
+            out = []
+            for i in range(await loc.count()):
+                b = loc.nth(i)
+                try:
+                    if await b.is_visible() and await b.is_enabled():
+                        out.append(b)
+                except Exception:
+                    continue
+            return out
+
+        tiers = [page.locator("form").get_by_role("button", name=_SUBMIT_NAME),
+                 page.locator("form button[type=submit], form input[type=submit]"),
+                 page.get_by_role("button", name=_SUBMIT_NAME),
+                 page.locator("button[type=submit], input[type=submit]")]
+        seen = 0
+        for t in tiers:
+            c = await usable(t)
+            if len(c) == 1:
+                return c[0], 1
+            seen = max(seen, len(c))
+            if len(c) > 1:
+                break
+        return None, seen
+
     async def _submit(self, page, ats: AtsProfile, ref: str) -> SubmitResult:
-        btn = page.get_by_role("button", name=_SUBMIT_NAME)
-        if not await btn.count():
-            btn = page.locator("button[type=submit], input[type=submit]")
-        vis = [i for i in range(await btn.count()) if await btn.nth(i).is_visible()]
-        if len(vis) != 1:
+        target, n = await self._pick_submit(page)
+        if target is None:
             return SubmitResult(ref=ref, status="needs_human", via="browser",
-                                detail=f"{len(vis)} submit buttons found; refusing to guess")
+                                detail=f"{n} submit buttons found; refusing to guess")
         if (blk := detect_blocker(await page.locator("body").inner_text())) in ("captcha", "verification"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} challenge visible")
-        target = btn.nth(vis[0])
         await target.scroll_into_view_if_needed()
         await target.click()                                   # the ONE submit click; never repeated
-        waited, step = 0.0, 0.5
-        while waited <= self.b.confirmation_wait_s:
-            await asyncio.sleep(step)
-            waited += step
-            text = await page.locator("body").inner_text()
-            still = await page.get_by_role("button", name=_SUBMIT_NAME).count() > 0
-            if detect_confirmation(ats, page.url, text, still):
-                return SubmitResult(ref=ref, status="submitted", via="browser", confirmation=page.url[:200])
+        deadline = time.monotonic() + self.b.confirmation_wait_s
+        text, outcome = "", None
+        while True:
+            await asyncio.sleep(0.5)
+            records = await self._records(page)
+            try:
+                text = await page.locator("body").inner_text()
+                still = await page.get_by_role("button", name=_SUBMIT_NAME).count() > 0
+            except Exception:                              # page navigated mid-read: retry next poll
+                text, still = "", True
+            outcome = decide_outcome(ats, page.url, text, still, records)
+            if outcome:
+                break
             blk = detect_blocker(text)
-            if blk == "duplicate":
-                return SubmitResult(ref=ref, status="duplicate", via="browser", detail="site reports a prior application")
-            if blk in ("captcha", "verification"):
-                return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit")
+            if blk in ("duplicate", "captcha", "verification") or time.monotonic() >= deadline:
+                break
+        if outcome == "submitted":
+            ev = await self._save_evidence(page, ref, "submitted")
+            return SubmitResult(ref=ref, status="submitted", via="browser", confirmation=page.url[:200],
+                                detail=ev.strip() or None)
+        blk = detect_blocker(text)
+        stage = "failed" if outcome == "failed" else (blk or "no-confirmation")
+        ev = await self._save_evidence(page, ref, stage)
+        if blk == "duplicate":
+            return SubmitResult(ref=ref, status="duplicate", via="browser",
+                                detail=f"site reports a prior application{ev}")
+        if blk in ("captcha", "verification"):
+            return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
+        errs = (await self._validation_errors(page))[:5]
+        why = ("ATS rejected the submission" if outcome == "failed"
+               else "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)")
         return SubmitResult(ref=ref, status="needs_human", via="browser",
-                            detail="submit clicked but no confirmation detected; do NOT retry, check manually")
+                            detail=f"{why}; errors={errs}; do NOT retry, check manually.{ev}")
 
 
 @registry.browser_drivers.register("playwright")

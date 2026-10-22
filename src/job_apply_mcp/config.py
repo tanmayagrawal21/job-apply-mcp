@@ -245,6 +245,10 @@ class BrowserCfg(BaseModel):
     timeout_s: float = 30.0
     upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)
     confirmation_wait_s: float = 10.0
+    evidence: bool = True               # screenshot + text + errors + submit responses under <data_dir>/evidence/<ref-hash>/
+    evidence_text_chars: int = 20000    # cap on saved visible page text
+    evidence_body_chars: int = 500      # cap on each saved submit-response body
+    presubmit_validation: bool = True   # read back fields + check visible validation errors before the submit click
     agent_max_steps: int = 40
     agent_tier: str = "medium"          # llm tier whose model drives the generic agent
     block_resources: list[str] = Field(default_factory=lambda: ["image", "font", "media"])
