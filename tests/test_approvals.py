@@ -326,6 +326,8 @@ def test_security_settings_relax_only_from_user_config(tmp_path, monkeypatch, ca
            "JOB_APPLY__CONTROL__DEV_MODE": "false", "JOB_APPLY__CONTROL__APPLY_ENABLED": "true"}
     s = _cfg(tmp_path, monkeypatch, user=strict_user, env=env)
     assert s.dry_run and s.apply.approval_mode == "human" and s.control.dev_mode and not s.control.apply_enabled
+    for k in env:                      # env equal to the user's own (relaxed) value is not a relaxation: clear it
+        monkeypatch.delenv(k)
     s = _cfg(tmp_path, monkeypatch, user=relax)                      # user file may relax (and it is logged)
     assert not s.dry_run and s.apply.approval_mode == "agent" and s.apply.auto_approve
     s = _cfg(tmp_path, monkeypatch, user=relax, proj='dry_run = true\n[apply]\napproval_mode = "human"\n')

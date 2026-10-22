@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..config import Settings
+from ..config import Settings, parse_cap
 from . import builtin  # noqa: F401  (registers built-in controls)
 from .builtin import effective_limits
 from .controls import (
@@ -106,8 +106,10 @@ class ControlAgent:
             self.rules = load_rules(self.cfg.rules_file)
         params_all: dict[str, dict[str, Any]] = {k: dict(v) for k, v in self.cfg.params.items()}
         for k, v in self.rules.params.items():
-            if k == "quota" and not self.cfg._rules_trusted:
-                v = self._tighten_only_quota(v, params_all.get("quota", {}))
+            if k == "quota":
+                v = self._valid_quota(v)
+                if not self.cfg._rules_trusted:
+                    v = self._tighten_only_quota(v, params_all.get("quota", {}))
             params_all.setdefault(k, {}).update(v)
         params_all.setdefault("mode", {}).update(self.rules.mode)
         built: list[Control] = []
@@ -123,6 +125,20 @@ class ControlAgent:
         self.controls = built + self.rules.controls
         self._params = params_all
 
+    @staticmethod
+    def _valid_quota(new: dict[str, Any]) -> dict[str, Any]:
+        """Drop non-whole-number caps from a rules file (0.5, "1e9", -1, nan): the config's cap stays (ADR-0037)."""
+        out = {}
+        for key, v in new.items():
+            if key in ("per_day", "per_platform_per_day", "per_run") and v is not None:
+                n = parse_cap(v)
+                if n is None:
+                    log.warning("rules_file quota %s=%r IGNORED: not a whole number >= 0", key, v)
+                    continue
+                v = n
+            out[key] = v
+        return out
+
     def _tighten_only_quota(self, new: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
         """A rules_file not chosen by the trusted user config may only lower caps (ADR-0035)."""
         try:
@@ -135,7 +151,7 @@ class ControlAgent:
             if key not in new:
                 continue
             v, cap = new[key], base[scope]
-            loosens = isinstance(v, (int, float)) and not isinstance(v, bool) and cap is not None and (v == 0 or v > cap)
+            loosens = isinstance(v, int) and not isinstance(v, bool) and cap is not None and (v == 0 or v > cap)
             if v is None and cap is not None:
                 loosens = True
             if loosens:

@@ -4,9 +4,9 @@
 
 Settings load in this order, later wins: built-in defaults, the user file (`~/.config/job-apply-mcp/config.toml`, `%APPDATA%\job-apply-mcp\config.toml` on Windows, or `$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables `JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). Secrets (API keys, IMAP passwords) are only ever read from the environment.
 
-**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, `browser.captcha_policy=attempt`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter.
+**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, raising `grants.*` caps, `grants.use_keyring=false`, `browser.captcha_handoff=false`, `browser.captcha_policy=attempt`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter than your user config (or the default where it is silent). Values are compared after type coercion, so `"false"` or `"0"` count the same as `false` / `0` (ADR-0037).
 
-**Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and `apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default or setting `0` is honored only from the trusted user config (same rule as the trust model above). `control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining.
+**Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and `apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default or setting `0` is honored only from the trusted user config; a project or env value can never raise your own user-config cap (same rule as the trust model above). `control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining.
 
 Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to validate it.
 
@@ -339,7 +339,7 @@ Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only
 | `max_duration_s` | `int` | `43200` | longest grant `job-apply-mcp grant --for` will issue |
 | `max_uses_cap` | `int` | `1000` | upper bound for --max-uses |
 | `otp_window_min` | `int` | `10` | otp_assist reads only a message newer than this |
-| `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available |
+| `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available; only the user config file may disable it |
 
 ## `[search.sessions]`
 
