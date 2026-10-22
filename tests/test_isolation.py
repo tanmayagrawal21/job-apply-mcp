@@ -50,13 +50,18 @@ def test_hostile_real_home_has_no_effect_on_suite(tmp_path):
     assert not (fake_real / ".local").exists()  # the data dir under the hostile home was never created
 
 
-def test_guard_flags_writes_to_real_data_dir():
+def test_guard_blocks_writes_to_real_data_dir():
+    """The guard must raise BEFORE the filesystem call, so this probe can never create anything."""
     import conftest
+    import pytest
     before = len(conftest._VIOLATIONS)
-    target = conftest._REAL_DATA_DIR / "__probe_never_created__"
+    target = conftest._REAL_DATA_DIR / f"__probe_never_created_{os.getpid()}__"
     try:
-        open(target, "w")  # noqa: SIM115
-    except OSError:
-        pass
-    assert len(conftest._VIOLATIONS) == before + 1
-    del conftest._VIOLATIONS[before:]
+        with pytest.raises(PermissionError):
+            open(target, "w")  # noqa: SIM115
+        assert len(conftest._VIOLATIONS) == before + 1
+        assert not os.path.lexists(target)
+    finally:
+        del conftest._VIOLATIONS[before:]
+        if os.path.lexists(target):  # only if the guard failed
+            os.remove(target)
