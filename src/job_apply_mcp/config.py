@@ -32,18 +32,64 @@ class LLMTier(BaseModel):
     provider: str
     model: str
     max_tokens: int = 512
+    temperature: float | None = None   # None -> the task's own temperature
+    heavy: bool = False                # large local model: calls are serialized (llm.heavy_parallel)
+
+
+class RoutingCfg(BaseModel):
+    """Cheap rule-based complexity scoring (ADR-0008). Points add up; thresholds map score -> tier."""
+    thresholds: dict[str, int] = Field(default_factory=lambda: {"medium": 2, "large": 5})
+    kind_points: dict[str, int] = Field(default_factory=lambda: {
+        "text": 0, "select": 0, "boolean": 0, "number": 0, "date": 0, "location": 0, "file": 0,
+        "multiselect": 1, "unknown": 1, "textarea": 2})
+    length_points: list[tuple[int, int]] = Field(default_factory=lambda: [(300, 1), (1200, 2)])  # (chars, pts)
+    essay_keywords: list[str] = Field(default_factory=lambda: [
+        "why", "describe", "tell us", "explain", "passion", "motivat", "interest you", "challenge",
+        "proud", "cover letter", "essay", "in your own words"])
+    essay_points: int = 2
+    company_points: int = 2
+    failure_points: int = 2            # per prior validation failure
+    self_check: bool = False           # ask the small model to rate its confidence before committing
+    self_check_min: int = 6            # confidence 0-10 below this adds confidence_points
+    confidence_points: int = 2
+    narrative_min_words: int = 60      # prose at least this long is class "narrative"
+    narrative_keywords: list[str] = Field(default_factory=lambda: [
+        "cover letter", "why us", "why do you want", "why are you interested", "tell us about yourself",
+        "motivation", "personal statement", "additional information"])
 
 
 class LLMCfg(BaseModel):
-    # Ordered tiers; the router picks the cheapest tier whose capability >= task complexity.
+    # Ordered tiers for ordinary fields; the router picks the cheapest tier whose capability >= complexity.
     tiers: dict[str, LLMTier] = Field(default_factory=lambda: {
         "small": LLMTier(provider="ollama", model="qwen3:4b", max_tokens=256),
         "medium": LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=768),
         "large": LLMTier(provider="client", model="client-default", max_tokens=1500),
     })
-    allow_cloud: bool = True        # if False, 'large' falls back to the biggest local tier
+    # Task-class tiers, chosen by class before complexity. "narrative" = cover letters / why-us / prose;
+    # "review" = a second reader that critiques a narrative (default: the calling agent).
+    task_tiers: dict[str, LLMTier] = Field(default_factory=lambda: {
+        "narrative": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=1200,
+                             temperature=0.6, heavy=True),
+        "review": LLMTier(provider="client", model="client-default", max_tokens=1200, temperature=0.2),
+    })
+    # Tried in order after the primary of a tier or task tier (keys: tier names and task-tier names).
+    fallbacks: dict[str, list[LLMTier]] = Field(default_factory=lambda: {
+        "small": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=256)],
+        "medium": [LLMTier(provider="ollama", model="qwen3:4b", max_tokens=768)],
+        "large": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1500)],
+        "narrative": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1200, temperature=0.6),
+                      LLMTier(provider="client", model="client-default", max_tokens=1200)],
+        "review": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1200, temperature=0.2)],
+    })
+    routing: RoutingCfg = Field(default_factory=RoutingCfg)
+    allow_cloud: bool = True        # if False, cloud providers (incl. client) are skipped; falls to local ones
+    timeout_s: float = 120.0        # per-call wall clock
+    retries: int = 2                # transient-error retries per candidate
+    backoff_s: float = 0.5          # base for exponential backoff
+    availability_ttl_s: float = 30.0
+    heavy_parallel: int = 1         # concurrent calls to `heavy` local models (one big model resident on 16 GB)
     providers: dict[str, dict[str, Any]] = Field(default_factory=lambda: {
-        "ollama": {"base_url": "http://127.0.0.1:11434"},
+        "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "5m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
         "anthropic": {"api_key_env": "ANTHROPIC_API_KEY"},
         "hf_local": {"device": "mps"},

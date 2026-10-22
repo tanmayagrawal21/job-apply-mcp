@@ -15,7 +15,16 @@ class Services:
     def __init__(self, settings: Settings):
         self.settings = settings
         c = settings.concurrency
+        self._llm = None
         self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s)
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            from .llm import LLMRouter
+
+            self._llm = LLMRouter(self.settings)
+        return self._llm
 
     async def search(self, **kw) -> dict[str, Any]:
         raise NotImplementedError("platform adapters land in feat/platform-adapters")
@@ -44,4 +53,5 @@ class Services:
         from .core import registry
 
         return {"platforms": registry.platforms.names(), "llm": registry.llm_providers.names(),
-                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run}
+                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run,
+                "llm_router": await self.llm.health()}
