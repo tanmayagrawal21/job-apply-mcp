@@ -1,0 +1,48 @@
+{
+  "manifest_version": "0.4",
+  "name": "applywise",
+  "display_name": "ApplyWise",
+  "version": "0.1.0",
+  "description": "Job search and form filling that stops for a human before every irreversible step.",
+  "long_description": "ApplyWise searches public job boards and fills application forms. It is a dry run until the user changes their own config, every real submit needs human approval by default, and CAPTCHAs, verification codes, account creation and flagged attestations always go to the user. Run `applywise init` and `applywise doctor` in a terminal first.",
+  "author": {
+    "name": "tanmayagrawal21"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tanmayagrawal21/job-apply-mcp"
+  },
+  "homepage": "https://github.com/tanmayagrawal21/job-apply-mcp",
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "src/server.py"
+      ]
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  },
+  "keywords": [
+    "jobs",
+    "job-search",
+    "job-application",
+    "mcp",
+    "human-in-the-loop"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,10 @@
+# MCPB bundle (server.type = "uv", ADR-0042). Not a package: the host runs `uv run src/server.py` here, which
+# installs the published `applywise` release pinned below. Bump the pin with every release (docs/release.md).
+[project]
+name = "applywise-mcpb"
+version = "0.1.0"
+description = "MCPB bundle launcher for the applywise MCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "applywise==0.1.0",
+]
