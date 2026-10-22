@@ -445,23 +445,24 @@ def _coerce(v: str) -> Any:
     return v
 
 
-# Security-relevant settings: (section, key) -> predicate "value is the SAFE (strict) one". A project file or
+# Security-relevant settings: (section, key) -> predicate. A project file or
 # environment variable may only set the safe value; relaxing needs the user-level config file (ADR-0021).
-_SAFE: dict[tuple[str | None, str], Any] = {
-    ("apply", "auto_approve"): lambda v: v is False,
-    ("apply", "approval_mode"): lambda v: v == "human",
-    (None, "dry_run"): lambda v: v is True,
-    ("control", "apply_enabled"): lambda v: v is False,
-    ("control", "dev_mode"): lambda v: v is True,
+# Predicates are "this value RELAXES the setting"; invalid values pass through so validation reports them.
+_RELAXES: dict[tuple[str | None, str], Any] = {
+    ("apply", "auto_approve"): lambda v: v is True,
+    ("apply", "approval_mode"): lambda v: v == "agent",
+    (None, "dry_run"): lambda v: v is False,
+    ("control", "apply_enabled"): lambda v: v is True,
+    ("control", "dev_mode"): lambda v: v is False,
 }
 
 
 def _restrict(d: dict, source: str) -> dict:
     """Drop values that would relax a security setting; log each. Stricter values pass."""
     out = dict(d)
-    for (sect, key), safe in _SAFE.items():
+    for (sect, key), relaxes in _RELAXES.items():
         tgt = out.get(sect) if sect else out
-        if isinstance(tgt, dict) and key in tgt and not safe(tgt[key]):
+        if isinstance(tgt, dict) and key in tgt and relaxes(tgt[key]):
             log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
                         f"{sect}." if sect else "", key, tgt[key], source)
             if sect:
@@ -504,9 +505,9 @@ def load_settings(project_dir: Path | None = None) -> Settings:
         data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj)))
     data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)"))
     s = Settings.model_validate(data)
-    for (sect, key), safe in _SAFE.items():       # log which explicitly-set relaxations came from the user file
+    for (sect, key), relaxes in _RELAXES.items():  # log which explicitly-set relaxations came from the user file
         v = (udata.get(sect, {}) if sect else udata).get(key, None) if udata else None
-        if v is not None and not safe(v):
+        if v is not None and relaxes(v):
             log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
                         f"{sect}." if sect else "", key, v, user)
     if s.apply.auto_approve:

@@ -286,9 +286,11 @@ def test_resolve_tool_absent_in_human_mode_and_legacy_token_errors(monkeypatch):
 
 def _cfg(tmp_path, monkeypatch, user="", proj="", env=None, via_env=False, mode=0o600):
     """User config at the platform-default path (XDG redirected to tmp), or selected via JOB_APPLY_MCP_CONFIG."""
-    cdir = tmp_path / "xdg" / "job-apply-mcp"
-    cdir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "xdg"))
+    from job_apply_mcp import paths
+    cdir = paths.config_dir()
+    cdir.mkdir(parents=True, exist_ok=True)
     monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
     u = tmp_path / "elsewhere.toml" if via_env else cdir / "config.toml"
     u.write_text(user)
