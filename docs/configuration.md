@@ -196,6 +196,8 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | `bool` | `true` |  |
+| `assist` | `bool` | `true` | try a grant-gated otp_assist (ADR-0027) first; a human click is still required |
+| `sender_domains` | `dict[str, str]` | `{"greenhouse": "greenhouse.io", "lever": "lever.co", "ashby": "ashbyhq.com"}` |  |
 | `code_ttl_s` | `int` | `600` | how long a pending code prompt stays open before it becomes a handoff |
 | `max_attempts` | `int` | `1` | code entries per prompt (one click each); a bad format costs none |
 | `elicit` | `bool` | `true` | ask the user for the code via MCP elicitation when the client supports it |
@@ -320,6 +322,17 @@ Mail-confirmation dedupe (ADR-0016). `client` needs no credentials in the server
 | `reconcile_window_hours` | `int` | `72` | a confirmation must arrive within this long after the submit |
 | `reconcile_title_threshold` | `float` | `0.75` |  |
 | `seed_since_days` | `int` | `180` | default look-back for seed_from_confirmations |
+
+## `[grants]`
+
+Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only from the user config.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_duration_s` | `int` | `43200` | longest grant `job-apply-mcp grant --for` will issue |
+| `max_uses_cap` | `int` | `1000` | upper bound for --max-uses |
+| `otp_window_min` | `int` | `10` | otp_assist reads only a message newer than this |
+| `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available |
 
 ## `[search.sessions]`
 

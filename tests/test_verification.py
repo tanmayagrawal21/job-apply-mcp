@@ -395,3 +395,65 @@ async def test_desktop_notify_is_fixed_text_and_best_effort(monkeypatch):
 
     monkeypatch.setattr(v.asyncio, "create_subprocess_exec", boom)
     await v.desktop_notify("x")                       # never raises
+
+
+# ------------------------------------------------------------------ otp_assist (ADR-0027) first, human typing second
+
+def _assist_env(monkeypatch, status, caplog=None):
+    from job_apply_mcp import server
+    from job_apply_mcp.grants.otp import OtpResult
+
+    seen, asked = [], []
+
+    class Svc:
+        async def provide_verification_code(self, pid, code):
+            seen.append((pid, code))
+            return {"status": "submitted"}
+
+    class Res:
+        action, data = "accept", type("D", (), {"code": "Typed8Ch"})()
+
+    class Ctx:
+        async def elicit(self, message, schema):
+            asked.append(message)
+            return Res()
+
+    async def fake_assist(settings, *, sender_domain, elicit, **kw):
+        asked.append(("assist", sender_domain))
+        return OtpResult(status, code=CODE if status == "confirmed" else None, masked="••••xZ")
+
+    monkeypatch.setattr(server, "svc", lambda: Svc())
+    monkeypatch.setattr(server, "assist_code", fake_assist)
+    return server, Ctx(), seen, asked
+
+
+ROW = {"status": "awaiting_code", "pending_id": "p1", "ref": "greenhouse:acme:1"}
+
+
+async def test_assist_confirmed_enters_granted_code_without_asking_to_type(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    server, ctx, seen, asked = _assist_env(monkeypatch, "confirmed")
+    out = await server._elicit_code(ctx, dict(ROW))
+    assert out["status"] == "submitted" and seen == [("p1", CODE)]
+    assert asked == [("assist", "greenhouse.io")] and CODE not in caplog.text
+
+
+@pytest.mark.parametrize("status", ["declined", "fallback", "no_grant", "no_message", "no_code", "error"])
+async def test_assist_other_statuses_fall_back_to_human_typing(monkeypatch, status):
+    server, ctx, seen, asked = _assist_env(monkeypatch, status)
+    out = await server._elicit_code(ctx, dict(ROW))
+    assert out["status"] == "submitted" and seen == [("p1", "Typed8Ch")]       # only the human-typed code is used
+    assert CODE not in json.dumps(seen) and "••••xZ" in asked[1] and "not used" in asked[1]
+
+
+async def test_assist_disabled_or_unknown_ats_skips_mail_path(monkeypatch):
+    server, ctx, seen, asked = _assist_env(monkeypatch, "confirmed")
+    out = await server._elicit_code(ctx, {**ROW, "ref": "workday:acme:1"})        # no sender domain known
+    assert seen == [("p1", "Typed8Ch")] and not any(a[0] == "assist" for a in asked if isinstance(a, tuple))
+    assert out["status"] == "submitted"
+
+
+async def test_real_assist_without_grant_reports_no_grant():
+    from job_apply_mcp.grants.otp import assist_code
+    res = await assist_code(Settings(), sender_domain="greenhouse.io", elicit=None)
+    assert res.status == "no_grant" and res.code is None

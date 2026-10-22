@@ -489,6 +489,11 @@ class ApplyEngine:
             self.approvals.approve(rec.approval_id, "agent")
             return rec.approval_id, "", "agent"
         if rec.status != "approved":                    # human mode: needs a separate human channel
+            from ..grants import try_use  # human-signed time-limited grant (ADR-0027)
+            g = try_use(self.s, "approve_submissions", f"ref={ref} approval={rec.approval_id[:8]}")
+            if g is not None:
+                self.approvals.approve(rec.approval_id, f"grant:{g.id}")
+                return rec.approval_id, "", f"grant:{g.id}"
             verdict = await approver(rec.summary) if approver else None
             if verdict is True:
                 self.approvals.approve(rec.approval_id, "human:elicit")

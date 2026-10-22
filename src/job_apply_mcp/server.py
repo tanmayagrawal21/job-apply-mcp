@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .config import load_settings
 from .core import output as _output
+from .grants.otp import assist_code, make_elicitor
 from .services import Services
 
 mcp = FastMCP("job-apply")
@@ -105,17 +106,31 @@ class _Code(BaseModel):
 
 
 async def _elicit_code(ctx: Context, row: dict[str, Any]) -> dict[str, Any]:
-    """Awaiting a code: ask the USER (never mail) via MCP elicitation when the client supports it (ADR-0026)."""
+    """Awaiting a code (ADR-0026). 1) If the user granted `otp_assist` (ADR-0027), a code found in the latest mail
+    from the expected sender is entered ONLY when the human clicks confirm on the masked prefill. 2) Otherwise
+    (no grant, no mail, declined, or no elicitation) the USER types the code: via elicitation or the
+    `provide_verification_code` tool. The code is never logged."""
+    cfg = load_settings()
+    masked = ""
+    domain = cfg.verification.sender_domains.get(str(row.get("ref", "")).split(":")[0])
+    if cfg.verification.assist and domain:
+        res = await assist_code(cfg, sender_domain=domain, elicit=make_elicitor(ctx))
+        if res.status == "confirmed" and res.code:
+            code, res.code = res.code, None
+            return await svc().provide_verification_code(row["pending_id"], code)
+        masked = res.masked
     try:
-        if not load_settings().verification.elicit:
+        if not cfg.verification.elicit:
             return row
-        res = await ctx.elicit(message="The site emailed/texted you a verification code to finish this application. "
-                                       "Enter it here (it is typed into the page and never stored).", schema=_Code)
+        hint = f" (the latest mail ends {masked}; it was not used)" if masked else ""
+        res2 = await ctx.elicit(message="The site emailed/texted you a verification code to finish this application"
+                                        f"{hint}. Enter it here (it is typed into the page and never stored).",
+                                schema=_Code)
     except Exception:  # noqa: BLE001 - client without elicitation support
         return row
-    if res.action != "accept":
+    if res2.action != "accept":
         return row
-    return await svc().provide_verification_code(row["pending_id"], res.data.code)
+    return await svc().provide_verification_code(row["pending_id"], res2.data.code)
 
 
 @mcp.tool()
@@ -225,6 +240,9 @@ from .profile.tools import register as _register_facts
 
 _register_facts(mcp, lambda: svc().settings)
 
+from .grants.tools import register as _register_grants
+
+_register_grants(mcp, lambda: svc().settings)
 from .ingest.tools import register as _register_ingest
 
 _register_ingest(mcp, svc)

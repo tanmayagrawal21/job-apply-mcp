@@ -6,7 +6,7 @@ Status: accepted. Amends ADR-0012 (browser drivers) and ADR-0021 (submission sta
 
 After the single submit click, some sites (Greenhouse "security code", many custom ATSes) email or text a code and
 show a prompt. Until now the driver reported `roadblock` and the run ended with the form half-processed and no way
-to continue. The code goes to the applicant's own mailbox. This project never reads mail to obtain it: the
+to continue. The code goes to the applicant's own mailbox. This feature never reads mail to obtain it (see decision 8 for the separate user-granted prefill): the
 applicant is the verifier, and an automated reader would turn "verify you control this address" into a formality
 that the tool satisfies by itself.
 
@@ -42,13 +42,18 @@ that the tool satisfies by itself.
    exception text (driver errors drop their message), not in `SubmitResult`. Code inputs are blanked before any
    screenshot taken after entry. The code does pass through the MCP client that the user chose to type it into;
    that is the user's channel, not ours.
-8. **No mail access** is added by this feature, and none may be added to satisfy it. Mail-based confirmation
-   dedupe (ADR-0016) is a separate, after-the-fact read and never supplies codes.
+8. **This feature adds no mail access.** The only mail path is the separate, user-granted `otp_assist` (ADR-0027):
+   when `verification.assist` is on and a time-limited human-signed grant exists, `_elicit_code` first calls
+   `assist_code` for the ATS's sender domain (`verification.sender_domains`). The prefilled code is entered ONLY when
+   its status is `confirmed`, meaning the human clicked confirm on a masked prefill. Any other status (`declined`,
+   `fallback`, `no_grant`, `no_message`, `no_code`, `error`) falls back to the human-typed path above, and the
+   masked hint is shown, never the code. The human remains the verifier either way. Mail-based confirmation dedupe
+   (ADR-0016/0025) never supplies codes.
 
 ## Consequences
 
 - A run no longer ends at the prompt: the human supplies the code in seconds and the flow completes.
-- The human remains the verifier; unattended runs simply wait, then hand off.
+- The human remains the verifier (typing, or clicking confirm on a granted prefill); unattended runs simply wait, then hand off.
 - Safe-by-default: `enabled=true` only changes behaviour where the site actually shows a code prompt, which was
   previously a dead end. `enabled=false` restores the old `roadblock`.
 - `awaiting_code` pages hold a browser tab until completion, expiry, or `aclose`.

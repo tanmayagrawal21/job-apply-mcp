@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 
-COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve"}
+COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
                     ("pending", "list pending approvals"),
                     ("resolve", "HUMAN ONLY (needs a TTY): resolve a submission stuck in submitting/unknown")):
         sub.add_parser(name, help=h).add_argument("rest", nargs="*")
+    sub.add_parser("grant", help="HUMAN ONLY (needs a TTY): time-limited grants for agents (--list, --revoke)"
+                   ).add_argument("rest", nargs=argparse.REMAINDER)
     return p
 
 
@@ -66,6 +68,11 @@ def main(argv: list[str] | None = None) -> None:
 
         st = load_settings()
         raise SystemExit(approvals_cli([args.cmd, *args.rest], st.paths.data_dir, st.apply.approval_ttl_s))
+    elif args.cmd == "grant":
+        from .config import load_settings
+        from .grants.cli import cli as grant_cli
+
+        raise SystemExit(grant_cli(args.rest, load_settings()))
     elif args.cmd == "doctor":
         from .doctor import run_doctor
 
