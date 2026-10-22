@@ -138,7 +138,7 @@ class ProfileView:
             return self._citizenship_country()
         if key.startswith("gpa:"):
             return self._gpa(key[4:])
-        if key.startswith("country_answer:"):       # ADR-0036: only an [answers] pattern that names the country
+        if key.startswith("country_answer:"):       # ADR-0038: only an [answers] pattern that names the country
             from .mapper import question_countries
             _, country, question = key.split(":", 2)
             mine = {pat: v for pat, v in self.p.answers.items() if country in question_countries(pat)[1]}

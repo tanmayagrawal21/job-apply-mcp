@@ -1,4 +1,4 @@
-"""ADR-0036: privacy-ack never answers sensitive questions; prior-employee is this company only; authorization is
+"""ADR-0038: privacy-ack never answers sensitive questions; prior-employee is this company only; authorization is
 US-scoped. Fictional profile only (Alex Rivera, Springfield)."""
 import pytest
 from apply_fakes import F

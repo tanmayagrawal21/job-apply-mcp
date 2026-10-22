@@ -41,5 +41,5 @@ asked as single-line text inputs are now written (and reviewed) rather than gues
 ## Verify / revert
 `uv run pytest tests/test_apply_mapper_coverage2.py`. Revert the PR; profiles with `citizenship` still load.
 
-## Amendment (ADR-0036)
-`prior_employee` answers only questions about the posting company; government, competitor and other-employer questions need an explicit `[answers]` entry. See ADR-0036.
+## Amendment (ADR-0038)
+`prior_employee` answers only questions about the posting company; government, competitor and other-employer questions need an explicit `[answers]` entry. See ADR-0038.

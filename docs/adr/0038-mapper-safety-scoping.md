@@ -1,4 +1,4 @@
-# ADR-0036: Mapper safety scoping (privacy-ack order, prior-employee scope, authorization country)
+# ADR-0038: Mapper safety scoping (privacy-ack order, prior-employee scope, authorization country)
 
 ## Context
 An independent review found three wrong-answer paths in `apply/mapper.py`:

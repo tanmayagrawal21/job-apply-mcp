@@ -45,7 +45,7 @@ requires_sponsorship = false
 citizen = true
 # citizenship = "Canada"        # country of citizenship (optional); "Citizenship Status" never picks a citizen option unless US
 # The facts above describe the United States. For another country add an [answers] pattern naming it, e.g.
-# "right to work in the uk" = "No"   (otherwise such questions stay unresolved; ADR-0036)
+# "right to work in the uk" = "No"   (otherwise such questions stay unresolved; ADR-0038)
 
 [preferences]
 willing_to_relocate = true

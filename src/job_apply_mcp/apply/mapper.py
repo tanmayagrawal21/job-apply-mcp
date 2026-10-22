@@ -489,7 +489,7 @@ def _gpa_level(label: str) -> str:
 _CONSENT = re.compile(r"consent|agree|acknowledg|privacy|gdpr|attest|certif|authori[sz]e", re.IGNORECASE)
 
 
-# ---- country of an authorization / sponsorship question (ADR-0036) ---------------------------------
+# ---- country of an authorization / sponsorship question (ADR-0038) ---------------------------------
 # The structured [authorization] facts describe the United States only. A question naming another country is answered
 # only from the user's own [answers] pattern that names that country; otherwise it stays unresolved.
 _US_IN_LABEL = re.compile(r"\b(u s a?|usa|united states( of america)?|america|american)\b")
@@ -523,7 +523,7 @@ def question_countries(label: str) -> tuple[bool, list[str]]:
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any]:
     n = normalize(f.label)
     _, foreign = question_countries(f.label)
-    if foreign:      # US facts never answer another country's question (ADR-0036)
+    if foreign:      # US facts never answer another country's question (ADR-0038)
         if len(foreign) != 1:
             return True, None
         return True, profile.lookup(f"country_answer:{foreign[0]}:{n}")
@@ -581,7 +581,7 @@ def _years_answer(f: FormField, profile: ProfileLike) -> Any | None:
     return None
 
 
-# ---- prior-employee scope (ADR-0036) --------------------------------------------------------------
+# ---- prior-employee scope (ADR-0038) --------------------------------------------------------------
 _SELF_REF = re.compile(r"\b(this|our|the hiring) (company|organi[sz]ation|firm|employer|business)\b|"
                        r"\b(for|at|by|with) us\b|\bhere\b|\bours\b")
 _OTHER_EMPLOYER = re.compile(r"government|federal|\bstate\b|\bagency\b|military|armed forces|public sector|"
@@ -653,7 +653,7 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             return True, pick_gpa_option(g, f.options)
         return True, re.sub(r"\s*/.*$", "", str(raw).strip())
     if ck == "prior_employee":
-        if not company or not about_this_company(f.label, company):   # ADR-0036: government/competitor/other employers
+        if not company or not about_this_company(f.label, company):   # ADR-0038: government/competitor/other employers
             return True, profile.lookup(n)                            # only the user's own explicit answer
         return True, "Yes" if profile.lookup("employer:" + normalize(company)) else "No"
     if ck == "marketing_optin":
@@ -703,7 +703,7 @@ _PRIVACY_EXCLUDE = re.compile(
 _ACK_OPTION = re.compile(r"\b(acknowledg\w*|agree\w*|accept\w*|confirm\w*|yes|understand\w*|read)\b")
 
 
-# A field that is (or mentions) a sensitive or canonical question never takes the acknowledgement path (ADR-0036):
+# A field that is (or mentions) a sensitive or canonical question never takes the acknowledgement path (ADR-0038):
 # "Will you require sponsorship? (See our Applicant Privacy Notice)" is a sponsorship question, not a notice.
 _SENSITIVE_TOPIC = re.compile(
     r"sponsor|\bvisa\b|citizen|immigra|nationality|permanent resident|green card|right to work|work permit|"
@@ -791,9 +791,9 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 res.answers.append(Answer(key=f.key, value=str(v), source="derived:geo"))
             continue
         ck = canonical_key(f.label)
-        if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0036)
+        if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
             ck = canonical_key(f.label, skip=("privacy_ack",))
-        # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0036)
+        # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0038)
         if ck in (None, "privacy_ack") and _truth(profile.lookup("acknowledge_privacy_notices")) is True:
             pv = privacy_ack_value(f, stop_phrases)
             if pv is not None:
