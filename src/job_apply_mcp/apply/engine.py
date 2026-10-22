@@ -32,6 +32,7 @@ from ..core.models import (
 )
 from .approvals import ApprovalBook, evidence_path
 from .mapper import (
+    DEMOGRAPHIC_KEYS,
     best_option,
     canonical_key,
     geo_kind,
@@ -604,12 +605,13 @@ class ApplyEngine:
                     raise
                 if not dry:
                     st = {"submitted": "submitted", "roadblock": "failed", "needs_human": "handoff",
-                          "duplicate": "failed", "awaiting_code": "awaiting_code"}.get(result.status, "unknown")
+                          "duplicate": "failed", "awaiting_code": "awaiting_code",
+                          "incomplete": "handoff"}.get(result.status, "unknown")
                     if result.status == "error" and not ctx.meta.get("dispatched"):
                         st = "failed"
                     self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
                                           evidence_path(self.s.paths.data_dir, ref))
-                if result.status in ("submitted", "needs_human", "roadblock"):
+                if result.status in ("submitted", "needs_human", "roadblock", "incomplete"):
                     await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title,
                                             url=ctx.posting.apply_url or ctx.posting.url)
                 if result.status == "submitted":
@@ -723,9 +725,10 @@ class ApplyEngine:
             drv = self._driver(name)
             if drv is None:
                 continue
+            demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
             async with self._browser_sem:
                 ctx.meta["dispatched"] = True
-                last = await drv.fill_and_submit(url, ctx.form, values, files, dry_run=dry)
+                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo}, files, dry_run=dry)
             if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
                 return last
         return last or SubmitResult(ref=ctx.form.ref, status="needs_human",

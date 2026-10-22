@@ -45,6 +45,7 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization")),
     ("requires_sponsorship", (r"sponsorship", r"require.* visa")),
     ("willing_to_relocate", (r"relocat",)),
+    ("located_in_us", (r"(located|based|reside|live|residing)\b.*\b(in|within) the (us|u s|usa|united states)\b",)),
     ("start_date", (r"(earliest )?start date", r"available to start", r"notice period")),
     ("salary_expectation", (r"salary expectation", r"expected (salary|compensation)", r"desired (salary|compensation)")),
     ("referral_source", (r"how did you (hear|find)", r"source$")),

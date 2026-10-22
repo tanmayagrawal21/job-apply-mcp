@@ -90,6 +90,9 @@ class ProfileView:
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),
         }
+        if key == "located_in_us" and c.country:       # derived from the configured country; unknown -> unmapped
+            table[key] = "Yes" if re.sub(r"[^a-z]", "", c.country.lower()) in ("us", "usa", "unitedstates",
+                                                                                "unitedstatesofamerica") else "No"
         if key in table:
             v = table[key]
             return v if isinstance(v, float) else (v or None)

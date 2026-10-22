@@ -90,7 +90,7 @@ class ApplicationPlan(BaseModel):
 
 class SubmitResult(BaseModel):
     ref: str
-    status: str  # submitted | duplicate | needs_human | roadblock | error | dry_run | handoff | awaiting_code
+    status: str  # submitted | duplicate | incomplete | needs_human | roadblock | error | dry_run | handoff | awaiting_code
     via: str | None = None
     confirmation: str | None = None
     detail: str | None = None
