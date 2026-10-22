@@ -349,7 +349,7 @@ _MARK_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-scope]').forEach
   c.setAttribute('data-jam-scope', '1'); return true; }"""
 _COUNTRY_JS = """() => { const ids = ['country', 'phone-country', 'phone_country'];
   for (const i of ids) { const e = document.getElementById(i); if (e && e.offsetParent !== null) return i; } return ''; }"""
-# The field's own container, for read-backs that must never match ANOTHER field's value (ADR-0038).
+# The field's own container, for read-backs that must never match ANOTHER field's value (ADR-0039).
 _COMMIT_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-commit]').forEach(x => x.removeAttribute('data-jam-commit'));
   const ctl = e.closest('[class*=select__control]');
   let c = ctl ? (ctl.closest('[class*=select-shell], [class*=select__container]') || ctl.parentElement || ctl)
@@ -357,7 +357,7 @@ _COMMIT_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-commit]').forE
   if (!c) c = e.parentElement; if (!c) return false;
   c.setAttribute('data-jam-commit', '1'); return true; }"""
 # Server-rendered forms (Greenhouse job-boards is Remix) show inputs before the JS app hydrates; typing or clicking
-# before that is silently lost (ADR-0038). Ready = document complete and, on an SSR page, the first form control
+# before that is silently lost (ADR-0039). Ready = document complete and, on an SSR page, the first form control
 # carries React's own property keys.
 _HYDRATED_JS = """() => { if (document.readyState !== 'complete') return false;
   const ssr = !!(window.__remixContext || window.__reactRouterContext || window.__NEXT_DATA__ || document.querySelector('[data-reactroot]'));
@@ -369,7 +369,7 @@ _IS_GROUP_JS = """e => !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tag
   && !!e.querySelector('input[type=checkbox], input[type=radio]')"""
 _OPT_TEXTS_JS = """els => els.map(e => ((e.labels && e.labels[0] ? e.labels[0].innerText : '')
   || (e.closest('label') || {}).innerText || e.getAttribute('aria-label') || e.value || '').replace(/\\s+/g, ' ').trim())"""
-# Every visible required control that is still empty, CHECKBOX AND RADIO GROUPS INCLUDED (ADR-0038). A group is a
+# Every visible required control that is still empty, CHECKBOX AND RADIO GROUPS INCLUDED (ADR-0039). A group is a
 # fieldset / role=group / role=radiogroup / consent block holding choice inputs; it is required when the group or a
 # member says so (required, aria-required) or its legend/heading carries an asterisk or a "required" class; an
 # unanswered consent radio group always counts. Custom-drawn boxes hide the real input, so visibility is the group's.
@@ -778,7 +778,7 @@ class PlaywrightDriver(VerificationMixin):
     # -- field operations -----------------------------------------------------------------------
     async def _await_hydration(self, page) -> bool:
         """Wait (cap browser.hydrate_wait_s) until a server-rendered form is live; input typed or clicked before
-        hydration is silently dropped by React (relativity fill failures, ADR-0038). False = cap reached; the run
+        hydration is silently dropped by React (relativity fill failures, ADR-0039). False = cap reached; the run
         continues and the read-back / required-field scan still judge the result."""
         deadline = time.monotonic() + max(0.0, self.b.hydrate_wait_s)
         while True:
@@ -825,7 +825,7 @@ class PlaywrightDriver(VerificationMixin):
         key = f.key
         cands = [page.locator(f'[id="{key}"]'), page.locator(f'[name="{key}"]')]
         # Ashby wraps each question in [data-field-path=<key>]; radio/checkbox members carry entry-scoped names
-        # (or the option text), so the group container is the only stable handle (ADR-0038).
+        # (or the option text), so the group container is the only stable handle (ADR-0039).
         fp = f'[data-field-path="{key}"]'
         cands += [page.locator(f"{fp} fieldset, {fp} [role=radiogroup], {fp} [role=group]")]
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
@@ -1210,7 +1210,7 @@ class PlaywrightDriver(VerificationMixin):
     async def _ensure_phone_country(self, page, country: str) -> bool:
         """Intl-tel widgets reset the number when the country changes: pick the PROFILE's country BEFORE typing the
         phone. No configured country -> the widget is left as the site set it (a required empty one is reported by
-        the required-field scan); the tool never guesses a country (ADR-0038)."""
+        the required-field scan); the tool never guesses a country (ADR-0039)."""
         if not country:
             return True
         want = normalize(country)
