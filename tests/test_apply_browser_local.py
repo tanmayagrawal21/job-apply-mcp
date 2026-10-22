@@ -298,3 +298,52 @@ async def test_lever_card_radio_checkbox_select_text_filled_by_name(drv):
     res = await drv.fill_and_submit(srv.url, form, ans, {}, dry_run=True)
     assert res.status == "dry_run", res.detail
     assert srv.posts == 0
+
+
+# ---- captcha_policy (ADR-0036)
+
+PASSIVE = ("var b=document.createElement('div');b.className='grecaptcha-badge';document.body.appendChild(b);"
+           "var f=document.createElement('iframe');f.src='about:blank#recaptcha/api2/anchor?size=invisible';"
+           "f.style.cssText='width:0;height:0;border:0';b.appendChild(f);")
+CHALLENGE_AFTER_CLICK = (PASSIVE + "document.getElementById('f').addEventListener('submit',ev=>{ev.preventDefault();ev.stopImmediatePropagation();"
+                         "var c=document.createElement('iframe');c.src='about:blank#recaptcha/api2/bframe';"
+                         "c.style.cssText='width:400px;height:500px;position:fixed;top:10px;left:10px';"
+                         "document.body.appendChild(c);});")
+VISIBLE_BOX = ("var c=document.createElement('iframe');c.src='about:blank#recaptcha/api2/anchor';"
+               "c.style.cssText='width:304px;height:78px';document.body.appendChild(c);")
+
+
+async def test_passive_widget_attempt_submits_once_handoff_does_not(drv, resume):
+    drv.b.captcha_handoff = True
+    drv.b.captcha_policy = "handoff"
+    srv = Srv(page(extra=PASSIVE), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:p1"}), ANS, resume,
+                                    dry_run=False)
+    assert res.status == "handoff" or res.status == "needs_human"
+    assert srv.posts == 0
+    drv.b.captcha_policy = "attempt"
+    srv = Srv(page(extra=PASSIVE), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:p2"}), ANS, resume,
+                                    dry_run=False)
+    assert res.status == "submitted", res.detail
+    assert srv.posts == 1, "exactly one submit request"
+
+
+async def test_visible_challenge_before_click_hands_off_even_under_attempt(drv, resume):
+    drv.b.captcha_handoff = True
+    drv.b.captcha_policy = "attempt"
+    srv = Srv(page(extra=VISIBLE_BOX), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:v1"}), ANS, resume,
+                                    dry_run=False)
+    assert res.status in ("handoff", "needs_human") and srv.posts == 0
+
+
+async def test_visible_challenge_after_click_is_roadblock_tab_left_open(drv, resume):
+    drv.b.captcha_handoff = True
+    drv.b.captcha_policy = "attempt"
+    srv = Srv(page(extra=CHALLENGE_AFTER_CLICK), GOOD)
+    n0 = len(drv._ctx.pages)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:c1"}), ANS, resume,
+                                    dry_run=False)
+    assert res.status == "roadblock" and "do NOT retry" in res.detail, res.detail
+    assert srv.posts == 0 and len(drv._ctx.pages) > n0 - 1 and any(p.url.startswith("http://127") for p in drv._ctx.pages)

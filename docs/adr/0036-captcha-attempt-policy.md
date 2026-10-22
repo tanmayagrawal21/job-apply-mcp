@@ -1,0 +1,39 @@
+# ADR-0036: `browser.captcha_policy` ("handoff" | "attempt")
+
+Status: accepted · Date: 2026-10-22
+
+## Context
+ADR-0012 hands off to a human every page that carries any captcha widget, and always for Ashby. Many of those pages
+carry only a passive/invisible widget (reCAPTCHA badge, script, invisible iframe) that never shows the applicant a
+challenge, so the handoff adds a manual click for nothing. The repo owner asked for those to work, but not for
+visible challenges to be touched.
+
+## Decision
+- New setting `browser.captcha_policy`: `"handoff"` (default, unchanged behaviour) or `"attempt"`.
+- Under `attempt`, after the form is filled and verified: if the page has only passive/invisible widgets and NO
+  visible interactive challenge (visible reCAPTCHA checkbox or image challenge, visible hCaptcha, visible Turnstile),
+  the driver clicks Submit **once**, like a person. Otherwise it hands off exactly as before.
+- After the click, if a visible challenge appears or the page reports a bot check, the driver STOPS: the tab is left
+  open and it returns `roadblock`. The engine maps that to `unknown` and never auto-retries.
+- If no confirmation is detected, the existing outcome logic applies (`needs_human`, "do NOT retry"); confirmation
+  email reconciliation (ADR-0025) settles it.
+- Visibility is decided by reading the HOST page only (iframe `src`, computed visibility, size); frame contents
+  are never read.
+- `attempt` is a security relaxation (ADR-0021): it is added to `config._RELAXES` and honoured ONLY from the
+  trusted, user-owned default config file. Project files, `JOB_APPLY__*` env and `JOB_APPLY_MCP_CONFIG`-selected files
+  are ignored for it (logged) and the value stays `handoff`.
+
+## ABSOLUTE limits (apply to every setting, now and later)
+No solving or solver services. No interacting with challenge frames. No stealth or fingerprint plugins. No
+webdriver or user-agent spoofing. No automation-flag removal. No token injection. No retries to improve a score.
+One click per submission. These are repeated as a comment above the detection code.
+
+## Consequences
+Pages with an invisible widget can be submitted unattended when the user opts in. If the site's risk engine
+decides to show a challenge, the run stops as a roadblock (status `unknown` until a confirmation email arrives).
+Risk-score rejections that show no challenge look like "no confirmation" and are not retried.
+
+## Verify / revert
+`uv run pytest tests/test_apply_browser_local.py tests/test_approvals.py -k captcha` (browser tests need local
+Chrome and skip otherwise). Revert: remove the setting, its `_RELAXES` entry and the `attempt` branch; the default
+behaviour is unchanged.

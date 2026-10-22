@@ -91,6 +91,34 @@ def greenhouse_embed_url(url: str, ref: str) -> str:
     return url
 
 
+# captcha_policy="attempt" ABSOLUTE LIMITS (ADR-0036). This code will never, under any setting:
+#   - solve a challenge or call a solver service;     - interact with a challenge frame (no clicks, no reads inside);
+#   - add stealth / fingerprint plugins;               - spoof the webdriver flag or the user agent;
+#   - remove automation flags from the browser;        - inject or fabricate a captcha token;
+#   - retry a submission to improve a risk score;      - click Submit more than once per submission.
+# A visible challenge, before or after the click, means STOP and hand the open tab to a human.
+# Reads only the HOST page (iframe elements' attributes and geometry); never frame contents (ADR-0036).
+_CAPTCHA_JS = """() => {
+  const w = [], v = [];
+  const shown = el => {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+    }
+    const r = el.getBoundingClientRect();
+    return r.width >= 30 && r.height >= 30 && r.right > 0 && r.bottom > 0;
+  };
+  const frames = sel => Array.from(document.querySelectorAll(sel));
+  const passive = f => /size=invisible/.test(f.getAttribute('src') || '') || !!f.closest('.grecaptcha-badge');
+  if (document.querySelector('.grecaptcha-badge, iframe[src*=recaptcha], script[src*=recaptcha]')) w.push('recaptcha');
+  if (frames('iframe[src*=recaptcha]').some(f => !passive(f) && shown(f))) v.push('recaptcha');
+  if (document.querySelector('iframe[src*=hcaptcha], .h-captcha, script[src*=hcaptcha]')) w.push('hcaptcha');
+  if (frames('iframe[src*=hcaptcha]').some(f => !passive(f) && shown(f))) v.push('hcaptcha');
+  if (document.querySelector('iframe[src*=turnstile], iframe[src*="challenges.cloudflare.com"], .cf-turnstile, script[src*=turnstile]')) w.push('turnstile');
+  if (frames('iframe[src*=turnstile], iframe[src*="challenges.cloudflare.com"]').some(f => shown(f))) v.push('turnstile');
+  return {widgets: w, visible: v}; }"""
+
+
 _BLOCKERS: list[tuple[str, re.Pattern[str]]] = [
     ("captcha", re.compile(r"verify you are human|i'?m not a robot|checking if the site connection is secure|"
                            r"complete the security check|hcaptcha|select all (images|squares)", re.IGNORECASE)),
@@ -407,23 +435,30 @@ class PlaywrightDriver(VerificationMixin):
                 ev = await self._save_evidence(page, ref, "presubmit-errors", extra={"errors": errs})
                 return SubmitResult(ref=ref, status="needs_human", via="browser",
                                     detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
+        attempt = False
         if not dry_run and self.b.captcha_handoff:
-            widgets = await self._captcha_widgets(page)
-            if widgets or ats.name == "ashby":      # never evade/solve bot checks: a human makes the final click
-                ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets})
-                if self.b.headless:
-                    return SubmitResult(ref=ref, status="needs_human", via="browser",
-                                        detail=f"captcha-protected ({widgets or ['ashby']}); form filled and verified, "
-                                               f"not clicked; rerun with browser.headless=false{ev}")
-                self._handoff_pages.add(id(page))
-                return SubmitResult(ref=ref, status="handoff", via="browser", confirmation=page.url[:200],
-                                    detail=f"form filled and verified in the open browser tab; a human must click "
-                                           f"Submit (captcha-protected){ev}")
+            state = await self._captcha_state(page)
+            widgets = state["widgets"]
+            if widgets or ats.name == "ashby":
+                # captcha_policy="attempt" (ADR-0036): only a passive/invisible widget and NO visible challenge may be
+                # clicked through, once, exactly like a person would. Anything else stays a human handoff.
+                if self.b.captcha_policy == "attempt" and not state["visible"]:
+                    attempt = True
+                else:      # never evade/solve bot checks: a human makes the final click
+                    ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets})
+                    if self.b.headless:
+                        return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                            detail=f"captcha-protected ({widgets or ['ashby']}); form filled and verified, "
+                                                   f"not clicked; rerun with browser.headless=false{ev}")
+                    self._handoff_pages.add(id(page))
+                    return SubmitResult(ref=ref, status="handoff", via="browser", confirmation=page.url[:200],
+                                        detail=f"form filled and verified in the open browser tab; a human must click "
+                                               f"Submit (captcha-protected){ev}")
         if dry_run:
             ev = await self._save_evidence(page, ref, "dry-run")
             return SubmitResult(ref=ref, status="dry_run", via="browser",
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
-        return await self._submit(page, ats, ref)
+        return await self._submit(page, ats, ref, attempt=attempt)
 
     # -- evidence / network ---------------------------------------------------------------------
     def _attach_recorder(self, page, ats: AtsProfile) -> None:
@@ -463,17 +498,19 @@ class PlaywrightDriver(VerificationMixin):
         except Exception:
             return []
 
+    async def _captcha_state(self, page) -> dict[str, list[str]]:
+        """Captcha widgets on the page: `widgets` (any presence, incl. badge/script) and `visible` (an interactive
+        challenge a person would have to act on: checkbox, image challenge, visible Turnstile). READ-ONLY inspection
+        of the host page's DOM; it never touches the contents of a challenge frame (ADR-0036)."""
+        try:
+            d = await page.evaluate(_CAPTCHA_JS)
+            return {"widgets": list(d.get("widgets", [])), "visible": list(d.get("visible", []))}
+        except Exception:
+            return {"widgets": [], "visible": []}
+
     async def _captcha_widgets(self, page) -> list[str]:
         """Invisible-captcha / bot-check widgets present on the page (explains silent rejections)."""
-        try:
-            return list(await page.evaluate("""() => {
-              const o = [];
-              if (document.querySelector('.grecaptcha-badge, iframe[src*=recaptcha], script[src*=recaptcha]')) o.push('recaptcha');
-              if (document.querySelector('iframe[src*=hcaptcha], .h-captcha, script[src*=hcaptcha]')) o.push('hcaptcha');
-              if (document.querySelector('iframe[src*=turnstile], .cf-turnstile, script[src*=turnstile]')) o.push('turnstile');
-              return o; }"""))
-        except Exception:
-            return []
+        return (await self._captcha_state(page))["widgets"]
 
     async def _button_summary(self, page) -> list[str]:
         try:
@@ -1160,7 +1197,7 @@ class PlaywrightDriver(VerificationMixin):
                 break
         return None, seen
 
-    async def _submit(self, page, ats: AtsProfile, ref: str) -> SubmitResult:
+    async def _submit(self, page, ats: AtsProfile, ref: str, *, attempt: bool = False) -> SubmitResult:
         target, n = await self._pick_submit(page)
         if target is None:
             return SubmitResult(ref=ref, status="needs_human", via="browser",
@@ -1169,9 +1206,10 @@ class PlaywrightDriver(VerificationMixin):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} challenge visible")
         await target.scroll_into_view_if_needed()
         await target.click()                                   # the ONE submit click; never repeated
-        return await self._conclude(page, ats, ref)
+        return await self._conclude(page, ats, ref, attempt=attempt)
 
-    async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False) -> SubmitResult:
+    async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False,
+                        attempt: bool = False) -> SubmitResult:
         """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026)."""
         deadline = time.monotonic() + self.b.confirmation_wait_s
         text, outcome = "", None
@@ -1186,6 +1224,13 @@ class PlaywrightDriver(VerificationMixin):
             outcome = decide_outcome(ats, page.url, text, still, records)
             if outcome:
                 break
+            if attempt and (shown := (await self._captcha_state(page))["visible"]):
+                # A challenge appeared after our single click: STOP. No interaction, no retry; tab stays open (ADR-0036).
+                self._handoff_pages.add(id(page))
+                ev = await self._save_evidence(page, ref, "captcha-challenge", extra={"captcha": shown})
+                return SubmitResult(ref=ref, status="roadblock", via="browser", confirmation=page.url[:200],
+                                    detail=f"visible captcha challenge {shown} after the single submit click; stopped, "
+                                           f"tab left open for a human; do NOT retry{ev}")
             blk = detect_blocker(text)
             stop = ("duplicate", "captcha") if after_code else ("duplicate", "captcha", "verification")
             if blk in stop or time.monotonic() >= deadline:     # after a code the old prompt lingers until the reply
@@ -1205,6 +1250,8 @@ class PlaywrightDriver(VerificationMixin):
         if blk == "verification" and (pending := await self._await_code(page, ats, ref)) is not None:
             return pending
         if blk in ("captcha", "verification"):
+            if attempt:
+                self._handoff_pages.add(id(page))          # keep the tab open for the human (ADR-0036)
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
         errs = (await self._validation_errors(page))[:5]
         why = ("ATS rejected the submission" if outcome == "failed"
