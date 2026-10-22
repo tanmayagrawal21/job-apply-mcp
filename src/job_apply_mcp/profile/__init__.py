@@ -66,12 +66,32 @@ class SalaryRules(BaseModel):
     currency: str = "USD"
 
 
+class Preferences(BaseModel):
+    """Structured yes/no preferences. None = not configured, so the matching question stays unresolved."""
+    willing_to_relocate: bool | None = None
+    needs_relocation_support: bool | None = None
+    open_to_hybrid: bool | None = None
+    open_to_onsite: bool | None = None
+
+
+class Authorization(BaseModel):
+    """Work-authorization facts. None = not configured (falls back to [answers] patterns)."""
+    work_authorized: bool | None = None
+    requires_sponsorship: bool | None = None
+    citizen: bool | None = None
+
+
 class Profile(BaseModel):
     contact: Contact = Field(default_factory=Contact)
     links: dict[str, str] = Field(default_factory=dict)     # linkedin, github, website, ...
     education: list[Education] = Field(default_factory=list)
     work: list[Work] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    skill_years: dict[str, float] = Field(default_factory=dict)  # per-technology years; only what you set is ever answered
+    languages: list[str] = Field(default_factory=list)           # programming languages, strongest first
+    referrals: dict[str, str] = Field(default_factory=dict)      # company -> referrer name (else "know anyone" = No)
+    preferences: Preferences = Field(default_factory=Preferences)
+    authorization: Authorization = Field(default_factory=Authorization)
     answers: dict[str, str] = Field(default_factory=dict)
     demographics: Demographics = Field(default_factory=Demographics)
     salary: SalaryRules = Field(default_factory=SalaryRules)

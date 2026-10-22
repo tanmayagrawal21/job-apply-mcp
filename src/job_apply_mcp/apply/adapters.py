@@ -3,7 +3,7 @@ Protocols in ports.py. Imports of those components are lazy so the apply package
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 from ..config import Settings
 from ..core.models import ApplicationForm, GateResult, Posting
@@ -72,7 +72,60 @@ class ProfileView:
     def _edu(self):
         return max(self.p.education, key=lambda e: e.end or "") if self.p.education else None
 
+    # canonical key -> [answers] phrases tried (the user's own pattern wins; nothing is invented)
+    _ANSWER_PHRASES: ClassVar[dict[str, tuple[str, ...]]] = {
+        "work_authorized": ("work authorized", "authorized to work", "eligible to work", "work authorization",
+                            "authorization to work", "legally authorized"),
+        "requires_sponsorship": ("requires sponsorship", "require sponsorship", "sponsorship", "visa sponsorship"),
+        "willing_to_relocate": ("willing to relocate", "relocate", "relocation"),
+        "relocation_support": ("relocation support", "relocation assistance"),
+        "open_to_hybrid": ("open to hybrid", "hybrid"),
+    }
+    _TRI: ClassVar[dict[bool, str]] = {True: "Yes", False: "No"}
+
+    def _experience_spans(self) -> list[tuple[str, str]]:
+        """Resume experience entries win (ADR-0023); the profile's work list is the fallback."""
+        res = [(f.start, "" if f.current else f.end) for f in self.resume_facts
+               if f.section == "experience" and f.start]
+        return res or [(w.start, w.end) for w in self.p.work if w.start]
+
+    def _structured(self, key: str) -> bool | None:
+        a, pr = self.p.authorization, self.p.preferences
+        return {"work_authorized": a.work_authorized, "requires_sponsorship": a.requires_sponsorship,
+                "us_citizen": a.citizen, "willing_to_relocate": pr.willing_to_relocate,
+                "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
+                "open_to_onsite": pr.open_to_onsite}.get(key)
+
+    def _derived(self, key: str) -> Any | None:
+        if key == "years_experience":
+            from .derive import total_years
+            return total_years(self._experience_spans())
+        if key == "skill_years":
+            return {k.strip().lower(): float(v) for k, v in self.p.skill_years.items()} or None
+        if key == "languages":
+            return list(self.p.languages) or None
+        if key.startswith("referral:"):
+            want = re.sub(r"[^a-z0-9]+", " ", key[9:].lower()).strip()
+            for co, who in self.p.referrals.items():
+                n = re.sub(r"[^a-z0-9]+", " ", co.lower()).strip()
+                if n and want and (n == want or re.search(rf"\b{re.escape(n)}\b", want)):
+                    return who or "Yes"
+            return None
+        if key in self._ANSWER_PHRASES or key in ("us_citizen", "open_to_onsite"):
+            st = self._structured(key)
+            if st is not None:
+                return self._TRI[st]
+            for q in self._ANSWER_PHRASES.get(key, ()):
+                if (v := self.p.answer_for(q)) is not None:
+                    return v
+        return None
+
     def lookup(self, key: str) -> Any | None:
+        if key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite",
+                   "relocation_support", "open_to_hybrid") or key.startswith("referral:"):
+            return self._derived(key)
+        if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
+            return v
         c, links, d = self.p.contact, self.p.links, self.p.demographics
         w, e = self._current_work(), self._edu()
         table: dict[str, Any] = {

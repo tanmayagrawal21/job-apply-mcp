@@ -33,6 +33,7 @@ from ..core.models import (
 from .approvals import ApprovalBook, evidence_path
 from .mapper import (
     DEMOGRAPHIC_KEYS,
+    SEMANTIC_SENSITIVE,
     best_option,
     canonical_key,
     geo_kind,
@@ -47,7 +48,7 @@ from .salary import compute_ask, format_ask, is_salary_field
 from .writing import load_exemplar, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
-_SENSITIVE_KEYS = {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
+_SENSITIVE_KEYS = SEMANTIC_SENSITIVE | {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
                    "disability", "over_18", "privacy_ack", "salary_expectation", "start_date", "graduation",
                    "pronouns", "sexual_orientation"}
 _SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|clearance|citizen|"
@@ -229,7 +230,8 @@ class ApplyEngine:
         rest = [f for f in rest if not self._skip_cover(f)]
         with self._stage(ref, "map"):  # deterministic first
             mapped = map_fields(rest, self.profile, referral_preference=self.s.apply.referral_preference,
-                                min_score=self.s.apply.option_min_score)
+                                min_score=self.s.apply.option_min_score,
+                                company=ctx.posting.company, top_languages=self.s.apply.top_languages)
         answers = sal_answers + list(mapped.answers)
         short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in mapped.unresolved if f not in short]
