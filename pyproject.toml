@@ -12,6 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+jobspy = ["python-jobspy>=1.1"]
 browser = ["playwright>=1.45,<2"]
 hf = ["transformers>=4.44,<5"]
 litellm = ["litellm>=1.83.0"]

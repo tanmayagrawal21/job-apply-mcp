@@ -162,11 +162,30 @@ class PathsCfg(BaseModel):
     resume: str | None = None
 
 
+class PlatformsCfg(BaseModel):
+    """Platform adapter knobs (ADR-0007). API keys are never here: they come from the environment as
+    <api_key_env_prefix>_<PLATFORM>_<BOARD> (e.g. JOB_APPLY_KEY_GREENHOUSE_ACMECO)."""
+    cache_ttl_s: int = 900                  # on-disk HTTP cache freshness; stale entries are revalidated by ETag
+    cache_prune_days: int = 7               # cache files untouched for this long are deleted at startup
+    timeout_s: float = 20.0
+    retries: int = 2                        # idempotent requests only; form submissions are never retried
+    backoff_s: float = 0.5
+    user_agent: str = "job-apply-mcp/0.1 (+https://github.com/tanmayagrawal21/job-apply-mcp)"
+    boards: dict[str, list[str]] = Field(default_factory=dict)   # platform -> boards searched by default
+    list_with_descriptions: bool = True     # ask list endpoints for content so text flags work (Greenhouse)
+    workday_max_pages: int = 10             # 20 postings per page
+    jobspy_sites: list[str] = Field(default_factory=lambda: ["linkedin", "indeed"])
+    jobspy_results: int = 50
+    api_key_env_prefix: str = "JOB_APPLY_KEY"
+    max_description_chars: int = 6000       # get_job trims descriptions to this
+
+
 class Settings(BaseModel):
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     paths: PathsCfg = Field(default_factory=PathsCfg)
+    platforms: PlatformsCfg = Field(default_factory=PlatformsCfg)
     control: ControlCfg = Field(default_factory=ControlCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
