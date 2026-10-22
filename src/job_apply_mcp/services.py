@@ -25,6 +25,16 @@ class Services:
         self._http: HttpClient | None = None
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
+        self._llm = None
+
+    @property
+    def llm(self):
+        """Task-class + complexity router (ADR-0008), created lazily."""
+        if self._llm is None:
+            from .llm import LLMRouter
+
+            self._llm = LLMRouter(self.settings)
+        return self._llm
 
     @property
     def store(self):
@@ -191,4 +201,5 @@ class Services:
         from .core import registry
 
         return {"platforms": registry.platforms.names(), "llm": registry.llm_providers.names(),
-                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run}
+                "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run,
+                "llm_router": await self.llm.health()}
