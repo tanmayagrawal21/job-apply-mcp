@@ -81,6 +81,27 @@ async def list_applications(status: str = "", limit: int = 50, cursor: int = 0) 
 
 
 @mcp.tool()
+async def record_text(kind: str, text: str, origin: str, parent: str | None = None, model: str | None = None,
+                      prompt: str | None = None, context: str | None = None) -> str:
+    """Record provenance for a text artifact (kind: resume_bullet|cover_letter|answer|profile_fact).
+    origin: user_written | llm_generated (llm_generated needs `model`). `context` = job/question the text answers."""
+    return _out(await svc().record_text(kind, text, origin, parent=parent, model=model, prompt=prompt,
+                                        context=context))
+
+
+@mcp.tool()
+async def verify_text(id: str, edited_text: str | None = None, verified_by: str = "user") -> str:
+    """User approves LLM text. Without edited_text -> user_verified; with it -> user_edited child plus diff."""
+    return _out(await svc().verify_text(id, edited_text=edited_text, verified_by=verified_by))
+
+
+@mcp.tool()
+async def provenance(id: str, include_text: bool = False) -> str:
+    """Origin, model, prompt hash and ancestor chain for a text id."""
+    return _out(await svc().provenance(id, include_text=include_text))
+
+
+@mcp.tool()
 async def health() -> str:
     """Report enabled platforms, LLM providers and which local models are reachable."""
     return _out(await svc().health())

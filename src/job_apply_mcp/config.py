@@ -190,6 +190,11 @@ class PathsCfg(BaseModel):
     resume: str | None = None
 
 
+class ProvenanceCfg(BaseModel):
+    db_path: str | None = None          # default: <paths.data_dir>/provenance.db
+    export_tagging: str = "sidecar"     # none | sidecar | metadata  (see provenance/export.py)
+
+
 class ApplyCfg(BaseModel):
     auto_approve: bool = False          # True skips the hash-bound approval token (ADR-0011)
     short_text_max: int = 200           # unresolved fields up to this length go to the local LLM
@@ -268,6 +273,7 @@ class Settings(BaseModel):
     llm: LLMCfg = Field(default_factory=LLMCfg)
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     paths: PathsCfg = Field(default_factory=PathsCfg)
+    provenance: ProvenanceCfg = Field(default_factory=ProvenanceCfg)
     apply: ApplyCfg = Field(default_factory=ApplyCfg)
     browser: BrowserCfg = Field(default_factory=BrowserCfg)
     writing: WritingCfg = Field(default_factory=WritingCfg)
