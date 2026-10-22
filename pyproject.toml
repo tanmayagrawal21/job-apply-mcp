@@ -18,6 +18,7 @@ agent = ["playwright>=1.45,<2", "browser-use>=0.3"]
 hf = ["transformers>=4.44,<5"]
 litellm = ["litellm>=1.83.0"]
 mlx = ["mlx-lm>=0.18"]
+tune = ["mlx-lm>=0.18"]
 keyring = ["keyring>=25,<26"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
 
