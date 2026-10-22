@@ -100,6 +100,24 @@ def _elicit_approver(ctx: Context):
     return ask
 
 
+class _Code(BaseModel):
+    code: str = Field(description="The verification code you received by email or SMS")
+
+
+async def _elicit_code(ctx: Context, row: dict[str, Any]) -> dict[str, Any]:
+    """Awaiting a code: ask the USER (never mail) via MCP elicitation when the client supports it (ADR-0026)."""
+    try:
+        if not load_settings().verification.elicit:
+            return row
+        res = await ctx.elicit(message="The site emailed/texted you a verification code to finish this application. "
+                                       "Enter it here (it is typed into the page and never stored).", schema=_Code)
+    except Exception:  # noqa: BLE001 - client without elicitation support
+        return row
+    if res.action != "accept":
+        return row
+    return await svc().provide_verification_code(row["pending_id"], res.data.code)
+
+
 @mcp.tool()
 async def submit_application(ctx: Context, ref_or_url: str, answers: dict[str, Any] | None = None,
                              dry_run: bool | None = None, approval_id: str | None = None,
@@ -109,8 +127,20 @@ async def submit_application(ctx: Context, ref_or_url: str, answers: dict[str, A
     approval_mode=human a person must approve (dialog, or `job-apply-mcp approve <id>`)."""
     if token is not None:
         return _out({"status": "error", "detail": "token is no longer accepted; use approval_id from plan_application"})
-    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, approval_id=approval_id,
-                                   approver=_elicit_approver(ctx)))
+    row = await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, approval_id=approval_id,
+                             approver=_elicit_approver(ctx))
+    if row.get("status") == "awaiting_code" and row.get("pending_id"):
+        row = await _elicit_code(ctx, row)
+    return _out(row)
+
+
+@mcp.tool()
+async def provide_verification_code(pending_id: str, code: str) -> str:
+    """The user types the code they received (email/SMS) for a submission in status `awaiting_code`. Ask the USER;
+    never try to read their mail or guess. Only the format is checked; the code is typed into the open page, the
+    page's verify button is clicked once, then the normal confirmation check runs. One attempt per code; the
+    application is never resubmitted; after `verification.code_ttl_s` it becomes a `handoff`."""
+    return _out(await svc().provide_verification_code(pending_id, code))
 
 
 def _agent_mode() -> bool:

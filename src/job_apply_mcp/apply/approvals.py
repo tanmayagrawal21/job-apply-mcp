@@ -7,7 +7,8 @@ marked by a human channel (MCP elicitation or the `job-apply-mcp approve <id>` C
 
 Submission state per ref: planned -> approved -> submitting -> submitted | failed | unknown | handoff.
 `submitting` is persisted BEFORE the click. A ref left in submitting/unknown is never auto-resubmitted; only
-`resolve_submission` moves it on.
+`resolve_submission` moves it on. `awaiting_code` (ADR-0026) is the submit click done, a human-typed
+verification code pending; it blocks like `submitting` and never triggers a second submit.
 """
 from __future__ import annotations
 
@@ -21,9 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-STATES = ("planned", "approved", "submitting", "submitted", "failed", "unknown", "handoff")
-BLOCKING = ("submitting", "unknown", "submitted")        # begin_submit refuses these
-RESOLVABLE = ("submitting", "unknown")
+STATES = ("planned", "approved", "submitting", "submitted", "failed", "unknown", "handoff", "awaiting_code")
+BLOCKING = ("submitting", "unknown", "submitted", "awaiting_code")   # begin_submit refuses these
+RESOLVABLE = ("submitting", "unknown", "awaiting_code")
 OUTCOMES = ("submitted", "failed", "handoff")
 
 _SCHEMA = """

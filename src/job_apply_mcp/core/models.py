@@ -90,7 +90,8 @@ class ApplicationPlan(BaseModel):
 
 class SubmitResult(BaseModel):
     ref: str
-    status: str  # submitted | duplicate | needs_human | roadblock | error | dry_run
+    status: str  # submitted | duplicate | needs_human | roadblock | error | dry_run | handoff | awaiting_code
     via: str | None = None
     confirmation: str | None = None
     detail: str | None = None
+    pending_id: str | None = None   # awaiting_code only: pass to provide_verification_code (ADR-0026)

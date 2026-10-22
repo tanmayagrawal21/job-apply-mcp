@@ -187,6 +187,21 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `block_hosts` | `list[str]` | `["google-analytics.com", "googletagmanager.com", "segment.io", "segment.com", "hotjar.c...` |  |
 | `agent_dry_run_fill` | `bool` | `false` | the generic agent cannot be guaranteed to stop before submit |
 
+## `[verification]`
+
+Human-provided email/SMS verification codes after a submit click (ADR-0026). The tool never reads mail.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | `bool` | `true` |  |
+| `code_ttl_s` | `int` | `600` | how long a pending code prompt stays open before it becomes a handoff |
+| `max_attempts` | `int` | `1` | code entries per prompt (one click each); a bad format costs none |
+| `elicit` | `bool` | `true` | ask the user for the code via MCP elicitation when the client supports it |
+| `notify` | `bool` | `false` | desktop notification (macOS/Linux) when a code is pending; never contains the code |
+| `min_length` | `int` | `4` | format bounds when the page's input declares none |
+| `max_length` | `int` | `12` |  |
+| `typing_delay_ms` | `int` | `60` | real keystroke cadence when entering the code |
+
 ## `[writing]`
 
 | Key | Type | Default | Notes |

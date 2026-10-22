@@ -50,7 +50,7 @@ Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]
 3. **Control layer.** Independent checks run before every side effect: daily and per-run quotas, single-submit
    guard, recipient deny-list, prose lint, page-text injection screen, `apply_enabled` kill switch. Add your own
    rules in `controls.toml`.
-4. **Hard stops.** CAPTCHAs, verification codes, account creation and attestation checkboxes matching
+4. **Hard stops.** CAPTCHAs, verification codes (unless the USER types them: ADR-0026; the tool never reads mail), account creation and attestation checkboxes matching
    `policy.stop_phrases` (for example "no AI used") always return `needs_human`. They are not configurable away.
 5. **No invented facts.** Answers come from your profile or are marked; unresolved required fields stop the run.
 6. **Privacy.** Profile and secrets stay on your machine, are never committed, and API keys are read only from
