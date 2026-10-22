@@ -401,7 +401,7 @@ async def test_shadow_root_and_nested_iframe_are_inspected(drv):
     shadow_rc = ("<div id=h></div><script>const r=document.getElementById('h').attachShadow({mode:'open'});"
                  "r.innerHTML=\"<iframe src='about:blank#recaptcha/api2/anchor' style='width:300px;height:80px'>"
                  "</iframe>\";</script>")
-    assert (await _state(drv, f"<html><body>{shadow_rc}</body></html>"))["visible"] == ["recaptcha"]
+    assert (await _state(drv, f"<html><body>{shadow_rc}</body></html>"))["visible"][0] == "recaptcha"
     nested = ("<iframe srcdoc=\"<iframe src='about:blank#geetest'></iframe>\" style='width:300px;height:100px'>"
               "</iframe>")
     st = None
@@ -441,3 +441,38 @@ async def test_attempt_click_without_confirmation_is_roadblock_never_handoff(drv
                                     dry_run=False)
     assert srv.posts == 1
     assert res.status == "roadblock" and "do NOT retry" in res.detail, (res.status, res.detail)
+
+
+_CLOSED_FRAME = ("<div id=h></div><script>const r=document.getElementById('h').attachShadow({mode:'closed'});"
+                 "r.innerHTML=\"<iframe src='about:blank#%s' style='width:300px;height:100px'></iframe>\";</script>")
+_CLOSED_DIV = ("<div id=h></div><script>const r=document.getElementById('h').attachShadow({mode:'closed'});"
+               "r.innerHTML=\"<div class='geetest_holder' style='width:300px;height:100px'>x</div>\";</script>")
+
+
+@pytest.mark.parametrize("inner", [_CLOSED_FRAME % "recaptcha/api2/anchor", _CLOSED_FRAME % "funcaptcha",
+                                   _CLOSED_FRAME % "arkoselabs", _CLOSED_DIV])
+@pytest.mark.parametrize("with_badge", [False, True])
+async def test_closed_shadow_root_widgets_are_caught(drv, inner, with_badge):
+    st = await _state(drv, f"<html><body>{PASSIVE_HTML_BADGE if with_badge else ''}{inner}</body></html>")
+    assert _unsafe(st), st
+
+
+async def test_closed_shadow_root_attempt_hands_off(drv, resume):
+    drv.b.captcha_handoff, drv.b.captcha_policy = True, "attempt"
+    for i, inner in enumerate((_CLOSED_FRAME % "funcaptcha", _CLOSED_DIV)):
+        srv = Srv(page(extra=PASSIVE) .replace("</body>", inner + "</body>"), GOOD)
+        res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": f"ashby:acme:cs{i}"}), ANS, resume,
+                                        dry_run=False)
+        assert res.status in ("handoff", "needs_human") and srv.posts == 0, res.detail
+
+
+async def test_cdp_failure_fails_closed(drv, monkeypatch):
+    page_ = await (await drv._context()).new_page()
+    try:
+        async def boom(*a, **k):
+            raise RuntimeError("no cdp")
+        monkeypatch.setattr(page_.context, "new_cdp_session", boom, raising=False)
+        out = await drv._cdp_markers(page_)
+    finally:
+        await page_.close()
+    assert out["unsafe"] == ["cdp-unavailable"]

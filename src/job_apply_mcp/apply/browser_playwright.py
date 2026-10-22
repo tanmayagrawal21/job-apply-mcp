@@ -168,6 +168,24 @@ _CAPTCHA_FRAME_URL = re.compile(r"recaptcha|hcaptcha|turnstile|challenges\.cloud
                                 re.IGNORECASE)
 
 
+# Class/id markers found by the CDP scan (closed shadow roots included). Passive allowlist below (ADR-0036).
+_CAPTCHA_MARKER = re.compile(r"arkose|funcaptcha|geetest|datadome|perimeterx|humansecurity|kasada|awswaf|aws-waf|"
+                             r"captcha|turnstile|cf-chl", re.IGNORECASE)
+
+
+def _marker_passive(tok: str, attrs: dict[str, str]) -> bool:
+    t = tok.lower()
+    if t.startswith(("grecaptcha-badge", "grecaptcha-logo", "grecaptcha-error", "g-recaptcha-response",
+                     "h-captcha-response", "cf-turnstile-response")):
+        return True
+    if t == "g-recaptcha" or t == "h-captcha":
+        return "invisible" in attrs.get("data-size", "").lower()
+    if t == "cf-turnstile":
+        return ("interaction-only" in attrs.get("data-appearance", "").lower()
+                or "execute" in attrs.get("data-execution", "").lower())
+    return False
+
+
 _BLOCKERS: list[tuple[str, re.Pattern[str]]] = [
     ("captcha", re.compile(r"verify you are human|i'?m not a robot|checking if the site connection is secure|"
                            r"complete the security check|hcaptcha|select all (images|squares)", re.IGNORECASE)),
@@ -566,12 +584,71 @@ class PlaywrightDriver(VerificationMixin):
             if fr == page.main_frame:
                 continue
             try:
-                if _CAPTCHA_FRAME_URL.search(fr.url or ""):
-                    continue                                   # vendor frame: seen as an element by its parent only
+                if _CAPTCHA_FRAME_URL.search((fr.url or "") + " " + (fr.name or "")):
+                    # The browser tracks frames inside CLOSED shadow roots too. Vendor frames are never evaluated, but
+                    # their <iframe> ELEMENT (in the parent) is checked for visibility; unresolvable -> unsafe.
+                    merge(await self._frame_element_state(fr))
+                    continue
                 merge(await fr.evaluate(_CAPTCHA_JS))
             except Exception:
                 out["unsafe"].append("frame-uninspectable")    # cross-origin/detached: cannot prove it is passive
+        merge(await self._cdp_markers(page))
         return out
+
+    async def _frame_element_state(self, fr) -> dict[str, list[str]]:
+        """Geometry/visibility of a vendor frame's own <iframe> element. Known invisible badge or a hidden
+        recaptcha bframe container are passive; a shown frame is a visible challenge; anything else is unsafe."""
+        try:
+            el = await fr.frame_element()
+            url = fr.url or ""
+            box = await el.bounding_box()
+            shown = bool(await el.is_visible()) and bool(box) and box["width"] >= 30 and box["height"] >= 30 \
+                and box["x"] + box["width"] > 0 and box["y"] + box["height"] > 0
+            badge = bool(await el.evaluate("e => !!e.closest('.grecaptcha-badge')")) or "size=invisible" in url
+            if badge:
+                return {}
+            if shown:
+                return {"widgets": ["frame"], "visible": ["frame:" + (url.split("#")[0].split("?")[0][:60] or fr.name)]}
+            if "bframe" in url:
+                return {}
+            return {"widgets": ["frame"], "unsafe": ["vendor-frame-hidden-or-offscreen"]}
+        except Exception:
+            return {"unsafe": ["vendor-frame-unresolvable"]}
+
+    async def _cdp_markers(self, page) -> dict[str, list[str]]:
+        """Scan the whole DOM, closed shadow roots included (CDP DOM.getDocument pierce), for vendor class/id markers.
+        Contents of vendor iframes are not descended into. Any failure -> unsafe (HANDOFF)."""
+        sess = None
+        try:
+            sess = await page.context.new_cdp_session(page)
+            root = (await sess.send("DOM.getDocument", {"depth": -1, "pierce": True}))["root"]
+            found: list[str] = []
+            stack = [root]
+            while stack:
+                n = stack.pop()
+                at = n.get("attributes") or []
+                attrs = dict(zip(at[0::2], at[1::2]))
+                toks = (attrs.get("class", "").split() + [attrs.get("id", "")])
+                for t in toks:
+                    if t and _CAPTCHA_MARKER.search(t) and not _marker_passive(t, attrs):
+                        found.append(t[:40])
+                vendor_iframe = n.get("nodeName", "").lower() == "iframe" and _CAPTCHA_FRAME_URL.search(
+                    attrs.get("src", "") + " " + attrs.get("name", ""))
+                kids = list(n.get("children") or []) + list(n.get("shadowRoots") or [])
+                if n.get("templateContent"):
+                    kids.append(n["templateContent"])
+                if n.get("contentDocument") and not vendor_iframe:
+                    kids.append(n["contentDocument"])
+                stack.extend(kids)
+            return {"widgets": ["marker"] if found else [], "unsafe": [f"marker:{m}" for m in sorted(set(found))[:5]]}
+        except Exception:
+            return {"unsafe": ["cdp-unavailable"]}
+        finally:
+            if sess is not None:
+                try:
+                    await sess.detach()
+                except Exception:
+                    pass
 
     async def _captcha_widgets(self, page) -> list[str]:
         """Invisible-captcha / bot-check widgets present on the page (explains silent rejections)."""

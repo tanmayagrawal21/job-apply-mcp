@@ -29,7 +29,9 @@ container, and hCaptcha / Turnstile explicitly declared invisible / interaction-
 else means HANDOFF: any classifier error, unknown vendors (Arkose/FunCaptcha, GeeTest, DataDome, PerimeterX/HUMAN,
 Kasada, AWS WAF, or any iframe src matching captcha|challenge|verify|bot), widgets that are unrendered, zero-size,
 off-screen or otherwise inconclusive, frames that cannot be inspected. Open shadow roots and non-vendor child frames
-are inspected (vendor frames are never evaluated). Known gap: closed shadow roots cannot be inspected. Ashby with no
+are inspected (vendor frames are never evaluated). Closed shadow roots are covered by the browser rather than page JS: every vendor/generic-pattern frame in `page.frames` has its `<iframe>` element resolved (`frame_element()`) and checked for visibility (unresolvable or hidden non-badge -> HANDOFF; frame contents are never read), and a CDP `DOM.getDocument(depth=-1, pierce=true)` scan looks for vendor class/id markers (unlisted marker or CDP failure -> HANDOFF; vendor iframes' contents are not descended into).
+Intentional behaviour change: because unknown/inconclusive widgets now gate on `unsafe` as well as on known widgets, the default `handoff` policy is also stricter than before (pages with an unrecognised bot-check vendor, or a classifier failure, now hand off instead of being clicked).
+ Ashby with no
 detected widget also hands off under `attempt`. After an attempt click, "no confirmation" returns `roadblock`
 (engine `unknown`), never `needs_human`/`handoff`, which could be re-planned and re-entered.
 
