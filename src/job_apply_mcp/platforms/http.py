@@ -4,9 +4,15 @@
 - Every request goes through the `HostLimiter` (per-host concurrency + spacing).
 - Idempotent requests (GET, and POST searches flagged `cache=True`) are cached on disk under
   `<data_dir>/http_cache`: fresh entries are served without a request; stale ones are revalidated with
-  `If-None-Match`; a failing network falls back to the stale entry (stale-if-error).
+  `If-None-Match`; a failing network falls back to the stale entry (stale-if-error). A 404 is cached as a
+  negative entry for the same TTL, so dead boards cost one request per TTL, not one per search (ADR-0043).
 - Idempotent requests retry on transport errors / 429 / 5xx with backoff. Form submissions never retry.
 - Authenticated requests are never cached, and error messages never contain query strings (Lever keys).
+- `get_derived` memoizes a value computed from a cached response (e.g. a board's finished postings) in memory,
+  keyed by the response's content digest, so a repeat search inside the TTL (or after a 304) skips the disk
+  read, the JSON decode and the per-posting text work entirely (ADR-0043).
+- `timings` accumulates seconds spent on the network (inside the limiter slot), in cache lookups (disk read +
+  decode) and in derive functions; they are summed over concurrent requests, so they can exceed wall time.
 """
 from __future__ import annotations
 
@@ -15,13 +21,16 @@ import hashlib
 import json
 import os
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 
 from ..core.concurrency import HostLimiter
+
+T = TypeVar("T")
 
 
 class HttpError(Exception):
@@ -33,14 +42,18 @@ class HttpError(Exception):
 class HttpClient:
     def __init__(self, *, cache_dir: Path | None = None, ttl_s: int = 900, limiter: HostLimiter | None = None,
                  timeout_s: float = 20.0, retries: int = 2, backoff_s: float = 0.5,
-                 user_agent: str = "job-apply-mcp", prune_days: int = 7,
+                 user_agent: str = "job-apply-mcp", prune_days: int = 7, memo_entries: int = 4096,
                  client: httpx.AsyncClient | None = None, clock: Callable[[], float] = time.time):
         self.cache_dir, self.ttl_s, self.limiter = cache_dir, ttl_s, limiter
         self.timeout_s, self.retries, self.backoff_s = timeout_s, retries, backoff_s
         self.user_agent, self.prune_days, self.clock = user_agent, prune_days, clock
         self._client = client
         self._pruned = False
-        self.stats = {"requests": 0, "cache_hits": 0, "revalidated": 0, "stale_served": 0}
+        self.memo_entries = memo_entries
+        self._meta: dict[str, dict] = {}                          # key -> {"at", "digest"} of the disk entry
+        self._memo: OrderedDict[tuple[str, str], tuple[str, Any]] = OrderedDict()  # (key, tag) -> (digest, value)
+        self.stats = {"requests": 0, "cache_hits": 0, "revalidated": 0, "stale_served": 0, "memo_hits": 0}
+        self.timings = {"network_s": 0.0, "cache_s": 0.0, "derive_s": 0.0}
 
     # ------------------------------------------------------------------ lifecycle
     def _http(self) -> httpx.AsyncClient:
@@ -58,6 +71,40 @@ class HttpClient:
     async def get_json(self, url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None,
                        cache: bool = True, ttl_s: int | None = None) -> Any:
         return await self._json("GET", url, params=params, headers=headers, cache=cache, ttl_s=ttl_s)
+
+    async def get_derived(self, url: str, derive: Callable[[Any], T], *, tag: str = "",
+                          params: dict[str, Any] | None = None, ttl_s: int | None = None) -> T:
+        """`derive(get_json(url))`, memoized in memory by the response's content digest. A fresh entry whose digest
+        matches returns the memo without touching disk or network; a 304 keeps the digest, so the memo survives
+        revalidation. Without a cache dir this is a plain `derive(get_json(...))`."""
+        if not self.cache_dir:
+            data = await self.get_json(url, params=params, ttl_s=ttl_s)
+            return self._derive(derive, data)
+        key = self._key("GET", url, params, None)
+        ttl = self.ttl_s if ttl_s is None else ttl_s
+        meta, memo = self._meta.get(key), self._memo.get((key, tag))
+        if meta and memo and memo[0] == meta["digest"] and self.clock() - meta["at"] < ttl:
+            self.stats["memo_hits"] += 1
+            self._memo.move_to_end((key, tag))
+            return memo[1]
+        data = await self.get_json(url, params=params, ttl_s=ttl_s)
+        meta, memo = self._meta.get(key), self._memo.get((key, tag))
+        if meta and memo and memo[0] == meta["digest"]:   # e.g. a 304, or a concurrent caller derived it already
+            self.stats["memo_hits"] += 1
+            return memo[1]
+        value = self._derive(derive, data)
+        if meta:
+            self._memo[(key, tag)] = (meta["digest"], value)
+            while len(self._memo) > self.memo_entries:
+                self._memo.popitem(last=False)
+        return value
+
+    def _derive(self, derive: Callable[[Any], T], data: Any) -> T:
+        t = time.perf_counter()
+        try:
+            return derive(data)
+        finally:
+            self.timings["derive_s"] += time.perf_counter() - t
 
     async def get_text(self, url: str, *, headers: dict[str, str] | None = None) -> str:
         """GET a page as text (HTML). Rate limited and retried like any GET; never cached."""
@@ -79,11 +126,22 @@ class HttpClient:
     async def _json(self, method: str, url: str, *, params=None, headers=None, json_body=None,
                     cache: bool = True, ttl_s: int | None = None) -> Any:
         key = self._key(method, url, params, json_body) if (cache and self.cache_dir) else None
+        t = time.perf_counter()
         entry = self._load(key) if key else None
         ttl = self.ttl_s if ttl_s is None else ttl_s
         if entry and self.clock() - entry["at"] < ttl:
             self.stats["cache_hits"] += 1
-            return json.loads(entry["body"])
+            self.timings["cache_s"] += time.perf_counter() - t
+            if entry.get("status") == 404:   # negative entry: a dead board is not re-requested inside the TTL
+                raise HttpError(404, url)
+            t = time.perf_counter()
+            try:
+                return json.loads(entry["body"])
+            finally:
+                self.timings["cache_s"] += time.perf_counter() - t
+        self.timings["cache_s"] += time.perf_counter() - t
+        if entry and entry.get("status") == 404:
+            entry = None   # stale negative entry: refetch, and never serve it as stale-if-error
         hdrs = dict(headers or {})
         if entry and entry.get("etag"):
             hdrs["If-None-Match"] = entry["etag"]
@@ -93,6 +151,8 @@ class HttpClient:
             if entry and (isinstance(e, httpx.TransportError) or e.status >= 500):
                 self.stats["stale_served"] += 1
                 return json.loads(entry["body"])
+            if key and isinstance(e, HttpError) and e.status == 404:
+                self._store(key, {"at": self.clock(), "status": 404, "body": ""})
             raise
         if resp.status_code == 304 and entry:
             self.stats["revalidated"] += 1
@@ -103,6 +163,10 @@ class HttpClient:
             self._store(key, {"at": self.clock(), "etag": resp.headers.get("etag"), "body": resp.text})
         return self._decode(resp)
 
+    @staticmethod
+    def _digest(body: str) -> str:
+        return hashlib.sha1(body.encode("utf-8", "surrogatepass")).hexdigest()
+
     async def _send(self, method: str, url: str, *, retry: bool, params=None, headers=None, json_body=None,
                     data=None, files=None, auth=None) -> httpx.Response:
         attempts = (self.retries if retry else 0) + 1
@@ -110,9 +174,9 @@ class HttpClient:
             try:
                 if self.limiter:
                     async with await self.limiter(url):
-                        resp = await self._request(method, url, params, headers, json_body, data, files, auth)
+                        resp = await self._timed_request(method, url, params, headers, json_body, data, files, auth)
                 else:
-                    resp = await self._request(method, url, params, headers, json_body, data, files, auth)
+                    resp = await self._timed_request(method, url, params, headers, json_body, data, files, auth)
             except httpx.TransportError:
                 if i + 1 >= attempts:
                     raise
@@ -132,6 +196,13 @@ class HttpClient:
                 raise HttpError(resp.status_code, url, resp.text)
             return resp
         raise RuntimeError("unreachable")  # pragma: no cover
+
+    async def _timed_request(self, *a: Any) -> httpx.Response:
+        t = time.perf_counter()
+        try:
+            return await self._request(*a)
+        finally:
+            self.timings["network_s"] += time.perf_counter() - t
 
     async def _request(self, method, url, params, headers, json_body, data, files, auth) -> httpx.Response:
         return await self._http().request(method, url, params=params, headers=headers, json=json_body,
@@ -160,13 +231,23 @@ class HttpClient:
             return None
         self._prune_once()
         try:
-            return json.loads(self._path(key).read_text(encoding="utf-8"))
+            entry = json.loads(self._path(key).read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            self._meta.pop(key, None)
             return None
+        self._remember(key, entry)
+        return entry
+
+    def _remember(self, key: str, entry: dict) -> None:
+        """Track the entry's timestamp and content digest in memory (for `get_derived`)."""
+        digest = entry.get("digest") or self._digest(str(entry.get("body", "")))
+        entry["digest"] = digest
+        self._meta[key] = {"at": entry.get("at", 0), "digest": digest}
 
     def _store(self, key: str | None, entry: dict) -> None:
         if not key or not self.cache_dir:
             return
+        self._remember(key, entry)
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             tmp = self._path(key).with_suffix(f".{os.getpid()}.tmp")
@@ -180,12 +261,12 @@ class HttpClient:
             return
         self._pruned = True
         cutoff = self.clock() - self.prune_days * 86400
-        try:
+        try:   # file mtime == the entry's last store (fetch or revalidation); stat only, never parse (ADR-0043)
             for p in self.cache_dir.glob("*.json"):
                 try:
-                    if json.loads(p.read_text(encoding="utf-8")).get("at", 0) < cutoff:
+                    if p.stat().st_mtime < cutoff:
                         p.unlink()
-                except (OSError, ValueError):
-                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
         except OSError:
             pass
