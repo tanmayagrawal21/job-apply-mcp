@@ -1,8 +1,9 @@
 """Signed grant records, HMAC secret handling and the hash-chained audit log (ADR-0027).
 
-A grant is {id, scope, os_user, created, expires, max_uses, nonce, used} + HMAC-SHA256 signature. `used` is the
-consumed-use counter: it is bumped and re-signed on every use, so truncating the audit log cannot hand uses back
-(ADR-0037). The count comes only from that counter; a grant id stored twice is rejected as tampering. The secret lives in the
+A grant is {id, scope, os_user, created, expires, max_uses, nonce, used} + HMAC-SHA256 signature. Consumed uses are
+the MAX of three independent stores (ADR-0037): the signed `used` counter in the record, the audit log's `use` lines,
+and a per-grant high-water mark (OS keychain, else a 0600 file in the user config dir). Rolling back any one of them
+cannot hand uses back; a mismatch is audited. A grant id stored twice is rejected as tampering. The secret lives in the
 OS keychain (optional `keyring` extra) or a 0600 file in the user config dir; never in the repo, project or env.
 Only the CLI (`job-apply-mcp grant`, interactive TTY) creates grants; MCP can only read them.
 """
@@ -28,6 +29,7 @@ from .. import paths
 log = logging.getLogger(__name__)
 KEYRING_SERVICE = "job-apply-mcp"
 KEYRING_USER = "grant-hmac-secret"
+KEYRING_HWM_PREFIX = "grant-uses:"
 
 SCOPES: dict[str, str] = {
     "approve_submissions": ("The AI agent may APPROVE application submissions itself (approval_mode=human) for the "
@@ -122,9 +124,13 @@ def os_user() -> str:
 
 class GrantStore:
     def __init__(self, data_dir: str | Path, secret: bytes | None = None, *, use_keyring: bool = True,
-                 clock=time.time, user: str | None = None):
+                 clock=time.time, user: str | None = None, hwm_keyring: bool | None = None,
+                 hwm_file: Path | None = None):
         self.dir = Path(data_dir).expanduser() / "grants"
         self._secret, self._use_keyring = secret, use_keyring
+        # high-water marks go to the keychain with the secret; an injected secret (tests, embedding) means no keychain
+        self._hwm_keyring = (use_keyring and secret is None) if hwm_keyring is None else hwm_keyring
+        self._hwm_path = hwm_file
         self._clock, self._user = clock, user
         self._lock = threading.RLock()
 
@@ -242,23 +248,84 @@ class GrantStore:
                 (dup if gid in seen else seen).add(gid)
         return dup
 
+    # ---- high-water mark: a third, independent use counter outside the data dir
+    @property
+    def _hwm_file(self) -> Path:
+        return self._hwm_path or (paths.config_dir() / "grant_uses.json")
+
+    def _hwm_file_read(self) -> dict[str, int]:
+        try:
+            d = json.loads(self._hwm_file.read_text())
+            return {k: v for k, v in d.items() if isinstance(v, int) and not isinstance(v, bool)} \
+                if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _hwm_get(self, gid: str) -> int:
+        n = self._hwm_file_read().get(gid, 0)
+        if self._hwm_keyring:
+            try:
+                import keyring  # lazy: optional extra
+                v = keyring.get_password(KEYRING_SERVICE, KEYRING_HWM_PREFIX + gid)
+                if v and v.isdigit():
+                    n = max(n, int(v))
+            except Exception as e:  # noqa: BLE001 - no keyring / no backend: the file is the fallback
+                log.debug("keyring unavailable for high-water mark (%s)", type(e).__name__)
+        return n
+
+    def _hwm_set(self, gid: str, n: int) -> None:
+        if self._hwm_keyring:
+            try:
+                import keyring
+                keyring.set_password(KEYRING_SERVICE, KEYRING_HWM_PREFIX + gid, str(n))
+                return
+            except Exception as e:  # noqa: BLE001
+                log.debug("keyring unavailable for high-water mark (%s); using file", type(e).__name__)
+        d = self._hwm_file_read()
+        d[gid] = max(n, d.get(gid, 0))
+        f = self._hwm_file
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(d))
+        os.replace(tmp, f)
+
+    def _counts(self, g: Grant, audit_n: dict[str, int]) -> tuple[int, dict[str, int]]:
+        """(max over the three stores, per-store values)."""
+        src = {"record": g.used, "audit": audit_n.get(g.id, 0), "hwm": self._hwm_get(g.id)}
+        return max(src.values()), src
+
+    @staticmethod
+    def _audit_uses(entries: list[dict[str, Any]]) -> dict[str, int]:
+        n: dict[str, int] = {}
+        for e in entries:
+            if e["event"] == "use":
+                n[e["grant"]] = n.get(e["grant"], 0) + 1
+        return n
+
     def uses(self, grant_id: str) -> int:
-        """Consumed uses from the signed per-record counter only (never from the audit log)."""
+        """Consumed uses: max(signed record counter, audit use lines, high-water mark)."""
+        audit_n = self._audit_uses(self.audit_rows())
+        n = max(audit_n.get(grant_id, 0), self._hwm_get(grant_id))
         for row in self._read_all():
             if row.get("id") == grant_id:
                 with contextlib.suppress(GrantError):
-                    return self._verify_row(row).used
-        return 0
+                    n = max(n, self._verify_row(row).used)
+        return n
 
-    def _bump(self, g: Grant) -> None:
-        """Persist used+1 in the signed record (caller holds the lock). Raises if the record vanished."""
+    def _bump(self, g: Grant, used: int) -> None:
+        """Persist used+1 in the signed record and the high-water mark (caller holds the lock)."""
         key = self._key()
         assert key is not None
         rows = self._read_all()
         for i, row in enumerate(rows):
             if row.get("id") == g.id and row.get("sig") == g.sig:
-                ng = Grant(**{**json.loads(g.payload()), "used": g.used + 1})
+                ng = Grant(**{**json.loads(g.payload()), "used": used + 1})
                 rows[i] = {**json.loads(ng.payload()), "sig": _sign(key, ng.payload())}
+                self._hwm_set(g.id, used + 1)
                 self._write_all(rows)
                 return
         raise GrantError(f"grant {g.id}: record changed during use")
@@ -267,7 +334,8 @@ class GrantStore:
         """Valid, unexpired, same-user, unexhausted grants with remaining uses (None = unlimited). Read-only."""
         if self._key() is None:
             return []
-        _, chain_ok = self._audit_lines()
+        entries, chain_ok = self._audit_lines()
+        audit_n = self._audit_uses(entries)
         rows = self._read_all()
         dup = self._dup_ids(rows)
         now, res = self._clock(), []
@@ -280,7 +348,7 @@ class GrantStore:
                 continue
             if g.expires <= now or g.os_user != self.user:
                 continue
-            left = None if g.max_uses is None else g.max_uses - g.used
+            left = None if g.max_uses is None else g.max_uses - self._counts(g, audit_n)[0]
             if left is not None and (left <= 0 or not chain_ok):   # cannot trust use counts: fail closed
                 continue
             res.append((g, left))
@@ -293,7 +361,8 @@ class GrantStore:
         if key is None:
             raise GrantError(f"no active grant for '{scope}'; a human must run `job-apply-mcp grant {scope} --for 1h`")
         with self._lock:
-            _, chain_ok = self._audit_lines()
+            entries, chain_ok = self._audit_lines()
+            audit_n = self._audit_uses(entries)
             rows = self._read_all()
             dup = self._dup_ids(rows)
             now = self._clock()
@@ -308,17 +377,21 @@ class GrantStore:
                 except GrantError as e:
                     reason = str(e)
                     continue
+                used, src = self._counts(g, audit_n)
+                if len(set(src.values())) > 1:
+                    self.audit_safe("use_count_mismatch", g.id, scope,
+                                    " ".join(f"{k}={v}" for k, v in src.items()) + f" -> {used}")
                 if g.os_user != self.user:
                     reason = f"grant {g.id}: issued for another OS user"
                 elif g.expires <= now:
                     reason = f"grant {g.id}: expired"
                 elif g.max_uses is not None and not chain_ok:
                     reason = f"grant {g.id}: audit log tampered; cannot verify use count"
-                elif g.max_uses is not None and g.used >= g.max_uses:
+                elif g.max_uses is not None and used >= g.max_uses:
                     reason = f"grant {g.id}: max_uses reached"
                 else:
                     if consume:
-                        self._bump(g)                 # signed counter first, then the audit line
+                        self._bump(g, used)           # signed counter + high-water mark, then the audit line
                         self.audit("use", g.id, scope, detail)
                     return g
             self.audit_safe("denied", "", scope, reason)
