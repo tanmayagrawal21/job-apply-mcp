@@ -1,5 +1,6 @@
 """ADR-0037: typed trust-boundary guards (string values, user baseline) and signed grant use counters."""
 import json
+import os
 
 import pytest
 from test_approvals import _cfg
@@ -239,12 +240,45 @@ def test_duplicated_grant_row_with_truncated_audit_is_rejected(tmp_path):
         st.check("approve_submissions")
 
 
-def test_use_count_comes_only_from_signed_counter(tmp_path):
+def _used_once(tmp_path, max_uses=2):
     st = mk(tmp_path)
-    g = st.issue("approve_submissions", 600, max_uses=3)
+    g = st.issue("approve_submissions", 600, max_uses=max_uses)
+    before = st._grants_file.read_text()                                    # snapshot with used=0
     st.check("approve_submissions")
-    st.audit("use", g.id, "approve_submissions")                            # extra validly-signed audit lines
-    st.audit("use", g.id, "approve_submissions")
-    assert st.uses(g.id) == 1 and st.active()[0][1] == 2
+    assert st.uses(g.id) == 1 and st._hwm_file.is_file()
+    assert os.name == "nt" or (st._hwm_file.stat().st_mode & 0o077) == 0
+    return st, g, before
+
+
+def test_rollback_grants_file_alone_does_not_restore_use(tmp_path):
+    st, g, before = _used_once(tmp_path)
+    st._grants_file.write_text(before)                                      # validly signed, used=0
+    assert st.uses(g.id) == 1 and st.active()[0][1] == 1
+    st.check("approve_submissions")
+    with pytest.raises(GrantError, match="max_uses"):
+        st.check("approve_submissions")
+    assert any(e["event"] == "use_count_mismatch" for e in st.audit_rows())
+
+
+def test_truncate_audit_alone_does_not_restore_use(tmp_path):
+    st, g, _ = _used_once(tmp_path, max_uses=1)
     st._audit_file.unlink()
-    assert st.uses(g.id) == 1 and st.active()[0][1] == 2
+    assert st.uses(g.id) == 1
+    with pytest.raises(GrantError, match="max_uses"):
+        st.check("approve_submissions")
+
+
+def test_delete_high_water_file_alone_does_not_restore_use(tmp_path):
+    st, g, _ = _used_once(tmp_path, max_uses=1)
+    st._hwm_file.unlink()
+    assert st.uses(g.id) == 1
+    with pytest.raises(GrantError, match="max_uses"):
+        st.check("approve_submissions")
+
+
+def test_rollback_record_and_audit_still_caught_by_high_water(tmp_path):
+    st, _g, before = _used_once(tmp_path, max_uses=1)
+    st._grants_file.write_text(before)
+    st._audit_file.unlink()
+    with pytest.raises(GrantError, match="max_uses"):
+        st.check("approve_submissions")
