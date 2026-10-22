@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "applywise": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/tanmayagrawal21/job-apply-mcp@7a2a1864916336fef2c8edfe3bd7aba5427d57ed",
+        "job-apply-mcp"
+      ]
+    }
+  }
+}

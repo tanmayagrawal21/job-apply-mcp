@@ -1,0 +1,16 @@
+{
+  "name": "applywise",
+  "description": "ApplyWise: job search and human-approved job applications for Claude Code.",
+  "owner": {
+    "name": "tanmayagrawal21"
+  },
+  "plugins": [
+    {
+      "name": "applywise",
+      "source": "./",
+      "description": "Find jobs and fill applications through the job-apply MCP server. Dry run by default; a human approves every real submit.",
+      "category": "productivity",
+      "tags": ["jobs", "mcp", "automation"]
+    }
+  ]
+}

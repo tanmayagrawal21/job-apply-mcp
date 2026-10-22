@@ -1,0 +1,13 @@
+{
+  "name": "applywise",
+  "displayName": "ApplyWise",
+  "description": "Find jobs and fill applications through the job-apply MCP server. Dry run by default; a human approves every real submit, solves every CAPTCHA and types every verification code.",
+  "version": "0.1.0",
+  "author": {
+    "name": "tanmayagrawal21"
+  },
+  "homepage": "https://github.com/tanmayagrawal21/job-apply-mcp",
+  "repository": "https://github.com/tanmayagrawal21/job-apply-mcp",
+  "license": "MIT",
+  "keywords": ["mcp", "jobs", "job-search", "job-application", "greenhouse", "lever", "ashby", "local-llm", "human-in-the-loop"]
+}
