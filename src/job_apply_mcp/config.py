@@ -18,7 +18,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError
 
 from . import paths
 
@@ -226,7 +226,7 @@ class GrantsCfg(BaseModel):
     max_duration_s: int = GRANT_MAX_DURATION_S    # longest grant `job-apply-mcp grant --for` will issue
     max_uses_cap: int = 1000                      # upper bound for --max-uses
     otp_window_min: int = 10                      # otp_assist reads only a message newer than this
-    use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available
+    use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available; only the user config file may disable it
 
 
 class PathsCfg(BaseModel):
@@ -522,35 +522,69 @@ def _coerce(v: str) -> Any:
     return v
 
 
-# Security-relevant settings: (section, key) -> predicate. A project file or
-# environment variable may only set the safe value; relaxing needs the user-level config file (ADR-0021).
-# Predicates are "this value RELAXES the setting"; invalid values pass through so validation reports them.
+# Security-relevant settings (ADR-0021, ADR-0027, ADR-0035, ADR-0037). A project file, the environment or an
+# untrusted user file may only make these STRICTER than the baseline: the user-config value when the user file sets
+# it, else the built-in default. Candidate values are coerced with pydantic's own lax rules first (so "false",
+# "0", "500" are judged as the bool/int the model will hold), then compared as typed values. Predicates take
+# (candidate, baseline) and return True when the candidate RELAXES the baseline.
+def _bool_on(new: Any, base: Any) -> bool:       # True is the risky value
+    return bool(new) and not base
+
+
+def _bool_off(new: Any, base: Any) -> bool:      # False is the risky value
+    return not new and bool(base)
+
+
+def _raises(new: Any, base: Any) -> bool:
+    return new > base
+
+
+def _loosens(new: Any, base: Any) -> bool:
+    """Submission caps: 0 = no limit. Loosened by 0 or by a higher value; anything is tighter than 'no limit'."""
+    return bool(base) and (new == 0 or new > base)
+
+
 _RELAXES: dict[tuple[str | None, str], Any] = {
-    ("apply", "auto_approve"): lambda v: v is True,
-    ("apply", "approval_mode"): lambda v: v == "agent",
-    (None, "dry_run"): lambda v: v is False,
-    ("control", "apply_enabled"): lambda v: v is True,
-    ("control", "dev_mode"): lambda v: v is False,
-    ("grants", "max_duration_s"): lambda v: isinstance(v, (int, float)) and v > GRANT_MAX_DURATION_S,
-    ("grants", "max_uses_cap"): lambda v: isinstance(v, (int, float)) and v > 1000,
-    ("grants", "otp_window_min"): lambda v: isinstance(v, (int, float)) and v > GRANT_MAX_OTP_WINDOW_MIN,
+    (None, "dry_run"): _bool_off,
+    ("apply", "auto_approve"): _bool_on,
+    ("apply", "approval_mode"): lambda new, base: new == "agent" and base != "agent",
+    ("control", "apply_enabled"): _bool_on,
+    ("control", "dev_mode"): _bool_off,
+    ("grants", "max_duration_s"): _raises,
+    ("grants", "max_uses_cap"): _raises,
+    ("grants", "otp_window_min"): _raises,
+    ("grants", "use_keyring"): _bool_off,
+    ("browser", "captcha_handoff"): _bool_off,
 }
 
-
-# Submission caps (ADR-0035). A cap is LOOSENED by 0 (= no limit) or by a value above its built-in default; any
-# lower positive value tightens it and is accepted from every source. `apply.*` is the documented setting;
-# `control.params.quota.*` is the legacy spelling and takes precedence when set, so it is guarded too.
+# Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy
+# spelling and takes precedence when set, so it is guarded too.
 CAP_DEFAULTS: dict[str, int] = {"daily_limit": 25, "daily_limit_per_platform": 10, "run_limit": 10}
 LEGACY_QUOTA_KEYS: dict[str, str] = {"per_day": "daily_limit", "per_platform_per_day": "daily_limit_per_platform",
                                      "per_run": "run_limit"}
+for _k in CAP_DEFAULTS:
+    _RELAXES[("apply", _k)] = _loosens
+
+_INVALID = object()
+_INT = TypeAdapter(int)
 
 
-def _loosens_cap(default: int):
-    return lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and (v == 0 or v > default)
+def _adapter(sect: str | None, key: str) -> TypeAdapter:
+    model: type[BaseModel] = Settings.model_fields[sect].annotation if sect else Settings  # type: ignore[assignment]
+    return TypeAdapter(model.model_fields[key].annotation)
 
 
-for _k, _d in CAP_DEFAULTS.items():
-    _RELAXES[("apply", _k)] = _loosens_cap(_d)
+def _typed(adapter: TypeAdapter, v: Any) -> Any:
+    """Coerce like pydantic does when it validates the model; _INVALID if it would be rejected (validation
+    then reports it, so an invalid value never silently becomes a relaxed one)."""
+    try:
+        return adapter.validate_python(v)
+    except ValidationError:
+        return _INVALID
+
+
+def _get(s: Settings, sect: str | None, key: str) -> Any:
+    return getattr(getattr(s, sect) if sect else s, key)
 
 
 def _quota_params(d: dict) -> dict:
@@ -559,30 +593,75 @@ def _quota_params(d: dict) -> dict:
     return q if isinstance(q, dict) else {}
 
 
-def _restrict(d: dict, source: str) -> dict:
-    """Drop values that would relax a security setting; log each. Stricter values pass."""
+def _legacy_base(base: Settings, key: str) -> int:
+    """Effective baseline for a legacy quota key: the baseline's legacy value when set, else its apply.* cap."""
+    q = base.control.params.get("quota", {})
+    if key in q:
+        v = _typed(_INT, q[key])
+        if v is not _INVALID:
+            return v
+    return getattr(base.apply, LEGACY_QUOTA_KEYS[key])
+
+
+def _relaxations(d: dict, base: Settings) -> tuple[list[tuple[str | None, str, Any]], list[tuple[str, Any]]]:
+    """Guarded keys in raw layer `d` whose typed value relaxes `base`: ([(sect, key, raw)], [(quota_key, raw)])."""
+    hits = []
+    for (sect, key), relaxes in _RELAXES.items():
+        tgt = d.get(sect) if sect else d
+        if isinstance(tgt, dict) and key in tgt:
+            v = _typed(_adapter(sect, key), tgt[key])
+            if v is not _INVALID and relaxes(v, _get(base, sect, key)):
+                hits.append((sect, key, tgt[key]))
+    q = _quota_params(d)
+    qhits = []
+    for k in LEGACY_QUOTA_KEYS:
+        if k in q:
+            v = _typed(_INT, q[k])
+            if v is not _INVALID and _loosens(v, _legacy_base(base, k)):
+                qhits.append((k, q[k]))
+    return hits, qhits
+
+
+def _restrict(d: dict, source: str, base: Settings | None = None) -> dict:
+    """Drop values that would relax a security setting relative to `base` (default: built-in defaults); log each.
+    Stricter values pass."""
+    base = base or Settings()
+    hits, qhits = _relaxations(d, base)
     out = dict(d)
-    q = _quota_params(out)
-    bad = [k for k, cap in LEGACY_QUOTA_KEYS.items() if k in q and _loosens_cap(CAP_DEFAULTS[cap])(q[k])]
-    for k in bad:
+    for k, raw in qhits:
         log.warning("control.params.quota.%s=%r from %s IGNORED: a submission cap can only be loosened in the "
-                    "user config file", k, q[k], source)
-    if bad:
+                    "user config file", k, raw, source)
+    if qhits:
         ctl = dict(out["control"])
         params = dict(ctl["params"])
-        params["quota"] = {k: v for k, v in q.items() if k not in bad}
+        params["quota"] = {k: v for k, v in _quota_params(out).items() if k not in dict(qhits)}
         ctl["params"] = params
         out["control"] = ctl
-    for (sect, key), relaxes in _RELAXES.items():
-        tgt = out.get(sect) if sect else out
-        if isinstance(tgt, dict) and key in tgt and relaxes(tgt[key]):
-            log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
-                        f"{sect}." if sect else "", key, tgt[key], source)
-            if sect:
-                out[sect] = {k: v for k, v in tgt.items() if k != key}
-            else:
-                out = {k: v for k, v in out.items() if k != key}
+    for sect, key, raw in hits:
+        log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
+                    f"{sect}." if sect else "", key, raw, source)
+        if sect:
+            out[sect] = {k: v for k, v in out[sect].items() if k != key}
+        else:
+            out = {k: v for k, v in out.items() if k != key}
     return out
+
+
+def _enforce(s: Settings, base: Settings) -> None:
+    """Defense in depth on the VALIDATED model: any guarded value still looser than the baseline is reset."""
+    for (sect, key), relaxes in _RELAXES.items():
+        if relaxes(_get(s, sect, key), _get(base, sect, key)):
+            log.error("%s%s=%r relaxed past the user config; reset to %r", f"{sect}." if sect else "", key,
+                      _get(s, sect, key), _get(base, sect, key))
+            setattr(getattr(s, sect) if sect else s, key, _get(base, sect, key))
+    q = s.control.params.get("quota")
+    if isinstance(q, dict):
+        for k in LEGACY_QUOTA_KEYS:
+            if k in q:
+                v = _typed(_INT, q[k])
+                if v is not _INVALID and _loosens(v, _legacy_base(base, k)):
+                    log.error("control.params.quota.%s=%r relaxed past the user config; reset", k, q[k])
+                    q[k] = _legacy_base(base, k)
 
 
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
@@ -607,32 +686,35 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
     udata: dict = {}
     trusted_user = False
+    defaults = Settings()
     user = paths.config_file()
     if user.is_file():
         udata = tomllib.loads(user.read_text(encoding="utf-8"))
         trusted, why = _user_file_trusted(user)
         trusted_user = trusted
         if not trusted:
-            udata = _restrict(udata, f"{user} ({why}; can only make settings stricter)")
+            udata = _restrict(udata, f"{user} ({why}; can only make settings stricter)", defaults)
         data = _deep_merge(data, udata)
+    # Baseline for every later layer: the user's own (typed) values where set, else the defaults. A project file or
+    # the environment can tighten it but never loosen it, so a user's cap of 5 cannot be raised back to 25.
+    base = Settings.model_validate(udata) if udata else defaults
     proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
     if proj.is_file() and proj.resolve() != user.resolve():
-        data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj)))
-    data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)"))
+        data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj), base))
+    data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
-    for (sect, key), relaxes in _RELAXES.items():  # log which explicitly-set relaxations came from the user file
-        v = (udata.get(sect, {}) if sect else udata).get(key, None) if udata else None
-        if v is not None and relaxes(v):
+    _enforce(s, base)
+    if trusted_user:     # log which settings the trusted user file relaxed relative to the built-in defaults
+        hits, qhits = _relaxations(udata, defaults)
+        for sect, key, raw in hits:
             log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
-                        f"{sect}." if sect else "", key, v, user)
+                        f"{sect}." if sect else "", key, raw, user)
+        for k, raw in qhits:
+            log.warning("submission cap control.params.quota.%s=%r is loosened by the trusted user config %s",
+                        k, raw, user)
     urf = udata.get("control", {}).get("rules_file") if isinstance(udata.get("control"), dict) else None
     if urf and trusted_user and urf == s.control.rules_file:
         s.control._rules_trusted = True
-    uq = _quota_params(udata)
-    for k, cap in LEGACY_QUOTA_KEYS.items():
-        if k in uq and _loosens_cap(CAP_DEFAULTS[cap])(uq[k]):
-            log.warning("submission cap control.params.quota.%s=%r is loosened by the trusted user config %s",
-                        k, uq[k], user)
     if s.apply.auto_approve:
         if s.apply.approval_mode == "human":
             log.warning("apply.auto_approve=true is IGNORED because apply.approval_mode='human'")
