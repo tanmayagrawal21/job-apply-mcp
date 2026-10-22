@@ -611,7 +611,7 @@ class ApplyEngine:
                                               evidence_path(self.s.paths.data_dir, ref))
                     raise
                 if not dry:
-                    st = {"submitted": "submitted", "roadblock": "failed", "needs_human": "handoff",
+                    st = {"submitted": "submitted", "roadblock": "unknown", "needs_human": "handoff",   # roadblock may follow the click
                           "duplicate": "failed", "awaiting_code": "awaiting_code",
                           "incomplete": "handoff"}.get(result.status, "unknown")
                     if result.status == "error" and not ctx.meta.get("dispatched"):
