@@ -275,6 +275,9 @@ class ApplyCfg(BaseModel):
 
     approval_mode: Literal["agent", "human"] = "human"  # human: a human channel must approve (ADR-0021)
     approval_ttl_s: int = 1800          # lifetime of a server-held approval record
+    daily_limit: int = Field(25, ge=0)  # max live submits per rolling 24h; 0 = NO LIMIT (removes a safety cap; raising it needs the user config file, ADR-0035)
+    daily_limit_per_platform: int = Field(10, ge=0)  # max live submits per platform per rolling 24h; 0 = NO LIMIT (user config file only to raise)
+    run_limit: int = Field(10, ge=0)    # max live submits per server run; 0 = NO LIMIT (user config file only to raise)
     auto_approve: bool = False          # USER CONFIG FILE ONLY (env/project file ignored); needs approval_mode="agent"
     short_text_max: int = 200           # unresolved fields up to this length go to the local LLM
     llm_min_confidence: float = 0.6     # below this an LLM answer is treated as unresolved
@@ -532,9 +535,42 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
 }
 
 
+# Submission caps (ADR-0035). A cap is LOOSENED by 0 (= no limit) or by a value above its built-in default; any
+# lower positive value tightens it and is accepted from every source. `apply.*` is the documented setting;
+# `control.params.quota.*` is the legacy spelling and takes precedence when set, so it is guarded too.
+CAP_DEFAULTS: dict[str, int] = {"daily_limit": 25, "daily_limit_per_platform": 10, "run_limit": 10}
+LEGACY_QUOTA_KEYS: dict[str, str] = {"per_day": "daily_limit", "per_platform_per_day": "daily_limit_per_platform",
+                                     "per_run": "run_limit"}
+
+
+def _loosens_cap(default: int):
+    return lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and (v == 0 or v > default)
+
+
+for _k, _d in CAP_DEFAULTS.items():
+    _RELAXES[("apply", _k)] = _loosens_cap(_d)
+
+
+def _quota_params(d: dict) -> dict:
+    p = d.get("control", {}).get("params", {}) if isinstance(d.get("control"), dict) else {}
+    q = p.get("quota") if isinstance(p, dict) else None
+    return q if isinstance(q, dict) else {}
+
+
 def _restrict(d: dict, source: str) -> dict:
     """Drop values that would relax a security setting; log each. Stricter values pass."""
     out = dict(d)
+    q = _quota_params(out)
+    bad = [k for k, cap in LEGACY_QUOTA_KEYS.items() if k in q and _loosens_cap(CAP_DEFAULTS[cap])(q[k])]
+    for k in bad:
+        log.warning("control.params.quota.%s=%r from %s IGNORED: a submission cap can only be loosened in the "
+                    "user config file", k, q[k], source)
+    if bad:
+        ctl = dict(out["control"])
+        params = dict(ctl["params"])
+        params["quota"] = {k: v for k, v in q.items() if k not in bad}
+        ctl["params"] = params
+        out["control"] = ctl
     for (sect, key), relaxes in _RELAXES.items():
         tgt = out.get(sect) if sect else out
         if isinstance(tgt, dict) and key in tgt and relaxes(tgt[key]):
@@ -585,6 +621,11 @@ def load_settings(project_dir: Path | None = None) -> Settings:
         if v is not None and relaxes(v):
             log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
                         f"{sect}." if sect else "", key, v, user)
+    uq = _quota_params(udata)
+    for k, cap in LEGACY_QUOTA_KEYS.items():
+        if k in uq and _loosens_cap(CAP_DEFAULTS[cap])(uq[k]):
+            log.warning("submission cap control.params.quota.%s=%r is loosened by the trusted user config %s",
+                        k, uq[k], user)
     if s.apply.auto_approve:
         if s.apply.approval_mode == "human":
             log.warning("apply.auto_approve=true is IGNORED because apply.approval_mode='human'")

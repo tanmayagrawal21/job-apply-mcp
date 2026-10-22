@@ -39,7 +39,7 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 | Tool | Inputs | Output | Notes |
 |---|---|---|---|
 | `control_check` | `action` (apply, submit, send_message, write_prose, merge), `payload` | `{decision: pass/block/needs_human, violations, warnings}` | Cheap dry check before a side effect. |
-| `control_status` | none | mode, quotas used/remaining, enabled controls, recent blocks | |
+| `control_status` | none | mode, quotas used/remaining, `daily_limit` (limit, used in last 24h, remaining per scope; null = no limit), enabled controls, recent blocks | Read-only. |
 | `ingest_confirmations` | `messages=[{sender,subject,date,snippet}]`, `preview=False` | counts plus up to `ingest.max_new_shown` new matches | You pass summaries from your own mail tool; the server never reads mail itself in this mode and stores only company, title, date. |
 | `sync_confirmations` | `since_days=None`, `source=None` (mbox or imap), `preview=False` | counts plus a few new matches | Read-only; never sends, moves, flags or deletes mail. |
 | `grants_status` | none | `{active:[{id,scope,expires_in_s,uses_left}]}` | Read-only view of human-issued grants (ADR-0027). Grants are created only by a person: `job-apply-mcp grant <scope> --for 2h` in a terminal. |

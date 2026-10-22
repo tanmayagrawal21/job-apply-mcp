@@ -5,6 +5,15 @@ dry_run = true                    # nothing is submitted until you set this to f
 response_budget_chars = 4000      # tool outputs are truncated/paginated under this size
 platforms_enabled = ["greenhouse", "lever", "ashby", "smartrecruiters", "workday", "generic"]
 
+[apply]
+# Safety caps on LIVE submissions (dry runs never count). A cap of 0 means NO LIMIT and removes that safety net.
+# Raising a cap above these defaults, or setting 0, is honored only from the trusted user config
+# (~/.config/job-apply-mcp/config.toml); env vars and ./job-apply-mcp.toml can only lower them (ADR-0035).
+daily_limit = 25                  # per rolling 24h across all platforms; 0 = no limit
+daily_limit_per_platform = 10     # per rolling 24h for each platform; 0 = no limit
+run_limit = 10                    # per server run; 0 = no limit
+# Legacy control.params.quota.{per_day,per_platform_per_day,per_run} still work, win when set, and 0 means off there too.
+
 [concurrency]
 global_limit = 16                 # max concurrent outbound tasks
 per_host = 4                      # max concurrent requests per host

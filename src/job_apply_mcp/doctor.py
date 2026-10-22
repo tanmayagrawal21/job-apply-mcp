@@ -210,6 +210,32 @@ def _browser_checks(s: Settings) -> list[Check]:
     return out
 
 
+def _fmt_cap(limit: int | None, used: int) -> str:
+    return f"{used}/no limit" if limit is None else f"{used}/{limit} ({max(0, limit - used)} left)"
+
+
+def _daily_limit_check(s: Settings) -> Check:
+    """Read-only view of the submission caps; same data as MCP control_status.daily_limit (ADR-0035)."""
+    from .control.agent import ControlAgent
+
+    try:
+        d = ControlAgent(s).daily_limit_status()
+    except Exception as e:  # noqa: BLE001 - doctor must never crash on an unreadable audit log
+        return Check("daily_limit", WARN, f"could not read usage ({type(e).__name__})")
+    if "error" in d:
+        return Check("daily_limit", FAIL, d["error"], "Fix apply.daily_limit* / control.params.quota (0 = no limit).")
+    lim, used = d["limit"], d["used"]
+    plat = ", ".join(f"{p} {_fmt_cap(lim['platform'], n)}" for p, n in used["platform"].items()) or "none yet"
+    detail = (f"last 24h {_fmt_cap(lim['day'], used['day'])}; this run {_fmt_cap(lim['run'], used['run'])}; "
+              f"per platform: {plat}"
+              + (" (cap per platform: no limit)" if lim["platform"] is None else f" (cap per platform: {lim['platform']})"))
+    off = [k for k, v in lim.items() if v is None]
+    if off:
+        return Check("daily_limit", WARN, detail, f"No limit on: {', '.join(off)}. Set apply.daily_limit (etc.) above 0 "
+                     "to restore the safety cap.")
+    return Check("daily_limit", OK, detail)
+
+
 def run_checks(network: bool = True) -> list[Check]:
     ram = total_ram_gb()
     checks = [Check("system", INFO, f"job-apply-mcp {__version__}, Python {platform.python_version()}, "
@@ -219,6 +245,7 @@ def run_checks(network: bool = True) -> list[Check]:
     if s is not None:
         checks += _profile_checks(s)
         checks.append(_data_dir_check(s))
+        checks.append(_daily_limit_check(s))
         checks += _model_checks(s, network)
         checks += _browser_checks(s)
     return checks

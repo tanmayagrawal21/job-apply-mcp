@@ -6,7 +6,7 @@
 apply_enabled = true         # false blocks every side-effecting action
 dev_mode = false             # true allows dry-run actions only
 
-[params.quota]               # override built-in control params
+[params.quota]               # legacy spelling of apply.daily_limit etc.; wins when set. 0 = NO LIMIT (removes the cap)
 per_day = 20
 per_run = 8
 per_platform_per_day = 6

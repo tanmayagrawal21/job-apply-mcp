@@ -12,6 +12,7 @@ from typing import Any
 
 from ..config import Settings
 from . import builtin  # noqa: F401  (registers built-in controls)
+from .builtin import effective_limits
 from .controls import (
     ACTION_KINDS,
     RELEASE,
@@ -23,6 +24,7 @@ from .controls import (
     UsageState,
     Violation,
     controls,
+    parse_actions,
 )
 from .rules import RuleSet, load_rules
 from .sanitize import SanitizeResult, sanitize_untrusted
@@ -258,6 +260,39 @@ class ControlAgent:
                     break
         return out
 
+    def daily_limit_status(self) -> dict[str, Any]:
+        """Read-only view of the submission caps (ADR-0035): limit (null = no limit), used and remaining per scope.
+
+        `day` and `platform` use the rolling last 24h; `run` is this server run. Releases (ADR-0032) are honoured."""
+        now = self.clock()
+        q = self._params.get("quota", {})
+        counted = parse_actions(q.get("count_actions"), frozenset({"submit"}))
+        try:
+            limits = effective_limits(q, self.settings)
+        except ControlConfigError as e:
+            return {"error": str(e)}
+        since = now - 86400
+        events = [e for e in self.state._live(counted) if e.ts >= since]
+        used_day = len(events)
+        used_run = self.state.count(actions=counted, run=self.run_id)
+        by_plat: dict[str, int] = {}
+        for e in events:
+            by_plat[e.platform] = by_plat.get(e.platform, 0) + 1
+
+        def left(limit: int | None, used: int) -> int | None:
+            return None if limit is None else max(0, limit - used)
+
+        plim = limits["platform"]
+        return {
+            "window_hours": 24,
+            "limit": {"day": limits["day"], "platform": plim, "run": limits["run"]},
+            "used": {"day": used_day, "platform": dict(sorted(by_plat.items())), "run": used_run},
+            "remaining": {"day": left(limits["day"], used_day),
+                          "platform": {p: left(plim, n) for p, n in sorted(by_plat.items())},
+                          "run": left(limits["run"], used_run)},
+            "note": "null limit = no limit (0 in config)",
+        }
+
     def status(self) -> dict[str, Any]:
         now = self.clock()
         q = self._params.get("quota", {})
@@ -266,7 +301,10 @@ class ControlAgent:
             "day": self.state.count(actions=counted, since=now - 86400),
             "run": self.state.count(actions=counted, run=self.run_id),
         }
-        limits = {"day": q.get("per_day", 25), "run": q.get("per_run", 10)}
+        try:
+            limits = effective_limits(q, self.settings)
+        except ControlConfigError:   # invalid config: every check blocks already (config_error); status stays readable
+            limits = {"day": None, "run": None, "platform": None}
         quotas = {k: {"used": used[k], "left": (None if limits[k] is None else max(0, int(limits[k]) - used[k]))}
                   for k in used}
         mode = self._params.get("mode", {})
@@ -276,6 +314,7 @@ class ControlAgent:
             "dev_mode": bool(mode.get("dev_mode", self.cfg.dev_mode)),
             "controls": [c.id for c in self.controls],
             "quotas": quotas,
+            "daily_limit": self.daily_limit_status(),
             "review": bool(self.reviewer and self.cfg.review_enabled),
             "recent_blocks": self.recent_blocks(),
         }
