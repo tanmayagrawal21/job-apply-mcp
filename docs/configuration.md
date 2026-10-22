@@ -4,6 +4,8 @@
 
 Settings load in this order, later wins: built-in defaults, the user file (`~/.config/job-apply-mcp/config.toml`, `%APPDATA%\job-apply-mcp\config.toml` on Windows, or `$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables `JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). Secrets (API keys, IMAP passwords) are only ever read from the environment.
 
+**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter.
+
 Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to validate it.
 
 ## Top level
@@ -13,6 +15,36 @@ Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to 
 | `platforms_enabled` | `list[str]` | `["greenhouse", "lever", "ashby", "smartrecruiters", "workday", "generic"]` |  |
 | `dry_run` | `bool` | `true` | safe default: nothing is submitted until the user flips this |
 | `response_budget_chars` | `int` | `4000` | tools truncate/paginate to stay under this |
+
+## `[search]`
+
+Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `match` | `str` | `"any"` | "title": every query term must be in the title; "any": rank title+description |
+| `rank` | `bool` | `true` | False = legacy newest-first order, no score/why |
+| `skills` | `list[str]` | `[]` | extra skills on top of the profile's |
+| `seniority` | `str \| None` | `none` | target level: "entry" \| "mid" \| "senior" \| None (no preference) |
+| `location_order` | `list[str]` | `[]` | preferred location substrings, best first |
+| `rank_candidates` | `int` | `40` | description-fetch + full scoring for the top N by the cheap pre-score |
+| `description_concurrency` | `int` | `6` | bounded parallel description fetches (also capped by the host limiter) |
+| `min_score` | `float` | `0.0` | drop rows scoring below this (0-100); 0 keeps everything with a query hit |
+| `weights` | `dict[str, float]` | `{"query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency"...` |  |
+| `recency_half_life_days` | `float` | `14.0` |  |
+| `max_why` | `int` | `3` |  |
+| `embeddings` | `bool` | `false` | optional semantic rerank through a local Ollama embedding model |
+| `embed_model` | `str` | `"nomic-embed-text"` |  |
+| `embed_url` | `str` | `"http://127.0.0.1:11434"` |  |
+| `embed_weight` | `float` | `3.0` |  |
+
+## `[dedupe]`
+
+Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical apply URL, with company+title only when neither is known. title: legacy company+fuzzy-title matching.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `mode` | `str` | `"id_first"` |  |
 
 ## `[improve]`
 

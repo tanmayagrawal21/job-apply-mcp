@@ -54,3 +54,13 @@ is rejected). Revert: revert the PR; ADR-0011 behavior returns (and with it the 
 4. A legacy `token=` argument to `submit_application` returns an explicit migration error.
 5. Adapter/driver `error` and exceptions map to `unknown` only after the adapter/driver call was dispatched; before that
    they map to `failed` (retryable after review). Tested both ways.
+
+## Amendment 2: trust model for relaxing settings
+The relaxable settings (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`,
+`control.dev_mode=false`) are honored only from the **platform-default user config**
+(`~/.config/job-apply-mcp/config.toml`, `$XDG_CONFIG_HOME`, `%APPDATA%`) and only when that file is owned by the current
+user and not group/world-writable (POSIX). A file chosen through `JOB_APPLY_MCP_CONFIG`, a project file or `JOB_APPLY__*`
+env can only make settings stricter; a relax attempt is dropped with a warning naming the source and reason.
+Rationale: an agent that can set env vars or write files near the server must not be able to grant itself approval
+rights. Residual risk: an agent running as the same OS user with write access to the default config can still edit it;
+protect that file (`chmod 600`) and do not give agents shell access to it. Tests: `tests/test_approvals.py`.

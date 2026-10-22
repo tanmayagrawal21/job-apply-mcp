@@ -471,20 +471,43 @@ def _restrict(d: dict, source: str) -> dict:
     return out
 
 
+def _user_file_trusted(user: Path) -> tuple[bool, str]:
+    """Only the platform-default user config, owned by this user and not group/world-writable, may relax
+    security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
+    default = paths.config_dir() / "config.toml"
+    try:
+        if user.resolve() != default.resolve():
+            return False, "not the platform-default user config path"
+        if os.name != "nt":
+            st = user.stat()
+            if st.st_uid != os.getuid():
+                return False, "not owned by the current user"
+            if st.st_mode & 0o022:
+                return False, "group/world-writable"
+    except OSError as e:
+        return False, str(e)
+    return True, ""
+
+
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
+    udata: dict = {}
     user = paths.config_file()
     if user.is_file():
-        data = _deep_merge(data, tomllib.loads(user.read_text(encoding="utf-8")))
+        udata = tomllib.loads(user.read_text(encoding="utf-8"))
+        trusted, why = _user_file_trusted(user)
+        if not trusted:
+            udata = _restrict(udata, f"{user} ({why}; can only make settings stricter)")
+        data = _deep_merge(data, udata)
     proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
     if proj.is_file() and proj.resolve() != user.resolve():
         data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj)))
     data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)"))
     s = Settings.model_validate(data)
-    for (sect, key), safe in _SAFE.items():       # log where each relaxed value came from
-        v = getattr(getattr(s, sect) if sect else s, key)
-        if not safe(v):
-            log.warning("security setting %s%s=%r is relaxed (set in user config %s)",
+    for (sect, key), safe in _SAFE.items():       # log which explicitly-set relaxations came from the user file
+        v = (udata.get(sect, {}) if sect else udata).get(key, None) if udata else None
+        if v is not None and not safe(v):
+            log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
                         f"{sect}." if sect else "", key, v, user)
     if s.apply.auto_approve:
         if s.apply.approval_mode == "human":

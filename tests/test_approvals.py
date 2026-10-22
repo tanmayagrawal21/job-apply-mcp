@@ -1,6 +1,7 @@
 """ADR-0021: server-held approvals, human mode, safe-only overrides, submission state machine."""
 import hashlib
 import json
+import os
 
 import pytest
 from apply_fakes import POSTING, FakeAdapter, FakeDriver, FakeGates, FakeProfile, FakeStore, settings
@@ -283,13 +284,20 @@ def test_resolve_tool_absent_in_human_mode_and_legacy_token_errors(monkeypatch):
     assert out["status"] == "error" and "no longer accepted" in out["detail"] and "approval_id" in out["detail"]
 
 
-def _cfg(tmp_path, monkeypatch, user="", proj="", env=None):
-    u = tmp_path / "user.toml"
+def _cfg(tmp_path, monkeypatch, user="", proj="", env=None, via_env=False, mode=0o600):
+    """User config at the platform-default path (XDG redirected to tmp), or selected via JOB_APPLY_MCP_CONFIG."""
+    cdir = tmp_path / "xdg" / "job-apply-mcp"
+    cdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    u = tmp_path / "elsewhere.toml" if via_env else cdir / "config.toml"
     u.write_text(user)
+    u.chmod(mode)
+    if via_env:
+        monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(u))
     pd = tmp_path / "proj"
     pd.mkdir(exist_ok=True)
     (pd / "job-apply-mcp.toml").write_text(proj)
-    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(u))
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
     return load_settings(pd)
@@ -368,3 +376,26 @@ async def test_error_before_dispatch_is_failed_not_unknown():
     e._dispatch = pre
     r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
     assert r.status == "error" and e.approvals.state(POSTING.ref)["state"] == "failed"
+
+
+_RELAX = 'dry_run = false\n[apply]\napproval_mode = "agent"\nauto_approve = true\n[control]\ndev_mode = false\n'
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix permission model")
+def test_env_selected_config_cannot_relax(tmp_path, monkeypatch, caplog):
+    with caplog.at_level("WARNING"):
+        s = _cfg(tmp_path, monkeypatch, user=_RELAX, via_env=True)
+    assert s.dry_run and s.apply.approval_mode == "human" and not s.apply.auto_approve
+    assert "platform-default" in caplog.text
+    s = _cfg(tmp_path, monkeypatch, user='dry_run = true\n[control]\ndev_mode = true\n', via_env=True)
+    assert s.dry_run and s.control.dev_mode                          # stricter is still honored
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix permission model")
+@pytest.mark.parametrize("mode", [0o666, 0o662, 0o620])
+def test_group_or_world_writable_default_config_cannot_relax(tmp_path, monkeypatch, mode, caplog):
+    with caplog.at_level("WARNING"):
+        s = _cfg(tmp_path, monkeypatch, user=_RELAX, mode=mode)
+    assert s.dry_run and s.apply.approval_mode == "human" and "writable" in caplog.text
+    s = _cfg(tmp_path, monkeypatch, user=_RELAX, mode=0o644)         # owner-only-writable default file is trusted
+    assert not s.dry_run and s.apply.approval_mode == "agent"
