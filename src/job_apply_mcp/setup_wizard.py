@@ -93,6 +93,12 @@ def render_config(*, small: str | None, narrative: str | None, ollama: bool, ope
     if data_dir:
         lines.append(f"data_dir = {_q(data_dir)}")
     lines += [f"profile = {_q(str(profile))}", "", "[control]", f"rules_file = {_q(str(controls))}", ""]
+    lines += ["[apply]",
+              "# Caps on LIVE submissions (these are the defaults). 0 = NO LIMIT and removes that safety cap;",
+              "# raising a cap or using 0 only works in this file, not from env vars or a project config (ADR-0035).",
+              "# daily_limit = 25               # per rolling 24h, all platforms",
+              "# daily_limit_per_platform = 10  # per rolling 24h, each platform",
+              "# run_limit = 10                 # per server run", ""]
 
     def tier(section: str, provider: str, model: str, extra: str = "") -> list[str]:
         return [f"[{section}]", f"provider = {_q(provider)}", f"model = {_q(model)}", *( [extra] if extra else [])]

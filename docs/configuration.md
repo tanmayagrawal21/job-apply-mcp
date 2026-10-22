@@ -6,6 +6,8 @@ Settings load in this order, later wins: built-in defaults, the user file (`~/.c
 
 **Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter.
 
+**Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and `apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default or setting `0` is honored only from the trusted user config (same rule as the trust model above). `control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining.
+
 Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to validate it.
 
 ## Top level
@@ -155,6 +157,9 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 |---|---|---|---|
 | `approval_mode` | `Literal['agent', 'human']` | `"human"` | human: a human channel must approve (ADR-0021) |
 | `approval_ttl_s` | `int` | `1800` | lifetime of a server-held approval record |
+| `daily_limit` | `int` | `25` | max live submits per rolling 24h; 0 = NO LIMIT (removes a safety cap; raising it needs the user config file, ADR-0035) |
+| `daily_limit_per_platform` | `int` | `10` | max live submits per platform per rolling 24h; 0 = NO LIMIT (user config file only to raise) |
+| `run_limit` | `int` | `10` | max live submits per server run; 0 = NO LIMIT (user config file only to raise) |
 | `auto_approve` | `bool` | `false` | USER CONFIG FILE ONLY (env/project file ignored); needs approval_mode="agent" |
 | `short_text_max` | `int` | `200` | unresolved fields up to this length go to the local LLM |
 | `llm_min_confidence` | `float` | `0.6` | below this an LLM answer is treated as unresolved |

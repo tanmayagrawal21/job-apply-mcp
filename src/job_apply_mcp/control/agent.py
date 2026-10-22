@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ from typing import Any
 
 from ..config import Settings
 from . import builtin  # noqa: F401  (registers built-in controls)
+from .builtin import effective_limits
 from .controls import (
     ACTION_KINDS,
     RELEASE,
@@ -23,6 +25,7 @@ from .controls import (
     UsageState,
     Violation,
     controls,
+    parse_actions,
 )
 from .rules import RuleSet, load_rules
 from .sanitize import SanitizeResult, sanitize_untrusted
@@ -72,6 +75,9 @@ class ControlReport:
         return d
 
 
+log = logging.getLogger(__name__)
+
+
 class ControlAgent:
     def __init__(self, settings: Settings, *, reviewer: Reviewer | None = None,
                  clock: Callable[[], float] = time.time) -> None:
@@ -100,6 +106,8 @@ class ControlAgent:
             self.rules = load_rules(self.cfg.rules_file)
         params_all: dict[str, dict[str, Any]] = {k: dict(v) for k, v in self.cfg.params.items()}
         for k, v in self.rules.params.items():
+            if k == "quota" and not self.cfg._rules_trusted:
+                v = self._tighten_only_quota(v, params_all.get("quota", {}))
             params_all.setdefault(k, {}).update(v)
         params_all.setdefault("mode", {}).update(self.rules.mode)
         built: list[Control] = []
@@ -114,6 +122,27 @@ class ControlAgent:
                 raise ControlConfigError(f"rule id '{c.id}' clashes with a built-in control")
         self.controls = built + self.rules.controls
         self._params = params_all
+
+    def _tighten_only_quota(self, new: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        """A rules_file not chosen by the trusted user config may only lower caps (ADR-0035)."""
+        try:
+            base = effective_limits(current, self.settings)
+        except ControlConfigError:
+            return new
+        scope_of = {"per_day": "day", "per_platform_per_day": "platform", "per_run": "run"}
+        out = dict(new)
+        for key, scope in scope_of.items():
+            if key not in new:
+                continue
+            v, cap = new[key], base[scope]
+            loosens = isinstance(v, (int, float)) and not isinstance(v, bool) and cap is not None and (v == 0 or v > cap)
+            if v is None and cap is not None:
+                loosens = True
+            if loosens:
+                log.warning("rules_file quota %s=%r IGNORED: a cap can only be loosened by a rules file named in "
+                            "the trusted user config", key, v)
+                del out[key]
+        return out
 
     def _replay(self) -> None:
         if not self.audit_path.is_file():
@@ -258,6 +287,39 @@ class ControlAgent:
                     break
         return out
 
+    def daily_limit_status(self) -> dict[str, Any]:
+        """Read-only view of the submission caps (ADR-0035): limit (null = no limit), used and remaining per scope.
+
+        `day` and `platform` use the rolling last 24h; `run` is this server run. Releases (ADR-0032) are honoured."""
+        now = self.clock()
+        q = self._params.get("quota", {})
+        counted = parse_actions(q.get("count_actions"), frozenset({"submit"}))
+        try:
+            limits = effective_limits(q, self.settings)
+        except ControlConfigError as e:
+            return {"error": str(e)}
+        since = now - 86400
+        events = [e for e in self.state._live(counted) if e.ts >= since]
+        used_day = len(events)
+        used_run = self.state.count(actions=counted, run=self.run_id)
+        by_plat: dict[str, int] = {}
+        for e in events:
+            by_plat[e.platform] = by_plat.get(e.platform, 0) + 1
+
+        def left(limit: int | None, used: int) -> int | None:
+            return None if limit is None else max(0, limit - used)
+
+        plim = limits["platform"]
+        return {
+            "window_hours": 24,
+            "limit": {"day": limits["day"], "platform": plim, "run": limits["run"]},
+            "used": {"day": used_day, "platform": dict(sorted(by_plat.items())), "run": used_run},
+            "remaining": {"day": left(limits["day"], used_day),
+                          "platform": {p: left(plim, n) for p, n in sorted(by_plat.items())},
+                          "run": left(limits["run"], used_run)},
+            "note": "null limit = no limit (0 in config)",
+        }
+
     def status(self) -> dict[str, Any]:
         now = self.clock()
         q = self._params.get("quota", {})
@@ -266,7 +328,10 @@ class ControlAgent:
             "day": self.state.count(actions=counted, since=now - 86400),
             "run": self.state.count(actions=counted, run=self.run_id),
         }
-        limits = {"day": q.get("per_day", 25), "run": q.get("per_run", 10)}
+        try:
+            limits = effective_limits(q, self.settings)
+        except ControlConfigError:   # invalid config: every check blocks already (config_error); status stays readable
+            limits = {"day": None, "run": None, "platform": None}
         quotas = {k: {"used": used[k], "left": (None if limits[k] is None else max(0, int(limits[k]) - used[k]))}
                   for k in used}
         mode = self._params.get("mode", {})
@@ -276,6 +341,7 @@ class ControlAgent:
             "dev_mode": bool(mode.get("dev_mode", self.cfg.dev_mode)),
             "controls": [c.id for c in self.controls],
             "quotas": quotas,
+            "daily_limit": self.daily_limit_status(),
             "review": bool(self.reviewer and self.cfg.review_enabled),
             "recent_blocks": self.recent_blocks(),
         }

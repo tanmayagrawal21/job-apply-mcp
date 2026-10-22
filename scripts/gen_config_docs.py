@@ -90,6 +90,12 @@ def render() -> str:
         "`dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the "
         "platform-default user config, owned by you and not group/world-writable. A file selected via "
         "`JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter."), "",
+        ("**Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and "
+        "`apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety "
+        "cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win "
+        "when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default "
+        "or setting `0` is honored only from the trusted user config (same rule as the trust model above). "
+        "`control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining."), "",
         "Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to validate it.", ""]
     seen: list[tuple[str, type[BaseModel]]] = [("", Settings)]
     queue = list(seen)

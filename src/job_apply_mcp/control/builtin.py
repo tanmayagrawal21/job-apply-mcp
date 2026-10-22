@@ -103,18 +103,40 @@ def quota_violations(ctx: Context, *, cid: str, limit: int, scope: str, actions:
     return []
 
 
+def effective_limits(params: dict[str, Any], settings: Settings) -> dict[str, int | None]:
+    """Submission caps by scope (day|platform|run); None = no limit (ADR-0035).
+
+    `control.params.quota.*` (legacy) wins when the key is set, else `apply.*`. A value of 0 (or None) means off."""
+    a = settings.apply
+    out: dict[str, int | None] = {}
+    for scope, key, fallback in (("day", "per_day", a.daily_limit),
+                                 ("platform", "per_platform_per_day", a.daily_limit_per_platform),
+                                 ("run", "per_run", a.run_limit)):
+        v = params.get(key, fallback)
+        if v is None:
+            out[scope] = None
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise ControlConfigError(f"quota {key} must be a whole number (0 = no limit), got {v!r}") from None
+        if n < 0:
+            raise ControlConfigError(f"quota {key} must be >= 0 (0 = no limit), got {n}")
+        out[scope] = n or None
+    return out
+
+
 @controls.register("quota")
 def quota_control(params: dict[str, Any], settings: Settings) -> Control:
-    per_day = params.get("per_day", 25)
-    per_run = params.get("per_run", 10)
-    per_platform = params.get("per_platform_per_day", 10)
+    limits = effective_limits(params, settings)
     counted = parse_actions(params.get("count_actions"), frozenset({"submit"}))
 
     def check(ctx: Context) -> list[Violation]:
         out: list[Violation] = []
-        for scope, lim in (("day", per_day), ("run", per_run), ("platform", per_platform)):
+        for scope in ("day", "run", "platform"):
+            lim = limits[scope]
             if lim is not None:
-                out += quota_violations(ctx, cid="quota", limit=int(lim), scope=scope, actions=counted)
+                out += quota_violations(ctx, cid="quota", limit=lim, scope=scope, actions=counted)
         return out
 
     return _base("quota", params, {"apply", "submit"}, check, "per-day / per-run / per-platform caps")
