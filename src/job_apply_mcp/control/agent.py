@@ -61,6 +61,7 @@ class ControlReport:
     decision: str                                   # pass | block | needs_human
     violations: list[Violation] = field(default_factory=list)   # severity=block
     warnings: list[Violation] = field(default_factory=list)
+    event_id: str = ""                              # id of the counted usage event (pass to release())
 
     def compact(self) -> dict[str, Any]:
         d: dict[str, Any] = {"decision": self.decision}
@@ -125,7 +126,7 @@ class ControlAgent:
                 continue
             if r.get("n") and r.get("ts", 0) >= cutoff:
                 self.state.add(UsageEvent(r["ts"], r["a"], r.get("ref", ""), r.get("plat", ""),
-                                          r.get("co", ""), r.get("run", "")))
+                                          r.get("co", ""), r.get("run", ""), r.get("id", "")))
 
     def _tail_lines(self, nbytes: int) -> list[str]:
         """Last ~nbytes of the audit log as complete lines (never reads the whole file)."""
@@ -168,27 +169,33 @@ class ControlAgent:
         async with self._lock:
             report = await self._evaluate(c)
             counted = (report.decision == "pass" and not c.dry_run and action_kind in SIDE_EFFECTING)
+            eid = uuid.uuid4().hex[:12] if counted else ""
+            report.event_id = eid
             if counted:
                 self.state.add(UsageEvent(c.now, action_kind, c.ref, c.platform,
-                                          str(data.get("company") or ""), self.run_id))
+                                          str(data.get("company") or ""), self.run_id, eid))
             self._audit({"ts": round(c.now, 2), "a": action_kind, "d": report.decision, "ref": c.ref,
                          "plat": c.platform, "co": str(data.get("company") or ""), "dry": c.dry_run,
-                         "run": self.run_id, "n": 1 if counted else 0,
+                         "run": self.run_id, "n": 1 if counted else 0, "id": eid,
                          "v": [v.compact() for v in report.violations],
                          "w": [v.compact() for v in report.warnings]})
         return report
 
-    async def release(self, ref: str, reason: str) -> None:
-        """Give back the quota of a live `submit` that provably sent nothing (ADR-0032). Audited, replayed."""
+    async def release(self, ref: str, reason: str, event_id: str = "") -> None:
+        """Give back the quota of ONE live `submit` that provably sent nothing (ADR-0032). Audited, replayed.
+
+        `event_id` (ControlReport.event_id) names the submit to cancel; without it the latest unreleased
+        earlier submit for the ref is cancelled. A release never cancels more than one submit."""
         if not ref:
             return
         async with self._lock:
             now = self.clock()
-            prior = next((e for e in reversed(self.state.events) if e.action == "submit" and e.ref == ref), None)
+            prior = next((e for e in reversed(self.state.events)
+                          if e.action == "submit" and e.ref == ref and (not event_id or e.eid == event_id)), None)
             plat, co = (prior.platform, prior.company) if prior else ("", "")
-            self.state.add(UsageEvent(now, RELEASE, ref, plat, co, self.run_id))
+            self.state.add(UsageEvent(now, RELEASE, ref, plat, co, self.run_id, event_id))
             self._audit({"ts": round(now, 2), "a": RELEASE, "d": "release", "ref": ref, "plat": plat, "co": co,
-                         "dry": False, "run": self.run_id, "n": 1, "reason": str(reason)[:160],
+                         "dry": False, "run": self.run_id, "n": 1, "id": event_id, "reason": str(reason)[:160],
                          "v": [], "w": []})
 
     async def _evaluate(self, c: Context) -> ControlReport:

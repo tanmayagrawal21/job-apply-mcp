@@ -43,6 +43,7 @@ class UsageEvent:
     platform: str = ""
     company: str = ""
     run: str = ""
+    eid: str = ""      # submit: its own id; submit_release: the id of the submit it cancels ("" = legacy row)
 
 
 class UsageState:
@@ -57,14 +58,21 @@ class UsageState:
 
     def _live(self, action_filter: set[str] | frozenset[str]) -> list[UsageEvent]:
         """Events of the given actions, minus any `submit` that a later `submit_release` for the same ref cancels."""
-        released: set[str] = set()
+        by_id: set[str] = set()
+        legacy: dict[str, int] = {}     # releases without an id cancel the latest unreleased earlier submit
         out: list[UsageEvent] = []
         for e in reversed(self.events):
             if e.action == RELEASE:
-                if e.ref:
-                    released.add(e.ref)
-            elif e.action == "submit" and e.ref and e.ref in released:
-                continue
+                if e.eid:
+                    by_id.add(e.eid)
+                elif e.ref:
+                    legacy[e.ref] = legacy.get(e.ref, 0) + 1
+            elif e.action == "submit":
+                if e.eid and e.eid in by_id:
+                    continue
+                if legacy.get(e.ref):
+                    legacy[e.ref] -= 1
+                    continue
             if e.action in action_filter:
                 out.append(e)
         return out

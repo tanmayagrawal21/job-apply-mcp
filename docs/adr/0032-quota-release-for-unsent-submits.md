@@ -17,6 +17,11 @@ day, platform and run quotas (and the `single_submit` window) although nothing w
   exceptions. Never for submitting, unknown, submitted, confirmed, handoff or awaiting_code. A control object
   without `release` is skipped; a failing release is swallowed (the count simply stays higher: fail closed).
 
+- One release cancels exactly ONE submit. `check()` stamps a usage-event id (`ControlReport.event_id`, audit
+  field `id`); the engine passes it to `release(ref, reason, event_id)` and replay pairs by id. Releases
+  without an id (old rows) cancel the latest unreleased earlier submit for the ref. This closes a race where
+  two concurrent submits for one ref pass while the state is still `approved` and one fails.
+
 ## Consequences
 Quotas count only attempts that may have reached the platform. Ambiguous outcomes keep consuming quota.
 Release rows are not shown in `recent_blocks`.

@@ -64,7 +64,7 @@ class Spy:
     async def check(self, action, ctx):
         return {"decision": "pass"}
 
-    async def release(self, ref, reason):
+    async def release(self, ref, reason, event_id=""):
         self.released.append((ref, reason))
 
 
@@ -104,3 +104,21 @@ async def test_exception_releases_only_before_dispatch(dispatched, released):
     out = await e.plan(POSTING.ref)
     await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
     assert len(spy.released) == released
+
+
+async def test_release_cancels_exactly_one_submit_race(tmp_path):
+    """A and B both pass (state still 'approved'); A fails and is released; B must still count."""
+    a = mk(tmp_path)
+    ra = await _submit(a, "r1")
+    rb = await a.check("submit", {"ref": "r1", "platform": "lever",
+                                                                       "dry_run": False, "submission_state": "approved"})
+    assert ra.event_id and rb.decision == "pass" and rb.event_id != ra.event_id
+    await a.release("r1", "A failed", ra.event_id)
+    assert a.state.count(actions=frozenset({"submit"})) == 1
+    b = mk(tmp_path)   # replay keeps the pairing
+    assert b.state.count(actions=frozenset({"submit"})) == 1
+    c = mk(tmp_path / "legacy")   # release without an id: latest unreleased submit only
+    await _submit(c, "r1")
+    await c.check("submit", {"ref": "r1", "dry_run": False, "submission_state": "approved"})
+    await c.release("r1", "x")
+    assert c.state.count(actions=frozenset({"submit"})) == 1
