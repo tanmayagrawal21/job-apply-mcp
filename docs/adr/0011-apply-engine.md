@@ -67,3 +67,20 @@ A real planning run produced wrong answers. These invariants now hold and are co
    plus user `policy.exclude_title_patterns` (regexes). The `phd_only` text flag was widened the same way.
 
 Verify: `uv run pytest tests/test_apply_dogfood.py`. Revert: revert the amendment commit; behavior returns to ADR-0011 base.
+
+## Amendment 2: dogfood round 2 (option intent, synonyms, deterministic salary)
+1. **Option intent layer** (`mapper.option_intent`). Yes/No profile answers over multi-option selects classify each
+   option as affirmative (willingness words: willing/open/able/relocating/yes...), negative (negators) or neutral
+   ("I am local to the area"). Yes -> the most specific affirmative (most willingness words); a tie, or only
+   neutral/negative options -> unresolved. No -> the single negative option (lead "No" preferred), else unresolved.
+2. **Answer-pattern synonyms** (`profile.DEFAULT_ANSWER_SYNONYMS`, extendable with `answer_synonyms` in the profile).
+   A `[answers]` pattern that belongs to a synonym group matches a question containing any member ("in office" ~
+   "in person" ~ "on-site" ~ "office culture").
+3. **Deterministic salary** (`apply/salary.py`, `PolicyCfg.base_salary|default_ask|salary_round_to|
+   salary_multi_level_ratio|salary_lower_middle|col_multipliers`). floor = base (or `salary_floor`) x COL multiplier of
+   the posting location. With a posted range: ask = min(max(anchor, floor), top) where anchor is the midpoint, or the
+   lower-middle when top/bottom exceeds the ratio; no range: max(floor, default_ask). Rounded to a clean number, never
+   above the posted top. Number fields get `115000`, text `$115,000`, selects the option whose range contains the ask.
+   "Current salary"/history fields are never auto-answered. The computation is recorded in `ApplicationPlan.audit`
+   (and `compact()["audit"]`); answers carry source `rule:salary`. Nothing computable -> previous behavior.
+Verify: `uv run pytest tests/test_apply_dogfood2.py`. Revert: revert the amendment commit.

@@ -109,16 +109,38 @@ def _content(text: str) -> set[str]:
     return {w for w in tokens(text) if w not in _STOP}
 
 
+# Intent layer (ADR-0011 Amendment 2): willingness vocabulary. "am"/"do"/"have" are NOT willingness; an option
+# like "I am local to the area" is neutral, so a Yes cannot land on it.
+INTENT_AFFIRM = {"yes", "willing", "open", "able", "happy", "ready", "eager", "excited", "comfortable", "can",
+                 "will", "authorized", "eligible", "true", "relocate", "relocating", "relocation", "agree"}
+
+
+def option_intent(text: str) -> tuple[int, int]:
+    """(-1|0|1, strength): negators -> negative; else count of distinct willingness words (0 -> neutral)."""
+    toks = tokens(text)
+    if re.search(r"\bno (?:preference|difference)\b|\beither\b|\bboth\b|\bany\b", " ".join(toks)):
+        return 0, 0
+    if any(w in _NEGATORS for w in toks):
+        return -1, 0
+    hits = len(set(toks) & INTENT_AFFIRM)
+    return (1, hits) if hits else (0, 0)
+
+
 def _yes_no_option(value_yes: bool, options: list[str]) -> str | None:
-    """Pick the option whose polarity matches a yes/no answer; ambiguous or opposite-only -> None."""
-    want = 1 if value_yes else -1
-    cands = [o for o in options if polarity(o) == want]
+    """Map Yes -> the most specific affirmative option, No -> the negative option; neutral/ambiguous -> None."""
+    scored = [(o, *option_intent(o)) for o in options]
     if value_yes:
-        cands = [o for o in cands if polarity(o) == 1]
-    if len(cands) > 1:
-        lead = [o for o in cands if tokens(o)[:1] and tokens(o)[0] in ("yes", "no")]
-        cands = lead or cands
-    return cands[0] if len(cands) == 1 else None
+        aff = [(o, st) for o, pol, st in scored if pol == 1]
+        if not aff:
+            return None
+        top = max(st for _, st in aff)
+        best = [o for o, st in aff if st == top]
+        return best[0] if len(best) == 1 else None
+    neg = [o for o, pol, _ in scored if pol == -1]
+    if len(neg) > 1:
+        lead = [o for o in neg if tokens(o)[:1] == ["no"]]
+        neg = lead or neg
+    return neg[0] if len(neg) == 1 else None
 
 
 def exact_option(value: Any, options: list[str]) -> str | None:
