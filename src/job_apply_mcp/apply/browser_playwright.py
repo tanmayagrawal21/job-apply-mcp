@@ -35,7 +35,6 @@ from .mapper import (
     decline_option,
     degree_queries,
     discipline_queries,
-    exact_option,
     normalize,
     pick_degree,
     pick_school,
@@ -436,6 +435,28 @@ _EMPTY_REQUIRED_JS = """() => {
     if (!empty) continue;
     const lab = grp || clean(labelOf(e)) || e.id; const sk = grp ? e.name : (e.id || lab); if (seen.has(sk)) continue; seen.add(sk);
     out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs});
+  }
+  return out.slice(0, 40); }"""
+# Visible, still-empty selects (react-select comboboxes and native <select>), required or not, with their labels.
+# Used only for DOM-only voluntary self-identification questions (_fill_demographics).
+_DOM_SELECTS_JS = """() => {
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
+  const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
+  const labelOf = e => { let t = '';
+    const lb = e.getAttribute('aria-labelledby'); if (lb) t = lb.split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
+    if (!t && e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
+    if (!t) t = e.getAttribute('aria-label') || ''; return t; };
+  const out = [];
+  for (const e of document.querySelectorAll('input[role=combobox], select')) {
+    if (!e.id || e.disabled || e.closest('.iti__dropdown-content')) continue;
+    const ctl = e.tagName === 'INPUT' && e.closest('[class*=select__control]');
+    if (e.tagName === 'INPUT' && !ctl) continue;
+    if (!vis(ctl || e)) continue;
+    const empty = ctl ? !ctl.parentElement.querySelector('[class*=select__single-value], [class*=select__multi-value]') : !e.value;
+    if (!empty) continue;
+    const raw = labelOf(e);
+    const required = e.required || e.getAttribute('aria-required') === 'true' || /[*✱]\\s*$/.test(raw.trim());
+    out.push({id: e.id, label: clean(raw).slice(0, 120), required, native: e.tagName === 'SELECT'});
   }
   return out.slice(0, 40); }"""
 _SUBMIT_NAME = re.compile(r"^\s*(submit( application)?|send application|apply( now)?)\s*$", re.IGNORECASE)
@@ -1092,25 +1113,45 @@ class PlaywrightDriver(VerificationMixin):
             return []
 
     async def _fill_demographics(self, page, answers: dict[str, Any]) -> None:
-        """EEO selects that exist only in the DOM (not in the job API): choose the profile's value, else the
-        decline / 'I don't wish to answer' option. Never invents a demographic; no decline option -> left empty."""
-        for row in await self._empty_required(page):
-            lab = row["label"]
+        """Voluntary EEO / self-ID selects that exist only in the DOM (not in the job API; planned fields are left to
+        the plan). Only two answers are ever chosen, both via best_option on the offered options: the profile's
+        [demographics] value, else the decline / 'I don't wish to answer' option. A REQUIRED select with no usable
+        profile value gets the decline option; an OPTIONAL one with no profile value stays blank. Never invents a
+        demographic; no matching option and no decline option -> left empty. Read back from this field only."""
+        try:
+            rows = list(await page.evaluate(_DOM_SELECTS_JS))
+        except Exception:
+            return
+        for row in rows:
+            lab, el_id = row["label"], row["id"]
             ck = canonical_key(lab)
-            if not (row["rs"] and row["id"] and (ck in DEMOGRAPHIC_KEYS or _DEMOGRAPHIC_LABEL.search(lab))):
+            if not el_id or el_id in answers or not (ck in DEMOGRAPHIC_KEYS or _DEMOGRAPHIC_LABEL.search(lab)):
                 continue
-            want = str(answers.get(f"demographic:{ck}") or "decline")
-            loc = page.locator(f'[id="{row["id"]}"]').first
+            prof = str(answers.get(f"demographic:{ck}") or "").strip() if ck in DEMOGRAPHIC_KEYS else ""
+            if not prof and not row["required"]:
+                continue                                   # optional, nothing in the profile: stay blank
+            declined = not prof or normalize(prof).startswith("decline") or normalize(prof) == "prefer not to say"
+
+            def choose(texts: list[str], prof=prof, declined=declined) -> str | None:
+                texts = [t for t in texts if t and normalize(t) not in ("select", "select ...", "")]
+                if declined:
+                    return decline_option(texts)
+                return best_option(prof, texts) or decline_option(texts)
+            loc = page.locator(f'[id="{el_id}"]').first
             try:
                 await loc.scroll_into_view_if_needed()
+                if row["native"]:
+                    texts = [t.strip() for t in await loc.locator("option").all_inner_texts()]
+                    pick = choose(texts)
+                    if pick is not None:
+                        await loc.select_option(label=pick, timeout=2000)
+                    continue
                 marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
                 opts = (page.locator("[data-jam-scope]") if marked else page).locator(_MENU_SCOPED)
                 await loc.click()
                 await opts.first.wait_for(state="visible", timeout=2500)
                 texts = [t.strip() for t in await opts.all_inner_texts()]
-                low = normalize(want)
-                pick = decline_option(texts) if low.startswith("decline") or low == "prefer not to say" else (
-                    exact_option(want, texts) or decline_option(texts))
+                pick = choose(texts)
                 if pick is None:
                     await self._close_menu(page)
                     continue

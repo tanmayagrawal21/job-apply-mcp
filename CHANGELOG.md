@@ -9,7 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - Search sessions, per-host rate limits, progress + `search_status` (ADR-0024).
 
 ### Fixed
-- Browser driver: Ashby radio/checkbox groups are selected and verified; the required-field scan counts radio/checkbox groups (an unchecked required group is `incomplete`, never `dry_run`); DOM-only consent radios stop the run unless they are an opted-in privacy-notice acknowledgement; server-rendered forms are filled only after hydration (`browser.hydrate_wait_s`); the phone-widget country comes from the profile; select read-backs are scoped to the field (ADR-0039).
+- Browser driver: Ashby radio/checkbox groups are selected and verified; the required-field scan counts radio/checkbox groups (an unchecked required group is `incomplete`, never `dry_run`); DOM-only consent radios stop the run unless they are an opted-in privacy-notice acknowledgement; server-rendered forms are filled only after hydration (`browser.hydrate_wait_s`); the phone-widget country comes from the profile; DOM-only self-ID selects use only the profile value or the decline option (optional ones without a profile value stay blank); select read-backs are scoped to the field (ADR-0039).
 
 ### Added
 - Optional submission caps `apply.daily_limit` / `daily_limit_per_platform` / `run_limit` (`0` = no limit; loosening only from the trusted user config), `daily_limit` block in `control_status` and `doctor` (ADR-0035).

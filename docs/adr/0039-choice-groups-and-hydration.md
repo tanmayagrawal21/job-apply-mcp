@@ -45,6 +45,7 @@ without a scope accepted another select's chip.
   option is chosen only on an exact name match after the dial code is stripped, so "United States" never selects
   "United States Minor Outlying Islands". If no country is configured, the widget is left alone; a required empty
   Country field is then reported by the scan.
+- **DOM-only voluntary self-ID selects** (EEO questions that the job API does not list) are filled by `_fill_demographics`. This complements the mapper work in #54. A scan of visible, empty react-selects and native selects (required or not) feeds it, and fields in the plan are skipped. Only two answers are ever chosen, both with `best_option` against the offered options: the profile's `[demographics]` value, otherwise the decline option. A required select with no profile value gets the decline option. An optional select with no profile value stays blank. If neither a matching option nor a decline option exists, the select is left empty. The read-back is scoped to the field.
 - **`_committed(page, loc, pick)`** always scopes the read-back to the field's own container: the react-select
   shell, or the closest `[data-field-path]`, fieldset, group or field wrapper. With no container the answer is
   `False`.
@@ -60,6 +61,6 @@ without a scope accepted another select's chip.
 ## Verify / revert
 `uv run --all-extras pytest tests/test_apply_groups.py tests/test_apply_react_select.py tests/test_apply_engine.py`
 runs local fixtures for the Ashby radio and checkbox groups, the SMS consent, privacy-notice opt-in on and off,
-Greenhouse required groups (aria-required, asterisk legend, required class), a click that never registers, the SSR
+Greenhouse required groups (aria-required, asterisk legend, required class), a click that never registers, the DOM-only self-ID selects, the SSR
 hydration wait (with a control case that proves early typing is punished), the profile country, and commit scoping.
 Revert by reverting this PR. Setting `browser.hydrate_wait_s = 0` disables only the wait.

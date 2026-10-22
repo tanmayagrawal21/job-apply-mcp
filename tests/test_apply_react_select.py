@@ -228,6 +228,45 @@ async def test_incomplete_reports_required_gaps_and_declines_eeo(drv):
     assert vals == ["I don't wish to answer", "I don't wish to answer"]
 
 
+SELFID_HTML = """<html><body><form id=f>
+<label for=first_name>First Name *</label><input id=first_name name=first_name required>
+<label for=gender>Gender</label><div id=gender_wrap></div>
+<label for=race>Race</label><div id=race_wrap></div>
+<label for=hispanic_ethnicity>Are you Hispanic/Latino?</label><div id=hispanic_ethnicity_wrap></div>
+<label for=veteran_status>Veteran Status *</label><div id=veteran_status_wrap></div>
+<label for=disability_status>Disability Status</label><select id=disability_status><option value="">Select...</option>
+<option>Yes, I have a disability</option><option>No, I do not have a disability</option><option>I do not want to answer</option></select>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+const D = "I don't wish to answer";
+rs('gender', ['Male', 'Female', 'Non-binary', D]); rs('race', ['Asian', 'White', 'Two or More Races', D]);
+rs('hispanic_ethnicity', ['Yes', 'No', D]); rs('veteran_status', ['I am a protected veteran', 'I am not a protected veteran', D]);
+document.getElementById('veteran_status').setAttribute('aria-required', 'true');
+function report() { const o = {}; ['gender', 'race', 'hispanic_ethnicity', 'veteran_status'].forEach(i => {
+    const v = document.querySelector('#' + i + '_wrap .select__single-value'); o[i] = v ? v.textContent : ''; });
+  const d = document.getElementById('disability_status'); o.disability_status = d.value ? d.selectedOptions[0].text : '';
+  fetch('/state', {method: 'POST', body: JSON.stringify(o)}); }
+new MutationObserver(report).observe(document.body, {subtree: true, childList: true});
+document.getElementById('disability_status').addEventListener('change', report); report();
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+async def test_dom_only_self_id_uses_profile_or_decline_and_never_invents(drv):
+    srv, posts = _serve(SELFID_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:5", fields=[
+        FormField(key="first_name", label="First Name *", kind=FieldKind.text, required=True)])
+    ans = {"first_name": "Alex", "demographic:gender": "Female", "demographic:disability": "No",
+           "demographic:hispanic": "Martian"}           # not an offered option -> decline, never a guess
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/5", form, ans, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+    st = json.loads([p for p in posts if p[0] == "/state"][-1][1])
+    assert st == {"gender": "Female",                                   # profile value
+                  "race": "",                                           # optional, no profile value: blank
+                  "hispanic_ethnicity": "I don't wish to answer",       # unmatched profile value: decline
+                  "veteran_status": "I don't wish to answer",           # required, no profile value: decline
+                  "disability_status": "No, I do not have a disability"}   # native select, profile value
+
+
 def test_located_in_us_maps_from_country():
     from job_apply_mcp.apply.mapper import canonical_key
     assert canonical_key("Are you currently located in the US?") == "located_in_us"
