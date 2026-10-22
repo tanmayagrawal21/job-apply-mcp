@@ -108,6 +108,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `warmup_tiers` | `list[str]` | `["small"]` | tiers/task tiers to preload |
 | `system_prefix` | `dict[str, str]` | `{"field": "You fill job application forms. Answer concisely and factually. No preamble....` |  |
 | `heavy_parallel` | `int` | `1` | concurrent calls to `heavy` local models (one big model resident on 16 GB) |
+| `heavy_classes` | `list[str]` | `["narrative", "review"]` |  |
 | `providers` | `dict[str, dict[str, Any]]` | `{"ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"}, "openai_compat"...` |  |
 
 ## `[policy]`
@@ -232,6 +233,8 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `paragraphs_max` | `int` | `6` |  |
 | `max_rounds` | `int` | `3` |  |
 | `reviewer` | `str` | `"client"` | "client" = review is a client_task; "router" = task_class="review" |
+| `timeout_s` | `float` | `90.0` |  |
+| `mode` | `Literal['inline', 'deferred']` | `"inline"` |  |
 | `rules` | `list[str]` | `["Formal register; no contractions.", "Every factual claim must map to a provided profi...` |  |
 | `banned_phrases` | `list[str]` | `["excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "w...` |  |
 | `gap_patterns` | `list[str]` | `["\\bI have not\\b", "\\bI haven't\\b", "\\bI lack\\b", "\\bI would need to learn\\b", ...` |  |
