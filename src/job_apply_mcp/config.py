@@ -283,6 +283,7 @@ class ApplyCfg(BaseModel):
     plan_workers: int = 4               # concurrent planners; separate from browser_workers (pipelining)
     write_optional: bool = False        # also write optional long free-text fields (default: skip them)
     option_min_score: float = 0.78      # fuzzy option snap threshold; below it the field stays unresolved
+    top_languages: int = 3              # "select the languages you are most proficient in": at most this many (ADR-0030)
     referral_preference: list[str] = Field(default_factory=lambda: [
         "Job board", "Other job board", "Other", "LinkedIn"])  # "how did you hear"; never Referral/Employee
 

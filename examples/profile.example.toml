@@ -2,6 +2,7 @@
 # This file is never committed with real data (see CONTRIBUTING.md).
 
 skills = ["Python", "SQL", "Data analysis", "Git", "Statistics"]
+languages = ["Python", "SQL"]   # strongest first; only options present on the form are chosen (ADR-0030)
 
 [contact]
 first_name = "Alex"
@@ -33,6 +34,23 @@ start = "2025-05"
 end = "2025-08"
 location = "Chicago, IL"
 summary = "Built dashboards and automated weekly reporting."
+
+# Structured facts (ADR-0030). Anything left unset keeps the matching question unresolved; nothing is guessed.
+[skill_years]                                      # per-technology years: answered only when listed here
+Python = 3
+
+[authorization]
+work_authorized = true
+requires_sponsorship = false
+citizen = true
+
+[preferences]
+willing_to_relocate = true
+open_to_hybrid = true
+# needs_relocation_support = false                 # unset -> "will you require relocation support?" stays unresolved
+
+[referrals]                                        # company -> referrer; otherwise "do you know anyone at X?" = No
+# "Initech" = "Sam Lee"
 
 # Standard answers. Keys are normalized question patterns: lowercase substring of the form label
 # (punctuation ignored, longest match wins), or "re:<regex>" for full control.
