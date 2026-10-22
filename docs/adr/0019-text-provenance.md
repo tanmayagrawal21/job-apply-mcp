@@ -1,4 +1,4 @@
-# ADR-0007: Text provenance, human verification and export tagging
+# ADR-0019: Text provenance, human verification and export tagging
 
 Status: accepted · Date: 2026-10-22
 

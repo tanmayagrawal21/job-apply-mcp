@@ -1,4 +1,4 @@
-"""Minimal interface for later code (e.g. fine-tuning) to read ONLY user-authored text (ADR-0007).
+"""Minimal interface for later code (e.g. fine-tuning) to read ONLY user-authored text (ADR-0019).
 
 llm_generated records are unreachable through this interface by construction.
 """

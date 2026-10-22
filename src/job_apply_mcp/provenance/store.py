@@ -1,4 +1,4 @@
-"""SQLite-backed provenance store. Own file and own tables; independent of store/ (ADR-0007).
+"""SQLite-backed provenance store. Own file and own tables; independent of store/ (ADR-0019).
 
 Records are append-only. Approving or editing LLM text creates a child record, so the original LLM output
 and the human decision are both preserved and the lineage can be audited.

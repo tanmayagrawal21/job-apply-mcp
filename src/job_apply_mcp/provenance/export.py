@@ -1,4 +1,4 @@
-"""Tag exports so LLM-generated and user content can be told apart (configurable; ADR-0007).
+"""Tag exports so LLM-generated and user content can be told apart (configurable; ADR-0019).
 
 Modes:
   none     no tagging

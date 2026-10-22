@@ -1,4 +1,4 @@
-"""Provenance data model (ADR-0007)."""
+"""Provenance data model (ADR-0019)."""
 from __future__ import annotations
 
 from enum import Enum
