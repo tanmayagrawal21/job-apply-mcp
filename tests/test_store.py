@@ -132,8 +132,54 @@ async def test_distinct_requisitions_same_title_not_merged(store):
 
 async def test_title_fallback_modes(store):
     await store.record(res("mail:abc"), company="Acme", title="Data Analyst")   # no stable id
-    assert await store.seen_why("Acme", "Data Analyst", ref="greenhouse:acme:5") == "title"
-    assert await store.seen_why("Acme", "Data Analyst") == "title"              # nothing known: fallback
+    assert (await store.seen_why("Acme", "Data Analyst", ref="greenhouse:acme:5")).startswith("title~")
+    assert (await store.seen_why("Acme", "Data Analyst")).startswith("title~")              # nothing known: fallback
     await store.record(res("greenhouse:acme:1"), company="Beta", title="Data Analyst")
     assert await store.seen("Beta", "Data Analyst", ref="greenhouse:beta:2", mode="title") is True
     assert await store.seen("Beta", "Data Analyst", ref="greenhouse:beta:2") is False
+
+
+# --- ADR-0010 amendment 2: fallback against id-less rows, aliases, fuzzy titles ---
+
+
+async def test_imported_row_blocks_new_posting_with_id_identical_title(store):
+    # imported history: no requisition id, no url
+    await store.record(res("import:hist:1"), company="Quillfeather Games", title="Senior Gameplay Engineer")
+    why = await store.seen_why("Quillfeather Games", "Senior Gameplay Engineer", ref="greenhouse:quillfeather:771",
+                               url="https://boards.example.com/quillfeather/771")
+    assert why and why.startswith("title~1.00") and "legacy-row" in why
+
+
+async def test_parent_brand_alias_blocks_when_configured():
+    st = SqliteStore(":memory:", company_aliases={"Quillfeather": "Quillfeather Interactive Entertainment Holdings Board"})
+    await st.record(res("import:hist:2"), company="Quillfeather Interactive Entertainment Holdings Board",
+                    title="Technical Artist")
+    why = await st.seen_why("Quillfeather", "Technical Artist", ref="lever:quillfeather:abc")
+    assert why and "company=alias" in why
+    plain = SqliteStore(":memory:")
+    await plain.record(res("import:hist:2"), company="Quillfeather Interactive Entertainment Holdings Board",
+                       title="Technical Artist")
+    assert await plain.seen_why("Quillfeather", "Technical Artist", ref="lever:quillfeather:abc") is None
+
+
+async def test_slug_and_suffix_normalization(store):
+    assert company_key("Mossgrove Technologies Global Inc") == "mossgrove"
+    await store.record(res("mail:x"), company="Mossgrove Labs Group", title="Data Engineer")
+    # board slug 'mossgrove-labs' / 'mossgrovelabs' resolves to the same identity as the display name
+    assert await store.seen("mossgrovelabs", "Data Engineer", ref="greenhouse:mossgrovelabs:9")
+    assert await store.seen("mossgrove-labs", "Data Engineer", ref="greenhouse:mossgrovelabs:9")
+
+
+async def test_fuzzy_title_fallback_and_threshold(store):
+    await store.record(res("mail:y"), company="Thistledown", title="Backend Software Engineer")
+    assert await store.seen("Thistledown", "Software Engineer, Backend (Remote)", ref="lever:thistledown:1")
+    assert not await store.seen("Thistledown", "Senior Backend Software Engineer", ref="lever:thistledown:2")
+    strict = SqliteStore(":memory:", title_threshold=0.95)
+    await strict.record(res("mail:y"), company="Thistledown", title="Backend Software Engineer")
+    assert not await strict.seen("Thistledown", "Backend Software Engineer Platform", ref="lever:thistledown:3")
+
+
+async def test_two_requisitions_with_ids_never_merged_even_with_alias():
+    st = SqliteStore(":memory:", company_aliases={"brandco": "parentco"})
+    await st.record(res("greenhouse:parentco:1"), company="ParentCo", title="Level Designer")
+    assert await st.seen_why("BrandCo", "Level Designer", ref="greenhouse:brandco:2") is None

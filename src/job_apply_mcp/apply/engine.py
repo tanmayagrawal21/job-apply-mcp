@@ -571,10 +571,17 @@ class ApplyEngine:
                     return SubmitResult(ref=ref, status="needs_human" if err.startswith("awaiting") else "error",
                                         detail=err)
             async with self._lock(ctx.posting.company):
-                if await self.store.seen(ctx.posting.company, ctx.posting.title,
-                                         within_days=self.s.policy.dedupe_days, ref=ref,
-                                         url=ctx.posting.apply_url or ctx.posting.url):
-                    return SubmitResult(ref=ref, status="duplicate", detail="already applied")
+                why = None
+                if hasattr(self.store, "seen_why"):
+                    why = await self.store.seen_why(ctx.posting.company, ctx.posting.title,
+                                                    within_days=self.s.policy.dedupe_days, ref=ref,
+                                                    url=ctx.posting.apply_url or ctx.posting.url)
+                elif await self.store.seen(ctx.posting.company, ctx.posting.title,
+                                           within_days=self.s.policy.dedupe_days, ref=ref,
+                                           url=ctx.posting.apply_url or ctx.posting.url):
+                    why = "seen"
+                if why:
+                    return SubmitResult(ref=ref, status="duplicate", detail=f"already applied ({why})")
                 if not dry:
                     self.approvals.audit("submit_attempt", ref=ref, approval_id=approval_id, actor=by,
                                          detail=f"{ctx.posting.company} | {ctx.posting.title}")

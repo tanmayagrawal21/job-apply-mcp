@@ -68,7 +68,9 @@ class Services:
             from .store.sqlite import SqliteStore
 
             self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days,
-                                 dedupe_mode=self.settings.dedupe.mode)
+                                 dedupe_mode=self.settings.dedupe.mode,
+                                      company_aliases=self.settings.dedupe.company_aliases,
+                                      title_threshold=self.settings.dedupe.title_threshold)
         return self._store
 
     @property
@@ -374,10 +376,11 @@ class Services:
         st = self.engine.approvals.state(ref_or_url)
         return self._submit_row(r, st, self.engine.timings.get(ref_or_url))
 
-    @staticmethod
-    def _submit_row(r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
+    def _submit_row(self, r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
                "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t}
+        if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
+            row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return {k: v for k, v in row.items() if v}
 
     async def provide_verification_code(self, pending_id: str, code: str) -> dict[str, Any]:

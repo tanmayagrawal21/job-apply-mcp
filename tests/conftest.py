@@ -24,6 +24,15 @@ async def http(tmp_path):
 _REAL_DATA_DIR: Path | None = None
 _REAL_CONFIG_DIR: Path | None = None
 _VIOLATIONS: list[str] = []
+_REAL_LISTING: list[str] = []
+
+
+def _listing(root: Path | None) -> list[str]:
+    """Top-level entry names only (no contents, no mtimes: other processes may legitimately use the dir)."""
+    try:
+        return sorted(p.name for p in root.iterdir()) if root is not None else []
+    except OSError:
+        return []
 _ENV_KEYS = ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA")
 
 
@@ -36,7 +45,7 @@ def _is_under(path, root: Path | None) -> bool:
 
 
 def _audit(event, args):
-    """Record (never raise) any write-ish access to the developer's real data dir by THIS process.
+    """Record and BLOCK (raise before the filesystem call) any write-ish access to the real data dir by THIS process.
     Process-local on purpose: another process (e.g. a live server) may legitimately use that dir meanwhile."""
     if event == "open":
         path, mode, flags = args
@@ -44,9 +53,11 @@ def _audit(event, args):
             isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND))
         if writing and _is_under(path, _REAL_DATA_DIR):
             _VIOLATIONS.append(f"open({os.fsdecode(path)!r}, {mode!r})")
+            raise PermissionError(f"test suite may not write to the real data dir: {os.fsdecode(path)}")
     elif event in ("os.mkdir", "os.rename", "os.remove", "os.rmdir", "shutil.rmtree", "os.truncate"):
         if _is_under(args[0], _REAL_DATA_DIR):
             _VIOLATIONS.append(f"{event}({os.fsdecode(args[0])!r})")
+            raise PermissionError(f"test suite may not modify the real data dir: {os.fsdecode(args[0])}")
 
 
 def pytest_configure(config):
@@ -61,6 +72,8 @@ def pytest_configure(config):
     from job_apply_mcp import paths
     _REAL_DATA_DIR, _REAL_CONFIG_DIR = paths.data_dir().absolute(), paths.config_dir().absolute()
     sys.addaudithook(_audit)
+    global _REAL_LISTING
+    _REAL_LISTING = _listing(_REAL_DATA_DIR)
     boot = Path(tempfile.mkdtemp(prefix="jam-test-home-"))
     atexit.register(shutil.rmtree, boot, ignore_errors=True)
     for k in list(os.environ):
@@ -75,6 +88,7 @@ def pytest_configure(config):
 def _real_data_dir_untouched():
     """Fail the session if this process wrote to the developer's real data dir."""
     yield
+    assert _listing(_REAL_DATA_DIR) == _REAL_LISTING, f"real data dir listing changed: {_REAL_DATA_DIR}"
     assert not _VIOLATIONS, f"test suite touched the real data dir {_REAL_DATA_DIR}: {_VIOLATIONS[:5]}"
 
 

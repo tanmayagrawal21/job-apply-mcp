@@ -29,7 +29,10 @@ CSV_COLUMNS = ["ref", "company", "title", "status", "via", "confirmation", "crea
 SEEN_STATUSES = ("submitted", "duplicate")
 
 _COMPANY_SUFFIX = {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "company",
-                   "gmbh", "plc", "the", "lp", "llp"}
+                   "gmbh", "plc", "the", "lp", "llp", "global", "technologies", "technology", "tech",
+                   "group", "holdings", "international", "worldwide", "sa", "ag", "bv", "pty"}
+# Placeholder ref prefixes of imported / mail-derived rows: these are NOT platform requisition ids.
+_SYNTHETIC_REF = ("mail:", "email:", "import:", "imported:", "csv:", "manual:", "history:", "legacy:")
 _TITLE_STOP = {"the", "a", "an", "and", "of", "for", "at", "remote", "hybrid", "onsite", "us", "usa"}
 # Level words must match exactly between two titles for them to be considered the same job.
 _LEVEL_ALIASES = {"sr": "senior", "jr": "junior", "intern": "internship", "interns": "internship",
@@ -72,6 +75,32 @@ def company_key(name: str) -> str:
     return " ".join(toks)
 
 
+def company_resolver(aliases: dict[str, str] | None = None):
+    """Return f(name)->identity. Identity = normalized key (suffixes stripped, board slugs like 'acme-games' or
+    'acmegames' treated as the display name 'Acme Games' by ignoring separators) mapped through the user's alias
+    map {"brand": "canonical"} (both sides normalized the same way)."""
+    amap = {company_key(a).replace(" ", ""): company_key(c).replace(" ", "")
+            for a, c in (aliases or {}).items() if a and c}
+
+    def resolve(name: str) -> str:
+        k = company_key(name).replace(" ", "")
+        for _ in range(4):                      # follow short alias chains, bounded against cycles
+            nk = amap.get(k)
+            if not nk or nk == k:
+                break
+            k = nk
+        return k
+    return resolve
+
+
+def title_similarity(a: str, b: str) -> float:
+    """Token Jaccard in [0,1]; 0 when seniority/level tokens disagree or either title is empty."""
+    ta, tb = set(title_tokens(a)), set(title_tokens(b))
+    if not ta or not tb or (ta & _LEVELS) != (tb & _LEVELS):
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
 def title_tokens(title: str) -> list[str]:
     t = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", title.lower())          # drop parentheticals
     t = re.sub(r"\b[a-z]{0,3}-?\d{4,}\b", " ", t)                   # requisition ids like R-12345
@@ -84,14 +113,10 @@ def title_key(title: str) -> str:
     return " ".join(sorted(title_tokens(title)))
 
 
-def titles_similar(a: str, b: str, threshold: float = 0.75) -> bool:
-    """Order-insensitive token match. Seniority/level tokens must agree exactly."""
-    ta, tb = set(title_tokens(a)), set(title_tokens(b))
-    if not ta or not tb:
-        return False
-    if (ta & _LEVELS) != (tb & _LEVELS):
-        return False
-    return len(ta & tb) / len(ta | tb) >= threshold
+def titles_similar(a: str, b: str, threshold: float = 0.6) -> bool:
+    """Order-insensitive token Jaccard. Seniority/level tokens must agree exactly."""
+    sim = title_similarity(a, b)
+    return sim > 0 and sim >= threshold
 
 
 _TRACKING = {"gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "ref", "referrer", "referer", "source", "src",
@@ -117,7 +142,8 @@ def canonical_url(url: str | None) -> str | None:
 
 def identity_key(ref: str | None) -> str | None:
     """'<platform>:<board>:<job_id>' refs are platform requisition ids; anything else has no stable id."""
-    if not ref or ref.lower().startswith(("http:", "https:")) or len(ref.split(":", 2)) < 3:
+    if (not ref or ref.lower().startswith(("http:", "https:") + _SYNTHETIC_REF)
+            or len(ref.split(":", 2)) < 3):
         return None
     return ref.strip().lower()
 
@@ -128,6 +154,7 @@ def _now() -> str:
 
 class SqliteStore:
     def __init__(self, data_dir: str | Path, *, dedupe_days: int = 180, dedupe_mode: str = "id_first",
+                 company_aliases: dict[str, str] | None = None, title_threshold: float = 0.6,
                  filename: str = "applications.db"):
         if str(data_dir) == ":memory:":
             self.path, target = Path(":memory:"), ":memory:"
@@ -137,6 +164,8 @@ class SqliteStore:
             self.path = d / filename
             target = str(self.path)
         self.dedupe_days, self.dedupe_mode = dedupe_days, dedupe_mode
+        self.title_threshold = title_threshold
+        self._resolve = company_resolver(company_aliases)
         self._db = sqlite3.connect(target, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._tlock = threading.Lock()
@@ -189,9 +218,11 @@ class SqliteStore:
 
     async def seen_why(self, company: str, title: str, *, within_days: int | None = None, ref: str | None = None,
                        url: str | None = None, mode: str | None = None) -> str | None:
-        """Matched reason ('req_id:<id>', 'url:<canonical>', 'title') or None. In id_first mode a known requisition
-        id / canonical URL is authoritative; company+title is used only when the candidate has neither, or against
-        stored rows that have neither."""
+        """Matched reason or None: 'req_id:<id>', 'url:<canonical>', or 'title~<jaccard> company=<rule>' where rule
+        is 'exact' (same normalized key), 'alias' (dedupe.company_aliases / separator-insensitive slug match) and
+        'legacy-row' is appended when the stored row had no id. In id_first mode a known requisition id / URL that
+        matches is authoritative; company+title is ALSO tried against stored rows that lack an id and url_key
+        (imported/legacy history). Only rows with a different id count as distinct requisitions."""
         days = self.dedupe_days if within_days is None else within_days
         return await self._a(self._seen, company, title, days, ref, url, mode or self.dedupe_mode)
 
@@ -210,9 +241,16 @@ class SqliteStore:
             if uk and self._db.execute(f"SELECT 1 {base} AND url_key=?", (*args, uk)).fetchone():
                 return f"url:{uk}"
         extra = "" if title_only else " AND req_id IS NULL AND url_key IS NULL"
-        rows = self._db.execute(f"SELECT title {base} AND company_key=?{extra}",
-                                (*args, company_key(company))).fetchall()
-        return "title" if any(titles_similar(title, r["title"]) for r in rows) else None
+        want = self._resolve(company)
+        raw = company_key(company)
+        for r in self._db.execute(f"SELECT company, company_key, title, req_id {base}{extra}", args).fetchall():
+            if self._resolve(r["company"] or r["company_key"]) != want:
+                continue
+            sim = title_similarity(title, r["title"])
+            if sim > 0 and sim >= self.title_threshold:
+                rule = "exact" if (r["company_key"] == raw) else "alias"
+                return f"title~{sim:.2f} company={rule}" + ("" if title_only else " legacy-row")
+        return None
 
     async def record(self, result: SubmitResult, *, company: str, title: str, url: str | None = None) -> None:
         await self._a(self._record, result, company, title, url)

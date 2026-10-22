@@ -207,6 +207,10 @@ class IngestCfg(BaseModel):
     min_confidence: float = 0.6
     max_new_shown: int = 10             # compact outputs list at most this many new matches
     max_messages_per_call: int = 300
+    reconcile_delays_min: list[float] = Field(default_factory=lambda: [2, 10, 60])  # confirmation checks after a submit (ADR-0025)
+    reconcile_window_hours: int = 72    # a confirmation must arrive within this long after the submit
+    reconcile_title_threshold: float = 0.75
+    seed_since_days: int = 180          # default look-back for seed_from_confirmations
     imap: ImapCfg = Field(default_factory=ImapCfg)
 
 
@@ -436,6 +440,9 @@ class DedupeCfg(BaseModel):
     """Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical apply URL, with
     company+title only when neither is known. title: legacy company+fuzzy-title matching."""
     mode: str = "id_first"
+    # {"brand": "canonical"}: names that are the same employer (parent/brand). Normalized like company names.
+    company_aliases: dict[str, str] = Field(default_factory=dict)
+    title_threshold: float = Field(0.6, ge=0.0, le=1.0)    # token-Jaccard for the company+title fallback
 
 
 class Settings(BaseModel):
