@@ -51,8 +51,10 @@ class Work(BaseModel):
 
 
 class Demographics(BaseModel):
-    """Every field defaults to declining to answer."""
+    """Every field defaults to declining to answer. Values are matched to an option exactly (ADR-0040)."""
     gender: str = DECLINE
+    gender_if_required: str = ""        # used instead of `gender` when the gender question is required; "" = `gender`
+    hispanic_latino: str = DECLINE      # the separate "Are you Hispanic or Latino?" question (e.g. "Yes" / "No")
     race_ethnicity: str = DECLINE
     veteran_status: str = DECLINE
     disability_status: str = DECLINE
@@ -135,6 +137,7 @@ class Profile(BaseModel):
         """Answer for EEO-style questions; declines by default. None if not a demographic question."""
         q = normalize_question(question)
         table = {
+            "hispanic": self.demographics.hispanic_latino, "latino": self.demographics.hispanic_latino,
             "gender": self.demographics.gender, "race": self.demographics.race_ethnicity,
             "ethnic": self.demographics.race_ethnicity, "veteran": self.demographics.veteran_status,
             "disabilit": self.demographics.disability_status,

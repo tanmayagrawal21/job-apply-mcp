@@ -42,6 +42,10 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("languages_known", (r"\blanguages?\b.*\b(proficient|production|programming|coding|comfortable|strongest|primary|expert)",
                         r"\b(proficient|programming|coding)\b.*\blanguages?\b",
                         r"\b(strongest|primary|main|favou?rite|preferred|best)\b.*\b(coding|programming|code)\b.*\blanguage\b")),
+    # ADR-0040: "country/countries of citizenship" (export control). Before us_citizen so "... (US citizens: write USA)"
+    # takes the strict vocabulary check below instead of a Yes/No citizen answer.
+    ("citizenship_countries", (r"\bcountr(y|ies)( s)? of (your )?citizenships?\b", r"\bcitizenship countr(y|ies)\b",
+                               r"\b(which|what) countr(y|ies)\b.*\bcitizen", r"\bcountr(y|ies)\b.*\b(are you|you are) a citizen\b")),
     ("us_citizen", (r"\b(u s|us|usa|united states|american) citizen",)),
     # ADR-0033 keys
     ("citizenship", (r"^(your |current )?citizenship( status)?$", r"\bcitizenship status\b",
@@ -353,7 +357,7 @@ _AUTH_NEG = re.compile(r"\bunauthori[sz]ed\b|\bunable to work\b|\bineligible\b|"
 _SPOKEN = re.compile(r"speak|spoken|fluen|english|native|written|verbal|translat", re.IGNORECASE)
 _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relocation_support", "open_to_hybrid",
                   "open_to_onsite", "knows_employee", "years_experience", "languages_known", "citizenship", "gpa",
-                  "prior_employee", "marketing_optin"}
+                  "prior_employee", "marketing_optin", "citizenship_countries"}
 # Never sent to the local LLM: a guess is a false statement about the candidate.
 SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"}
 _TOTAL_GENERIC = frozenset(
@@ -609,10 +613,13 @@ _DIRECT_EMPLOY = re.compile(
     rf"(?:employee|intern) (?:of|at) {_CO}$")
 _CO_QUALIFIERS = frozenset(["state", "states", "federal", "government", "agency", "competitor", "competitors",
                             "affiliate", "affiliates", "parent", "subsidiary", "subsidiaries", "partner", "partners",
-                            "client", "clients", "vendor", "vendors", "public", "national", "department"])
-# military / defence qualifiers: "worked for Army?" must never be read as the posting company "Army Labs"
-_CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|marines?|military|defen[cs]e|coast guard|national guard|"
-                                   r"veterans?)\b")
+                            "client", "clients", "vendor", "vendors", "public", "national", "department",
+                            # public-sector employers (ADR-0040): "worked for the county?" is not about "County Labs"
+                            "county", "counties", "city", "cities", "municipal", "municipality", "police", "township",
+                            "borough", "sheriff", "university", "universities", "usaf"])
+# military / defence / public-body phrases: "worked for Army?" must never be read as the posting company "Army Labs"
+_CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|armed forces|marines?|military|defen[cs]e|coast guard|"
+                                   r"national guard|veterans?|transit authority|school district)\b")
 _GENERIC_CO_WORDS = frozenset(["the", "global", "united", "american", "national", "general", "first", "international",
                                "data", "systems", "group", "technologies", "digital", "new", "world", "health"])
 
@@ -647,6 +654,38 @@ def about_this_company(label: str, company: str, aliases: Sequence[str] = ()) ->
     return bool(_DIRECT_EMPLOY.match(" ".join(words)))
 
 
+# ---- export-control citizenship countries (ADR-0040) ----------------------------------------------
+# Deny-by-default: answered from the profile's citizenship fact only when every word of the label asks for the
+# country/countries of citizenship. Permanent residence, dates ("when obtained"), "U.S. person", ITAR, dual/former
+# citizenship, someone else's citizenship or any other word leave the field unresolved.
+_CIT_VOCAB = frozenset(["a", "an", "the", "of", "and", "or", "for", "in", "is", "are", "am", "i", "you", "your", "do",
+                        "what", "which", "please", "list", "all", "any", "provide", "enter", "indicate", "select",
+                        "name", "names", "state", "current", "currently", "hold", "country", "countries", "s",
+                        "citizen", "citizenship", "citizenships", "export", "control", "controls", "compliance",
+                        "purposes", "purpose"])
+
+
+def citizenship_countries_ok(label: str) -> bool:
+    """True when the label asks only for the candidate's country/countries of citizenship."""
+    words = normalize(label).split()
+    return bool(words) and all(t in _CIT_VOCAB for t in words)
+
+
+def _citizenship_countries(f: FormField, profile: ProfileLike) -> Any | None:
+    c = profile.lookup("citizenship_country")
+    if not c or not citizenship_countries_ok(f.label):
+        return None
+    if not f.options:
+        return str(c) if f.kind in (FieldKind.text, FieldKind.textarea, FieldKind.unknown) else None
+    parts = [x.strip() for x in re.split(r"[,;/]| and ", str(c)) if x.strip()]
+    picks = [exact_option(x, f.options) for x in parts]
+    if not picks or any(p is None for p in picks):
+        return None
+    if f.kind == FieldKind.multiselect:
+        return list(dict.fromkeys(picks))
+    return picks[0] if len(picks) == 1 else None
+
+
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
               company_aliases: Sequence[str] = ()) -> tuple[bool, Any]:
     """(handled, value). handled=False -> continue with the generic profile lookup."""
@@ -674,6 +713,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return True, ("Yes" if f.options or f.kind == FieldKind.boolean else str(who))
     if ck == "years_experience":
         return True, _years_answer(f, profile)
+    if ck == "citizenship_countries":
+        return True, _citizenship_countries(f, profile)
     if ck == "citizenship":
         cit = _truth(profile.lookup("us_citizen"))
         if not f.options:
@@ -715,6 +756,75 @@ class MapResult:
     answers: list[Answer] = field(default_factory=list)
     unresolved: list[FormField] = field(default_factory=list)
     omitted: list[FormField] = field(default_factory=list)   # derived fields with no source (never tasks)
+    # ADR-0040: optional self-identification questions left blank (no profile value, or wording not safe to answer).
+    # Also in `unresolved`; the engine lists them in the plan output and never sends them to an LLM.
+    skipped_voluntary: list[FormField] = field(default_factory=list)
+    hints: dict[str, dict[str, Any]] = field(default_factory=dict)  # field key -> known partial facts for the owner
+
+
+# ---- voluntary self-identification (ADR-0040) -----------------------------------------------------------
+# Declining never states a fact, so the decline option may be chosen for any demographic-looking label.
+# A real value (e.g. "No", a race) is used only when every label word is generic self-identification wording or a
+# topic word of that same key: "Veteran-owned supplier?", "Gender of your emergency contact" or "Race and gender"
+# get the decline option if there is one, else stay blank.
+_DEMO_TOPICS: dict[str, frozenset[str]] = {
+    "gender": frozenset(["gender"]),
+    "hispanic": frozenset(["hispanic", "latino", "latina", "latinx", "latine", "origin"]),
+    "race": frozenset(["race", "races", "racial", "ethnicity", "ethnicities", "ethnic", "background", "origin",
+                       "heritage"]),
+    "veteran": frozenset(["veteran", "veterans", "protected"]),
+    "disability": frozenset(["disability", "disabilities", "disabled"]),
+    "sexual_orientation": frozenset(["sexual", "orientation"]),
+    "pronouns": frozenset(["pronoun", "pronouns"]),
+}
+_DEMO_GENERIC = frozenset(["a", "an", "the", "of", "or", "and", "to", "in", "is", "are", "am", "i", "you", "your", "do",
+                           "does", "have", "has", "what", "which", "how", "would", "describe", "describes", "best",
+                           "following", "please", "select", "choose", "identify", "identification", "self",
+                           "indicate", "status", "voluntary", "optional", "required", "identity", "as", "that",
+                           "apply", "applies", "all", "one", "more", "any", "if", "s", "category", "categories",
+                           "classification", "classifications", "eeo", "eeoc", "my"])
+# optional fields that are self-identification even without a demographic keyword (listed, never answered here)
+_VOLUNTARY_LABEL = re.compile(r"self[- ]identif|voluntary|demographic|impairment|armed forces|military|lgbt|"
+                              r"transgender|\bsex\b|ethnic|\brace\b", re.IGNORECASE)
+
+
+def _is_decline(v: Any) -> bool:
+    nv = normalize(str(v))
+    return nv in ("decline", "prefer not to say") or nv.startswith("decline")
+
+
+def demographic_label_ok(label: str, ck: str) -> bool:
+    """Every word is generic self-identification wording or a topic word of `ck` (never another topic)."""
+    own = _DEMO_TOPICS.get(ck)
+    if own is None:
+        return False
+    words = normalize(label).split()
+    return bool(words) and bool(own & set(words)) and all(t in own or t in _DEMO_GENERIC for t in words)
+
+
+def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any | None:
+    """The owner's [demographics] value as the exact option; the decline option when the profile declines or the
+    value/wording does not match exactly; else None. Never a guessed or nearest option."""
+    if not ck:
+        return None
+    v = profile.lookup("gender_if_required") if ck == "gender" and f.required else None
+    if v in (None, ""):
+        v = profile.lookup(ck)              # profile.demographics only, never free-form answers
+    if v in (None, ""):
+        return None
+    if _is_decline(v):
+        if not f.options:
+            return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
+        got = decline_option(f.options)
+    elif not f.options:
+        if not demographic_label_ok(f.label, ck):
+            return None
+        if f.kind == FieldKind.boolean:
+            return _truth(v)
+        return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
+    else:   # the exact option for a plainly-worded question; otherwise declining (never a nearest guess)
+        got = (exact_option(str(v), f.options) if demographic_label_ok(f.label, ck) else None) or decline_option(f.options)
+    return None if got is None else [got] if f.kind == FieldKind.multiselect else got
 
 
 # ---- applicant privacy-notice acknowledgement (ADR-0034) ---------------------------------------------
@@ -850,18 +960,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             ok(f, derive_graduation(f, profile.lookup("graduation")), "derived:graduation")
             continue
         if ck in DEMOGRAPHIC_KEYS or (ck is None and _DEMOGRAPHIC_LABEL.search(f.label)):
-            v = profile.lookup(ck) if ck else None  # profile.demographics only, never free-form answers
-            if v is None or v == "":
-                res.unresolved.append(f)
-            elif not f.options:
-                ok(f, str(v), f"rule:{ck}")
-            else:
-                dv = str(v)
-                if normalize(dv) in ("decline", "prefer not to say") or normalize(dv).startswith("decline"):
-                    got = decline_option(f.options)
-                else:
-                    got = exact_option(dv, f.options) or decline_option(f.options)
-                ok(f, got, f"rule:{ck}")
+            ok(f, demographic_value(f, ck, profile), f"rule:{ck}")   # ADR-0040
             continue
         if ck == "referral_source" and f.options:
             ok(f, pick_source(profile.lookup("referral_source"), f.options, pref), "rule:referral_source")
@@ -871,11 +970,14 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             if handled:
                 if sv is None or sv == "":
                     res.unresolved.append(f)
+                    if ck == "citizenship_countries" and (c := profile.lookup("citizenship_country")):
+                        res.hints[f.key] = {"citizenship": str(c),
+                                            "note": "profile citizenship only; the rest of the question needs the owner"}
                     continue
                 if f.kind == FieldKind.multiselect and isinstance(sv, list):
                     res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
                     continue
-                if ck in ("years_experience", "languages_known", "gpa", "citizenship") and f.options and sv in f.options:
+                if ck in ("years_experience", "languages_known", "gpa", "citizenship", "citizenship_countries") and f.options and sv in f.options:
                     res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
                     continue
                 c = _coerce(f, sv, min_score)
@@ -895,6 +997,8 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             res.unresolved.append(f)
         else:
             res.answers.append(Answer(key=f.key, value=coerced, source="profile" if ck is None else f"rule:{ck}"))
+    res.skipped_voluntary = [f for f in res.unresolved if not f.required
+                             and (_DEMOGRAPHIC_LABEL.search(f.label) or _VOLUNTARY_LABEL.search(f.label))]
     return res
 
 

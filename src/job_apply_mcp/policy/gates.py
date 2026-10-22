@@ -27,7 +27,7 @@ class GateContext:
     location: str = ""
     salary: str = ""
     text: str = ""                  # posting description (and anything else worth scanning)
-    form_text: str = ""             # application form labels / attestations
+    form_text: str = ""             # application form labels / attestations, one field per line (ADR-0040)
     flags: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
@@ -226,11 +226,42 @@ def title_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     return None
 
 
+# ADR-0040: a stop phrase matches whole words within one segment (one form label / option, or one description
+# sentence). "no ai" no longer matches "no aim", "techno aid" or two adjacent form labels, and a requirement statement
+# ("no AI experience required") is not an attestation. Real attestations ("personally completed", "my own work",
+# "no AI allowed", "without the use of AI") still stop the application.
+_REQUIREMENT_AFTER = re.compile(r"^[ \t/,-]*(?:/?ml\b|/?machine learning\b)?[ \t/,-]*(?:prior |previous |professional )?"
+                                r"(?:experience|background|knowledge|expertise|skills?|degree|required|needed|necessary)\b",
+                                re.IGNORECASE)
+
+
+def _phrase_rx(phrase: str) -> re.Pattern[str] | None:
+    words = re.findall(r"[a-z0-9]+", phrase.lower())
+    if not words:
+        return None
+    return re.compile(r"(?<![a-z0-9])" + r"[ \t_/-]+".join(map(re.escape, words)) + r"(?![a-z0-9])", re.IGNORECASE)
+
+
+def stop_phrase_hit(text: str, phrases: list[str]) -> str | None:
+    """The first stop phrase found as whole words in one segment of `text`, else None."""
+    segments = [x for x in re.split(r"[\n.!?;]+", text or "") if x.strip()]
+    for ph in phrases:
+        rx = _phrase_rx(ph)
+        if rx is None:
+            continue
+        for seg in segments:
+            for m in rx.finditer(seg):
+                if not _REQUIREMENT_AFTER.match(seg[m.end():]):
+                    return ph
+    return None
+
+
 def stop_phrase_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
-    hay = f"{ctx.text} {ctx.form_text}".lower()
-    for ph in cfg.stop_phrases:
-        if ph.strip() and ph.lower() in hay:
-            return Decision.needs_human, f"attestation: '{ph}'"
+    for label in (ctx.form_text or "").split("\n"):
+        if ph := stop_phrase_hit(label, cfg.stop_phrases):
+            return Decision.needs_human, f"attestation: '{ph}' in field: {label.strip()[:120]}"
+    if ph := stop_phrase_hit(ctx.text, cfg.stop_phrases):
+        return Decision.needs_human, f"attestation: '{ph}' in posting text"
     return None
 
 

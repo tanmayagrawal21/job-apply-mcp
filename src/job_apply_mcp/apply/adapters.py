@@ -190,7 +190,8 @@ class ProfileView:
             "school": e.school if e else None, "degree": e.degree if e else None,
             "discipline": e.field if e else None, "graduation": e.end if e else None,
             "lat": c.lat, "lon": c.lon, "sexual_orientation": d.sexual_orientation,
-            "gender": d.gender, "hispanic": d.race_ethnicity, "race": d.race_ethnicity,
+            "gender": d.gender, "gender_if_required": d.gender_if_required, "hispanic": d.hispanic_latino,
+            "race": d.race_ethnicity,
             "veteran": d.veteran_status, "disability": d.disability_status, "pronouns": d.pronouns,
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),
@@ -222,7 +223,9 @@ class PolicyGates:
         self.cfg = settings.policy
 
     async def evaluate(self, posting: Posting, form: ApplicationForm) -> GateResult:
-        return self._eval(posting, self.cfg, " ".join(f.label for f in form.fields))
+        # one line per field (label and its options) so a phrase never spans two fields (ADR-0040)
+        lines = [" | ".join([f.label, *f.options]).replace("\n", ". ") for f in form.fields]
+        return self._eval(posting, self.cfg, "\n".join(lines))
 
 
 class RouterView:

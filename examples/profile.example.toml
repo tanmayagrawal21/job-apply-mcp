@@ -70,6 +70,8 @@ open_to_hybrid = true
 # Demographic / EEO questions. Every field defaults to declining; override only if you choose to.
 [demographics]
 gender = "Decline to self-identify"
+# gender_if_required = ""          # optional: used only when the gender question is required
+hispanic_latino = "Decline to self-identify"   # or the exact option text, e.g. "No"
 race_ethnicity = "Decline to self-identify"
 veteran_status = "Decline to self-identify"
 disability_status = "Decline to self-identify"
