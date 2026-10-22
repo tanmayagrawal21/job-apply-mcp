@@ -85,11 +85,11 @@ def test_manifest_records_source_and_hash(tmp_path):
 def test_dataset_dedupe_filters_split_and_facts(tmp_path):
     same = body(40, "q")
     src = Src([rec("a", same), rec("b", same), rec("c", "too short"), rec("d", body(40, "d")), rec("e", body(40, "e")),
-               rec("f", "I live in Tucson and build things.", kind="profile_fact")])
+               rec("f", "I live in Springfield, IL and build things.", kind="profile_fact")])
     ds = build_dataset(src, settings(tmp_path, eval_fraction=0.34).tune, tmp_path / "d", source_label="test")
     assert ds.dropped == {"duplicate": 1, "length": 1}
     assert len(ds.train) + len(ds.eval) == 3 and len(ds.eval) == 1 and len(ds.train) >= 1
-    assert "Tucson" in ds.train[0]["messages"][1]["content"]
+    assert "Springfield, IL" in ds.train[0]["messages"][1]["content"]
     assert (tmp_path / "d" / "valid.jsonl").read_text().count("\n") == 1
     ds2 = build_dataset(src, settings(tmp_path, eval_fraction=0.34).tune, tmp_path / "d2", source_label="test")
     assert ds2.eval == ds.eval        # deterministic
