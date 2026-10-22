@@ -13,6 +13,7 @@ from ._http import request
 class OllamaProvider:
     name = "ollama"
     supports_options = True   # accepts think / num_ctx
+    supports_timeout = True   # accepts a per-call timeout_s (ADR-0041)
     is_cloud = False
 
     def __init__(self, base_url: str = "http://127.0.0.1:11434", timeout_s: float = 120.0,
@@ -41,7 +42,7 @@ class OllamaProvider:
 
     async def complete_ex(self, prompt: str, *, model: str, system: str | None = None, max_tokens: int = 512,
                           temperature: float = 0.2, json_schema: dict | None = None, think: bool = False,
-                          num_ctx: int | None = None) -> Completion:
+                          num_ctx: int | None = None, timeout_s: float | None = None) -> Completion:
         msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
         body: dict = {"model": model, "messages": msgs, "stream": False, "think": think,
                       "options": {"num_predict": max_tokens, "temperature": temperature}}
@@ -51,7 +52,7 @@ class OllamaProvider:
             body["format"] = json_schema if json_schema else "json"
         if self.keep_alive:
             body["keep_alive"] = self.keep_alive
-        async with httpx.AsyncClient(timeout=self.timeout_s) as c:
+        async with httpx.AsyncClient(timeout=timeout_s or self.timeout_s) as c:
             r = await request(c, "POST", f"{self.base_url}/api/chat", json=body)
         j = r.json()
         text = strip_think((j.get("message") or {}).get("content", ""))

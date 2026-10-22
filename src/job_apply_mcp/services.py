@@ -370,6 +370,9 @@ class Services:
     async def plan(self, ref_or_url: str) -> dict[str, Any]:
         return (await self.engine.plan(ref_or_url)).compact()
 
+    async def draft(self, ref_or_url: str) -> dict[str, Any]:
+        return (await self.engine.draft(ref_or_url)).compact()
+
     async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None,
                      approval_id: str | None = None, approver: Any = None) -> dict[str, Any]:
         r = await self.engine.submit(ref_or_url, answers, approval_id, dry_run, approver)
