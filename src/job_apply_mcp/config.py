@@ -35,11 +35,11 @@ def _default_host_limits() -> dict[str, HostLimitCfg]:
     # Public job-board APIs built for embedding; modest, documented-friendly rates (ADR-0024).
     return {"boards-api.greenhouse.io": HostLimitCfg(per_host=16, min_interval_s=0.02),
             "api.ashbyhq.com": HostLimitCfg(per_host=8, min_interval_s=0.05),
-            "api.lever.co": HostLimitCfg(per_host=8, min_interval_s=0.05)}
+            "api.lever.co": HostLimitCfg(per_host=16, min_interval_s=0.05)}
 
 
 class ConcurrencyCfg(BaseModel):
-    global_limit: int = 32          # max concurrent outbound tasks (board fan-out)
+    global_limit: int = 48          # max concurrent outbound tasks (board fan-out); >= the per-host caps summed
     per_host: int = 4               # max concurrent requests per host
     min_interval_s: float = 0.25    # polite spacing per host
     hosts: dict[str, HostLimitCfg] = Field(default_factory=_default_host_limits)   # per-host overrides of the two knobs above
@@ -384,6 +384,7 @@ class PlatformsCfg(BaseModel):
     <api_key_env_prefix>_<PLATFORM>_<BOARD> (e.g. JOB_APPLY_KEY_GREENHOUSE_ACMECO)."""
     cache_ttl_s: int = 900                  # on-disk HTTP cache freshness; stale entries are revalidated by ETag
     cache_prune_days: int = 7               # cache files untouched for this long are deleted at startup
+    memo_boards: int = 4096                 # boards whose finished postings stay in memory between searches (ADR-0043)
     timeout_s: float = 20.0
     retries: int = 2                        # idempotent requests only; form submissions are never retried
     backoff_s: float = 0.5
@@ -456,6 +457,7 @@ class SearchCfg(BaseModel):
     location_order: list[str] = Field(default_factory=list)  # preferred location substrings, best first
     rank_candidates: int = 40            # description-fetch + full scoring for the top N by the cheap pre-score
     description_concurrency: int = 6     # bounded parallel description fetches (also capped by the host limiter)
+    board_timeout_s: float = 60.0        # one board's fetch+parse budget; a slower board is reported in errors (ADR-0043)
     min_score: float = 0.0               # drop rows scoring below this (0-100); 0 keeps everything with a query hit
     weights: dict[str, float] = Field(default_factory=lambda: {
         "query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency": 1.0})
