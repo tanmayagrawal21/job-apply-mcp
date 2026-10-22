@@ -4,7 +4,7 @@
 
 Settings load in this order, later wins: built-in defaults, the user file (`~/.config/job-apply-mcp/config.toml`, `%APPDATA%\job-apply-mcp\config.toml` on Windows, or `$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables `JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). Secrets (API keys, IMAP passwords) are only ever read from the environment.
 
-**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, raising `grants.*` caps, `grants.use_keyring=false`, `browser.captcha_handoff=false`, `browser.captcha_policy=attempt`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter than your user config (or the default where it is silent). Values are compared after type coercion, so `"false"` or `"0"` count the same as `false` / `0` (ADR-0037).
+**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, raising `grants.*` caps, `grants.use_keyring=false`, `browser.captcha_handoff=false`, `browser.captcha_policy=attempt`, `writing.review_client_prose=false`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter than your user config (or the default where it is silent). Values are compared after type coercion, so `"false"` or `"0"` count the same as `false` / `0` (ADR-0037).
 
 **Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and `apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default or setting `0` is honored only from the trusted user config; a project or env value can never raise your own user-config cap (same rule as the trust model above). `control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining.
 
@@ -235,6 +235,7 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `reviewer` | `str` | `"client"` | "client" = review is a client_task; "router" = task_class="review" |
 | `timeout_s` | `float` | `90.0` |  |
 | `mode` | `Literal['inline', 'deferred']` | `"inline"` |  |
+| `review_client_prose` | `bool` | `true` | agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044) |
 | `rules` | `list[str]` | `["Formal register; no contractions.", "Every factual claim must map to a provided profi...` |  |
 | `banned_phrases` | `list[str]` | `["excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "w...` |  |
 | `gap_patterns` | `list[str]` | `["\\bI have not\\b", "\\bI haven't\\b", "\\bI lack\\b", "\\bI would need to learn\\b", ...` |  |

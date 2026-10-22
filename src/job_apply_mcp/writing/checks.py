@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from datetime import date
 
-from ..profile.facts import _STATUS_NOW, _WORK_NOW
+from ..profile.facts import _STATUS_NOW, _WORK_NOW, check_letter_sentence
 from ..profile.resume import Fact, completed_education, is_past, norm
 
 Hit = tuple[str, str, str]
@@ -130,3 +130,16 @@ def leakage(text: str, exemplar: str, company: str = "") -> list[Hit]:
     low = text.lower()
     return [("leakage", f"exemplar-specific '{e}' appears in the draft", "")
             for e in exemplar_entities(exemplar) if e.lower() in low and not (company and _same_org(e, company))][:3]
+
+
+def fact_conflicts(text: str, resume: list[Fact], today: date) -> list[Hit]:
+    """Sentences that contradict the resume (title, date span, metric, status). The user-letter admission check
+    (ADR-0023) applied to prose the server did not write (ADR-0044)."""
+    if not resume:
+        return []
+    out: list[Hit] = []
+    for s in (x.strip() for x in _SENT.split(text) if x.strip()):
+        ex = check_letter_sentence(s, resume, today)
+        if ex:
+            out.append(("fact", ex.reason + (f"; resume: {ex.correction}" if ex.correction else ""), s))
+    return out[:3]

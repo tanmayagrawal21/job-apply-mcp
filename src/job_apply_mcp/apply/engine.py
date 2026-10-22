@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import time
@@ -48,7 +49,7 @@ from .mapper import (
 )
 from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
 from .salary import compute_ask, format_ask, is_salary_field
-from .writing import WriteProgress, load_exemplar, review_rubric, summarize_posting, write_text
+from .writing import WriteProgress, load_exemplar, review_rubric, review_text, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
 _SENSITIVE_KEYS = SEMANTIC_SENSITIVE | {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
@@ -152,6 +153,7 @@ class ApplyEngine:
         self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
         self.timings: dict[str, dict[str, int]] = {}
         self._exemplar: str | None = None
+        self._reviewed: set[str] = set()     # digests of (ref, key, text) client prose that passed review (ADR-0044)
 
     # ---------------------------------------------------------------- helpers
     def _default_driver(self, name: str) -> BrowserDriver:
@@ -654,6 +656,71 @@ class ApplyEngine:
         reasons = res.get("reasons") if isinstance(res, dict) else getattr(res, "reasons", None)
         return f"control: {v}" + (f" ({'; '.join(map(str, reasons))[:120]})" if reasons else "")
 
+    def _client_prose_review_on(self) -> bool:
+        """Agent mode (and auto-approve, which is agent-only): nobody but the client sees its prose before an
+        approval covers it, so it gets the writer path's review. Human mode: a human approves (ADR-0044)."""
+        return self.s.apply.approval_mode == "agent" and self.s.writing.review_client_prose
+
+    def _digest(self, ref: str, key: str, text: str) -> str:
+        return hashlib.sha256(f"{ref}\0{key}\0{text}".encode()).hexdigest()
+
+    async def _review_client_prose(self, ctx: _Ctx, eff: dict[str, Any],
+                                   base: dict[str, Any]) -> list[dict[str, Any]]:
+        """Review free-text answers the client supplied (not identical to a server-written/approved answer) under
+        writing.timeout_s. Returns needs_review client_tasks for every field that did not pass; [] when all pass.
+        Fails closed: a timeout or reviewer error is a failure (ADR-0044)."""
+        if not self._client_prose_review_on():
+            return []
+        ref = ctx.form.ref
+        fields = {f.key: f for f in ctx.form.fields}
+        todo = [(fields[k], v) for k, v in eff.items()
+                if k in fields and isinstance(v, str) and v.strip() and base.get(k) != v
+                and self._is_prose_question(fields[k]) and self._digest(ref, k, v) not in self._reviewed]
+        if not todo:
+            return []
+        w = self.s.writing
+        if self._exemplar is None:
+            self._exemplar = load_exemplar(w.style_exemplar)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + w.timeout_s if w.timeout_s and w.timeout_s > 0 else None
+        resume = getattr(self.profile, "resume_facts", None)
+        corpus = getattr(self.profile, "corpus", None)
+
+        async def one(f: FormField, text: str):
+            coro = review_text(
+                self.router, w, text, kind="cover_letter" if "cover" in normalize(f.label) else "free_text",
+                label=f.label, company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
+                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
+                resume=resume, corpus=corpus)
+            if deadline is None:
+                return await coro
+            async with asyncio.timeout_at(deadline):
+                return await coro
+
+        with self._llm_timings(ref), self._stage(ref, "review_client"):
+            results = await bounded_gather((one(f, v) for f, v in todo), self.s.concurrency.global_limit)
+        failed: list[dict[str, Any]] = []
+        for (f, text), res in zip(todo, results, strict=True):
+            if isinstance(res, TimeoutError):
+                why, card, rubric = [f"[timeout] review exceeded writing.timeout_s={w.timeout_s:g}s (fail closed)"], {}, ""
+            elif isinstance(res, BaseException):
+                why, card, rubric = [f"[error] reviewer failed: {type(res).__name__} (fail closed)"], {}, ""
+            elif res.status == "pass":
+                self._reviewed.add(self._digest(ref, f.key, text))
+                continue
+            else:
+                why, card, rubric = [v.line() for v in res.violations][:6], res.scorecard, res.rubric
+            extra: dict[str, Any] = {"needs_review": True, "draft": text, "violations": why}
+            if rubric:
+                extra["review"] = rubric
+            if card:
+                extra["scorecard"] = card
+            failed.append(self._task(f, ctx, extra))
+        if failed:
+            self.approvals.audit("client_prose_rejected", ref=ref, actor="review",
+                                 detail=",".join(t["key"] for t in failed)[:200])
+        return failed
+
     async def submit(self, ref: str, answers: dict[str, Any] | None = None, approval_id: str | None = None,
                      dry_run: bool | None = None, approver: Approver | None = None) -> SubmitResult:
         try:
@@ -682,14 +749,22 @@ class ApplyEngine:
                         return SubmitResult(ref=ref, status="error",
                                             detail=f"answer '{k}' differs from the approved plan; re-plan")
                 eff = {**cached.answers, **supplied}
+                base = cached.answers
             elif dry or self.s.apply.auto_approve_active:
                 plan = await self._plan_ctx(ref, ctx)
                 if plan.plan.gate.decision != Decision.submit:
                     return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
                                         else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
-                eff = {**{a.key: a.value for a in plan.plan.answers}, **supplied}
+                base = {a.key: a.value for a in plan.plan.answers}
+                eff = {**base, **supplied}
             else:
                 eff = supplied                      # stateless: must hash-match the server-held record
+                rec, _ = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
+                base = eff if rec is not None and self.approvals.matches(rec, eff, self._split(ctx.form, eff)[1]) else {}
+            failed = await self._review_client_prose(ctx, eff, base)
+            if failed:
+                return SubmitResult(ref=ref, status="needs_review", client_tasks=failed,
+                                    detail=f"client prose failed review: {[t['key'] for t in failed][:8]}")
             hits = self._stop_hits(ctx.form)
             if hits:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
