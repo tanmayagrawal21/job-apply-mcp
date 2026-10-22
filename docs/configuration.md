@@ -163,6 +163,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `plan_workers` | `int` | `4` | concurrent planners; separate from browser_workers (pipelining) |
 | `write_optional` | `bool` | `false` | also write optional long free-text fields (default: skip them) |
 | `option_min_score` | `float` | `0.78` | fuzzy option snap threshold; below it the field stays unresolved |
+| `top_languages` | `int` | `3` | "select the languages you are most proficient in": at most this many (ADR-0030) |
 | `referral_preference` | `list[str]` | `["Job board", "Other job board", "Other", "LinkedIn"]` |  |
 
 ## `[browser]`

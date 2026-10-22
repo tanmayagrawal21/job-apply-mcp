@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.models import Answer, FieldKind, FormField
+from .derive import pick_languages, whole_years, years_option
 from .ports import ProfileLike
 
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
@@ -29,6 +30,17 @@ def normalize(label: str) -> str:
 
 # canonical profile key -> normalized-label patterns (searched as whole-phrase regexes, first match wins)
 ALIASES: list[tuple[str, tuple[str, ...]]] = [
+    # ADR-0030 semantic keys first: "require relocation support" is NOT "willing to relocate"
+    ("relocation_support", (r"relocation (support|assistance|package|bonus|help|benefits?|allowance)",
+                            r"\b(require|need)\b.*\brelocation\b")),
+    ("knows_employee", (r"\bknow (anyone|someone|any ?one|a current|an? (employee|person|member))",
+                        r"\b(were|are|was) you referred\b", r"referred by (an? |a current )?(employee|team)",
+                        r"\bany ?one\b.*\b(works?|working) (at|for|here)\b")),
+    ("years_experience", (r"\b(years?|yrs?)\b.*\bexperience\b", r"\bexperience\b.*\b(years?|yrs?)\b",
+                          r"\bhow many (total )?(years|yrs)\b")),
+    ("languages_known", (r"\blanguages?\b.*\b(proficient|production|programming|coding|comfortable|strongest|primary|expert)",
+                        r"\b(proficient|programming|coding)\b.*\blanguages\b")),
+    ("us_citizen", (r"\b(u s|us|usa|united states|american) citizen",)),
     ("first_name", (r"^(legal )?first name$", r"^given name$")),
     ("last_name", (r"^(legal )?(last|family) name$", r"^surname$")),
     ("full_name", (r"^(full |legal )?name$",)),
@@ -42,9 +54,12 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("country", (r"^country( of residence)?$",)),
     ("current_company", (r"^current (company|employer)$",)),
     ("current_title", (r"^current (job )?title$",)),
-    ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization")),
+    ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization",
+                         r"authori[sz]ation to work", r"(permitted|allowed) to work", r"right to work")),
     ("requires_sponsorship", (r"sponsorship", r"require.* visa")),
     ("willing_to_relocate", (r"relocat",)),
+    ("open_to_hybrid", (r"\bhybrid\b",)),
+    ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",)),
     ("located_in_us", (r"(located|based|reside|live|residing)\b.*\b(in|within) the (us|u s|usa|united states)\b",)),
     ("start_date", (r"(earliest )?start date", r"available to start", r"notice period")),
     ("salary_expectation", (r"salary expectation", r"expected (salary|compensation)", r"desired (salary|compensation)")),
@@ -59,7 +74,8 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("school", (r"^school( name)?$", r"^university$", r"^college$")),
     ("degree", (r"^degree$",)),
     ("discipline", (r"^(discipline|major|field of study)$",)),
-    ("graduation", (r"graduat",)),
+    ("graduation", (r"graduat", r"\byear\b.*\b(complete|completed|finish|earn|earned|receive|received|obtain)\b.*\bdegree",
+                    r"\bdegree\b.*\b(completion|year)\b")),
     ("zip", (r"^(zip|postal)( code)?$",)),
     ("over_18", (r"18 years|at least 18|legal age",)),
     ("privacy_ack", (r"privacy (policy|notice)", r"acknowledge",)),
@@ -312,6 +328,160 @@ def _coerce(f: FormField, value: Any, cutoff: float = 0.78) -> Any | None:
     return None
 
 
+
+# ---- semantic answers (ADR-0030) ------------------------------------------------------------------
+_YESNO_STYLE = re.compile(r"^(are|do|does|did|will|would|can|could|is|have|has|if|were)\b|"
+                          r"\b(open|willing|able|comfortable|commit|ready)\b")
+_SPONS_NEG = re.compile(r"without\b.*\b(sponsor|visa)|\bnot (?:now or in the future )?(?:require|need)\b.*\b(sponsor|visa)|"
+                        r"\bno\b.*\b(sponsor|visa)|\b(sponsor|visa)\w*\b.* not (?:required|needed)")
+_AUTH_WORDS = re.compile(r"authori[sz]|eligible to work|permitted to work|allowed to work|right to work|legally")
+_AUTH_NEG = re.compile(r"\bunauthori[sz]ed\b|\bunable to work\b|\bineligible\b|"
+                       r"\bnot (?:legally )?(?:authori[sz]ed|eligible|permitted|allowed)\b")
+_SPOKEN = re.compile(r"speak|spoken|fluen|english|native|written|verbal|translat", re.IGNORECASE)
+_SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relocation_support", "open_to_hybrid",
+                  "open_to_onsite", "knows_employee", "years_experience", "languages_known"}
+# Never sent to the local LLM: a guess is a false statement about the candidate.
+SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"}
+_TOTAL_GENERIC = frozenset(
+    ["how", "many", "total", "years", "yrs", "year", "of", "experience", "professional", "software", "engineering", "engineer", "work", "working", "relevant", "practical", "career", "industry", "overall", "do", "you", "have", "at", "least", "a", "an", "the", "your", "please", "input", "enter", "number", "in", "that", "are", "to", "this", "role", "position", "related", "full", "time", "hands", "on", "is", "what", "minimum", "prior", "paid", "commercial", "real", "world", "combined", "cumulative", "amount", "can", "say", "for", "with", "or", "and", "i", "am", "if", "any", "has", "s", "plus", "more", "field"]
+)
+
+
+def _truth(v: Any) -> bool | None:
+    if isinstance(v, bool):
+        return v
+    t = tokens(str(v))[:1]
+    return True if t == ["yes"] else False if t == ["no"] else None
+
+
+def _yn(b: bool | None) -> str | None:
+    return None if b is None else "Yes" if b else "No"
+
+
+def _yes_no_options(options: list[str]) -> bool:
+    return any(tokens(o)[:1] in (["yes"], ["no"]) for o in options)
+
+
+def pick_auth_option(options: list[str], authorized: bool | None, sponsorship: bool | None,
+                     citizen: bool | None) -> str | None:
+    """Non yes/no authorization choices ("authorization to work in the country where you live"): the one option
+    consistent with the profile facts, else None. Citizen/permanent-resident options need citizen=True."""
+    if authorized is not True:
+        return None
+    pool = []
+    for o in options:
+        lo = o.lower()
+        if re.search(r"citizen|national\b|permanent resident|green card|settled|indefinite", lo) and citizen is not True:
+            continue
+        if re.search(r"\b(not|no|don't|do not)\b.{0,25}\b(right|authori[sz]ed|permit|permission|eligible|entitled)\b|unauthori[sz]ed", lo):
+            continue
+        pool.append(o)
+    if sponsorship is True:
+        pool = [o for o in pool if re.search(r"sponsor|visa|permit|permission|require|work authori[sz]ation", o.lower())
+                and not re.search(r"without\b.*sponsor|not require|no sponsor", o.lower())]
+        if len(pool) > 1:
+            pool = [o for o in pool if re.search(r"sponsor", o.lower()) and re.search(r"authori[sz]|right|eligible|permit|permission", o.lower())] or pool
+    elif sponsorship is False:
+        pool = [o for o in pool if re.search(r"authori[sz]|right to work|eligible|permit|permission", o.lower())
+                and (not re.search(r"sponsor|visa|require", o.lower())
+                     or re.search(r"without\b.*sponsor|not require", o.lower()))]
+    else:
+        return None
+    return pool[0] if len(pool) == 1 else None
+
+
+def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any]:
+    n = normalize(f.label)
+    auth, req = _truth(profile.lookup("work_authorized")), _truth(profile.lookup("requires_sponsorship"))
+    cit = _truth(profile.lookup("us_citizen"))
+    ma, ms = _AUTH_WORDS.search(n), re.search(r"sponsor|\bvisa\b", n)
+    has_auth, has_sp = bool(ma), bool(ms)
+    if ma and ms and ms.start() < ma.start():    # "require sponsorship ... for work authorization": a sponsorship question
+        has_auth = False
+    if f.options and not _yes_no_options(f.options):
+        if has_auth:
+            return True, pick_auth_option(f.options, auth, req, cit)
+        return False, None
+    if has_auth and has_sp:                  # compound: only the explicit "authorized ... without sponsorship" form
+        if _SPONS_NEG.search(n) and auth is not None and req is not None:
+            return True, _yn(auth and not req)
+        return True, None
+    if ck == "requires_sponsorship" or (has_sp and not has_auth):
+        if req is None:
+            return False, None
+        return True, _yn(not req if _SPONS_NEG.search(n) else req)
+    if auth is None:
+        return False, None
+    return True, _yn(not auth if _AUTH_NEG.search(n) else auth)
+
+
+def _tech_years(label: str, skills: dict[str, float]) -> float | None:
+    low = label.lower()
+    hits = [y for name, y in skills.items()
+            if re.search(rf"(?<![\w+#.]){re.escape(name)}(?![\w+#]|\.\w)", low)]
+    return max(hits) if hits else None
+
+
+def _years_answer(f: FormField, profile: ProfileLike) -> Any | None:
+    """Total years from the experience entries, or per-technology years only when the profile states them.
+    "At least N years" -> Yes/No by comparison. Never rounded up, never guessed."""
+    n = normalize(f.label)
+    tech = _tech_years(f.label, profile.lookup("skill_years") or {})
+    if tech is not None:
+        years = tech
+    elif not (set(tokens(n)) - _TOTAL_GENERIC - {w for w in tokens(n) if w.isdigit()}):
+        raw = profile.lookup("years_experience")
+        years = float(raw) if raw not in (None, "") else None
+    else:
+        return None
+    if years is None:
+        return None
+    m = re.search(r"\b(\d+)\s*\+?\s*(?:or more\s+)?(?:years?|yrs?)\b", n)
+    if m and _YESNO_STYLE.search(n):
+        return "Yes" if years >= int(m.group(1)) else "No"
+    if f.options:
+        return years_option(years, f.options)
+    if f.kind in (FieldKind.number, FieldKind.text, FieldKind.unknown):
+        return str(whole_years(years))
+    return None
+
+
+def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int) -> tuple[bool, Any]:
+    """(handled, value). handled=False -> continue with the generic profile lookup."""
+    n = normalize(f.label)
+    if ck == "us_citizen":
+        if _AUTH_WORDS.search(n):
+            return _auth_answer(f, "work_authorized", profile)
+        if re.search(r"permanent resident|green card|national\b", n):
+            return True, None
+        v = profile.lookup("us_citizen")
+        return (False, None) if v is None else (True, v)
+    if ck in ("work_authorized", "requires_sponsorship"):
+        return _auth_answer(f, ck, profile)
+    if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite"):
+        if not _YESNO_STYLE.search(n):
+            return True, None
+        v = profile.lookup(ck)
+        return (False, None) if v is None else (True, v)
+    if ck == "knows_employee":
+        if not company:
+            return True, None
+        who = profile.lookup("referral:" + normalize(company))
+        if who in (None, ""):
+            return True, "No"
+        return True, ("Yes" if f.options or f.kind == FieldKind.boolean else str(who))
+    if ck == "years_experience":
+        return True, _years_answer(f, profile)
+    if ck == "languages_known":
+        if _SPOKEN.search(f.label) or not f.options:
+            return True, None
+        got = pick_languages(list(profile.lookup("languages") or []), f.options, top_languages)
+        if not got:
+            return True, None
+        return True, got if f.kind == FieldKind.multiselect else got[0]
+    return False, None
+
+
 @dataclass
 class MapResult:
     answers: list[Answer] = field(default_factory=list)
@@ -320,7 +490,7 @@ class MapResult:
 
 
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
-               min_score: float = 0.78) -> MapResult:
+               min_score: float = 0.78, company: str = "", top_languages: int = 3) -> MapResult:
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
     res = MapResult()
 
@@ -367,6 +537,24 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         if ck == "referral_source" and f.options:
             ok(f, pick_source(profile.lookup("referral_source"), f.options, pref), "rule:referral_source")
             continue
+        if ck in _SEMANTIC_KEYS:
+            handled, sv = _semantic(f, ck, profile, company, top_languages)
+            if handled:
+                if sv is None or sv == "":
+                    res.unresolved.append(f)
+                    continue
+                if f.kind == FieldKind.multiselect and isinstance(sv, list):
+                    res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
+                    continue
+                if ck in ("years_experience", "languages_known") and f.options and sv in f.options:
+                    res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
+                    continue
+                c = _coerce(f, sv, min_score)
+                if c is None or c == "":
+                    res.unresolved.append(f)
+                else:
+                    res.answers.append(Answer(key=f.key, value=c, source=f"rule:{ck}"))
+                continue
         value: Any | None = profile.lookup(ck) if ck else None
         if value is None:
             value = profile.lookup(normalize(f.label))
