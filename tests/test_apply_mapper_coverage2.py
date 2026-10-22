@@ -110,7 +110,7 @@ AUTH = ["I am authorized to work in the country due to my nationality",
         "I am authorized to work in the country based on a valid work permit and do not need a company to sponsor my visa",
         "I am authorized to work in the country based on a valid work permit which needs to be sponsored by the company I work for",
         "I am not authorized to work in the country and need visa support", "Other"]
-AUTH_LABEL = "Your authorization to work in the country where you live. Please choose the option that describes your work authorization.\n"
+AUTH_LABEL = "Your authorization to work in the United States. Please choose the option that describes your work authorization.\n"
 
 
 def test_authorization_needing_sponsorship_picks_the_sponsored_permit_option():

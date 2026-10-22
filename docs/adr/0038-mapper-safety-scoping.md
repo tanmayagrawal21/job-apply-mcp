@@ -11,28 +11,32 @@ An independent review found three wrong-answer paths in `apply/mapper.py`:
    from US-only facts.
 
 ## Decision
-- **Privacy-ack after classification.** `map_fields` computes `canonical_key` first; the ack path runs only when the key
-  is `None` or `privacy_ack`. `is_privacy_notice` also rejects any label for which `is_sensitive_question` is true:
-  any alias of a `SEMANTIC_SENSITIVE`, demographic, over-18, located-in-US or salary key anywhere in the label
-  (alias order ignored), `_DEMOGRAPHIC_LABEL`, or `_SENSITIVE_TOPIC` (sponsorship, visa, citizenship, authorization,
-  EEO, veteran, disability, gender, race, salary, employment history ...). A label first matched as `privacy_ack`
-  but sensitive is reclassified with `privacy_ack` skipped, so "Gender (see our Privacy Notice)" takes the
-  demographic path. The chosen option must itself be an acknowledgement (`is_ack_option`: acknowledge/agree/accept/
-  confirm/understand/read, or a bare "Yes"), and is never a sensitive option ("Yes, I am a protected veteran").
-- **Prior employee = this company only.** `about_this_company(label, company)` is true only when the label names the
-  posting company (alias-tolerant `_co_key`, or its distinctive leading word) or says "this company"/"us"/"here", and
-  names no government, agency, military, competitor, non-compete/non-solicit, client/vendor or other employer.
-  Otherwise the field is answered only from the user's own `[answers]` entry for that question, else unresolved.
-- **Authorization is US-scoped.** `question_countries(label)` detects the US and a list of non-US countries/regions
-  (UK, Canada, EU, ...). Structured `[authorization]` facts describe the US and answer only US or unspecified
-  questions. A question naming one non-US country is answered only from an `[answers]` pattern that itself names that
-  country (`ProfileView.lookup("country_answer:<country>:<question>")`); two or more countries ("US or Canada") stay
-  unresolved.
+All three rules are **deny-by-default allow-lists**. A first version used topic/country blocklists; a control review
+showed they leaked (H-1B/OPT/TN, VEVRAA, race and religion wording; parent/subsidiary/auditor questions; cities and
+unlisted countries), so blocklists are not used to decide that an answer is safe.
+
+- **Privacy-ack.** `map_fields` computes the canonical key first; the opt-in ack path runs only for `None`/`privacy_ack`
+  keys. `is_privacy_notice` then requires a privacy phrase and that every word of the label is in `_ACK_VOCAB`
+  (privacy/notice/policy, acknowledge/read/understand/agree/confirm, applicant/candidate/data/processing, and
+  stopwords). Any other content word ("VEVRAA", "Asian", "religion", "ITAR", "sponsorship") leaves it unresolved.
+  The chosen option must match the acknowledgement pattern and also consist only of `_ACK_VOCAB` words.
+  Sensitive labels first matched as `privacy_ack` are reclassified (`is_sensitive_question`) so, for example, a gender
+  question takes the demographic path; that reclassification is routing only, never a reason to answer.
+- **Prior employee.** `about_this_company(label, company, aliases)` removes the posting company name (alias-tolerant
+  `_co_key`, its distinctive leading word, or a `dedupe.company_aliases` name for the same employer, passed by the
+  engine) or "this company"/"us"; it must have found one, and every remaining word must be in `_EMPLOY_VOCAB`
+  (have/ever/previously/worked/employed/employee/current/former/intern ...). Parent, subsidiary, affiliate, auditor,
+  joint venture, contractor, "or any of its ...", a place or any other entity -> only the user's own `[answers]` entry
+  for that question, else unresolved.
+- **Authorization.** `auth_place_ok` requires every word of the label to be in `_AUTH_VOCAB` (authorization,
+  sponsorship and visa wording, visa types, stopwords, and US/U.S./USA/United States/America). Any other word, so any
+  city, region, country, "here" or "the country where ...", leaves it unresolved. A label naming exactly one listed
+  non-US country (and not the US) is answered only from an `[answers]` pattern naming that country.
 
 ## Consequences
-Fewer automatic answers: government/competitor and non-US authorization questions now reach the owner unless an
-explicit answer exists. Privacy notices that mention a sensitive topic (for example "protected", "salary") are no
-longer auto-acknowledged. The country list is finite; an unlisted country is treated as unspecified.
+Fewer automatic answers. Unusual but harmless wording ("Your authorization to work in the country where you live") now
+reaches the owner, and the vocabularies may need occasional additions; each addition must be generic, non-place,
+non-topic wording. Wrong answers are replaced by unresolved fields, never the reverse.
 
 ## Verify / revert
 `uv run pytest tests/test_mapper_safety.py tests/test_privacy_ack.py tests/test_apply_mapper_coverage2.py`.

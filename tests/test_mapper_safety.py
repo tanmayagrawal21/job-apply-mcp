@@ -39,9 +39,9 @@ HISPANIC = ["Yes", "No", "Decline to self-identify"]
 def test_sponsorship_question_mentioning_privacy_notice_is_a_sponsorship_question():
     label = ("Will you now or in the future require visa sponsorship? "
              "(See our Applicant Privacy Notice for how we use this data)")
-    ans, _ = run(sel(label))
-    assert ans == ("No", "rule:requires_sponsorship")
+    assert run(sel(label)) == (None, ["q"])          # extra wording -> never the ack path, never a guessed answer
     assert privacy_ack_value(sel(label)) is None
+    assert run(sel("Will you now or in the future require visa sponsorship?"))[0] == ("No", "rule:requires_sponsorship")
     # unknown sponsorship fact: unresolved, never "Yes" from the ack path
     assert run(sel(label), prof(requires_sponsorship=None)) == (None, ["q"])
 
@@ -143,3 +143,112 @@ def test_question_countries():
     assert question_countries("Right to work in the U.K.?") == (False, ["united kingdom"])
     assert question_countries("Authorized to work in the USA?") == (True, [])
     assert question_countries("Are you based in Indiana?") == (False, [])
+
+
+# ---------------------------------------------------------------- control-agent leaks (deny-by-default, ADR-0038)
+ACK_OPTS = [YN, ["I acknowledge", "I do not acknowledge"]]
+ACK_LEAKS = [
+    "Privacy notice / H-1B status", "Privacy notice - OPT / CPT / STEM extension",
+    "Privacy notice: will you need TN status",
+    "Privacy notice - Are you legally able to work in the US without restriction?",
+    "Privacy notice - Can you work in the US for any employer?",
+    "Applicant privacy notice: are you a US person under export control (ITAR)?",
+    "Privacy notice: VEVRAA", "Data privacy notice: Have you served in the armed forces?",
+    "Privacy Notice - Do you identify as Black or African American?", "Privacy Notice - Are you Asian?",
+    "Privacy notice - two or more races", "Privacy notice: Are you Spanish origin?",
+    "I have read the privacy notice and I identify as a woman", "Privacy Notice - LGBTQ+",
+    "Privacy notice - national origin", "Privacy notice: religion", "Privacy notice: marital status",
+    "Privacy notice: date of birth", "Privacy notice: security clearance",
+    # adversarial paraphrases
+    "Privacy Notice (Pacific Islander)", "Applicant Privacy Notice - native language", "Privacy policy: pregnant?",
+    "I acknowledge the privacy policy. Do you hold an active clearance?", "Privacy notice — union membership",
+    "Data processing notice: Are you over 40?", "Privacy notice: I identify as non-binary",
+    "Privacy Notice: Yes, I am a person with a disability", "Candidate privacy notice: F-1 student",
+    "Privacy notice: Are you a protected individual?", "Privacy notice: country of birth",
+]
+
+
+@pytest.mark.parametrize("label", ACK_LEAKS)
+@pytest.mark.parametrize("options", ACK_OPTS)
+def test_privacy_ack_leaks_are_closed(label, options):
+    ans, _ = run(sel(label, options))
+    assert ans is None or ans[1] != "rule:privacy_ack", ans
+    assert privacy_ack_value(sel(label, options)) is None
+    assert privacy_ack_value(F("q", label, FieldKind.boolean)) is None
+
+
+@pytest.mark.parametrize("label", ["Applicant Privacy Acknowledgement", "Privacy Notice",
+                                   "I acknowledge that I have read and understand the Applicant Privacy Notice",
+                                   "Please confirm you have reviewed our Candidate Data Processing Notice"])
+def test_plain_privacy_notices_still_acknowledged(label):
+    assert run(sel(label, ["I acknowledge", "I do not acknowledge"]))[0] == ("I acknowledge", "rule:privacy_ack")
+
+
+def test_ack_option_must_be_plain_acknowledgement_wording():
+    assert run(sel("Privacy Notice", ["Yes, I acknowledge and I am Asian", "No"])) == (None, ["q"])
+    assert run(sel("Privacy Notice", ["I acknowledge (US person)", "No"])) == (None, ["q"])
+
+
+@pytest.mark.parametrize("label", [
+    "Have you ever worked for Acme's parent company?", "Have you ever worked for a subsidiary of Acme Robotics?",
+    "Have you ever worked for Acme Robotics' auditor (Deloitte)?", "Have you ever worked for an affiliate of ours?",
+    "Are you a former employee of Acme Robotics' joint venture partner Wayne Enterprises?",
+    "Have you ever worked for a company here in Springfield?",
+    "Have you ever worked for Acme Robotics or any of its subsidiaries?",
+    "Have you previously worked for Acme Robotics as a contractor or consultant?",
+    "Have you ever worked for Acme Robotics or a staffing agency placed there?",
+    "Were you previously employed by Acme Robotics' predecessor?",
+    "Have you ever worked for a company acquired by Acme Robotics?",
+    "Have you previously worked for the Acme Robotics Foundation?",
+])
+def test_prior_employee_other_relationships_unresolved(label):
+    assert not about_this_company(label, "Acme Robotics")
+    assert run(sel(label)) == (None, ["q"])
+
+
+def test_prior_employee_configured_alias():
+    assert about_this_company("Have you ever worked for Roadrunner Labs?", "Acme Robotics", ["Roadrunner Labs"])
+    assert not about_this_company("Have you ever worked for Roadrunner Labs?", "Acme Robotics")
+
+
+@pytest.mark.parametrize("label", [
+    "Are you legally authorized to work in London?", "Are you authorized to work in Toronto?",
+    "Do you have the right to work in Berlin?", "Are you eligible to work in Bangalore?",
+    "Are you authorized to work in Dubai?", "Are you legally authorized to work in Saudi Arabia?",
+    "Are you authorized to work in Qatar?", "Are you eligible to work in Sri Lanka?",
+    "Do you have the right to work in Bulgaria?", "Are you authorized to work in Croatia?",
+    "Are you authorized to work in Lithuania?", "Are you authorized to work in Latvia?",
+    "Are you authorized to work in Slovakia?", "Are you authorized to work in Morocco?",
+    "Are you authorized to work in Ghana?", "Are you authorized to work in Bangladesh?",
+    "Are you authorized to work in Uruguay?", "Are you authorized to work in Iceland?",
+    "Are you authorized to work in Slovenia?", "Are you authorized to work in Serbia?",
+    "Are you authorized to work in Cyprus?", "Are you authorized to work in Malta?",
+    "Are you authorized to work in Nepal?", "Are you authorized to work in Ecuador?",
+    "Are you authorized to work in Venezuela?", "Are you authorized to work in Guatemala?",
+    "Are you authorized to work in Panama?", "Are you authorized to work in Jamaica?",
+    "Do you require a visa to work in Ontario?", "Do you require a visa to work in the country where this role is based?",
+    "Are you authorized to work in the country where this job is located?", "Are you authorized to work in Quebec?",
+    "Are you authorized to work in the EMEA region?", "Are you authorized to work in New South Wales?",
+    "Will you require sponsorship to work in our Springfield office?", "Are you authorized to work in Puerto Rico?",
+    "Are you authorized to work in the US and the Philippines?", "Are you authorized to work here?",
+    "Are you authorized to work locally?", "Are you eligible to work in this jurisdiction?",
+])
+def test_authorization_any_non_us_place_unresolved(label):
+    assert run(sel(label)) == (None, ["q"])
+    assert run(sel(label), prof(requires_sponsorship=True)) == (None, ["q"])
+
+
+@pytest.mark.parametrize("label,want", [("Are you legally authorized to work in America?", "Yes"),
+                                        ("Are you authorized to work in the USA for any employer?", "Yes"),
+                                        ("Will you now or in the future require H-1B sponsorship?", "No")])
+def test_authorization_us_wording_still_answered(label, want):
+    assert run(sel(label))[0][0] == want
+
+
+def test_engine_passes_configured_company_aliases():
+    from types import SimpleNamespace
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    s = Settings()
+    s.dedupe.company_aliases = {"Roadrunner Labs": "Acme Robotics", "Globex": "Initech"}
+    assert ApplyEngine._company_aliases(SimpleNamespace(s=s), "Acme Robotics Inc") == ["Roadrunner Labs"]
