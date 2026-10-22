@@ -214,6 +214,19 @@ class IngestCfg(BaseModel):
     imap: ImapCfg = Field(default_factory=ImapCfg)
 
 
+GRANT_MAX_DURATION_S = 12 * 3600
+GRANT_MAX_OTP_WINDOW_MIN = 15
+
+
+class GrantsCfg(BaseModel):
+    """Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only from the user config."""
+
+    max_duration_s: int = GRANT_MAX_DURATION_S    # longest grant `job-apply-mcp grant --for` will issue
+    max_uses_cap: int = 1000                      # upper bound for --max-uses
+    otp_window_min: int = 10                      # otp_assist reads only a message newer than this
+    use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available
+
+
 class PathsCfg(BaseModel):
     data_dir: str = Field(default_factory=paths.default_data_dir_str)
     profile: str = Field(default_factory=lambda: paths.default_config_dir_str() + "/profile.toml")
@@ -449,6 +462,7 @@ class Settings(BaseModel):
     control: ControlCfg = Field(default_factory=ControlCfg)
     tune: TuneCfg = Field(default_factory=TuneCfg)
     ingest: IngestCfg = Field(default_factory=IngestCfg)
+    grants: GrantsCfg = Field(default_factory=GrantsCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this
@@ -495,6 +509,9 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     (None, "dry_run"): lambda v: v is False,
     ("control", "apply_enabled"): lambda v: v is True,
     ("control", "dev_mode"): lambda v: v is False,
+    ("grants", "max_duration_s"): lambda v: isinstance(v, (int, float)) and v > GRANT_MAX_DURATION_S,
+    ("grants", "max_uses_cap"): lambda v: isinstance(v, (int, float)) and v > 1000,
+    ("grants", "otp_window_min"): lambda v: isinstance(v, (int, float)) and v > GRANT_MAX_OTP_WINDOW_MIN,
 }
 
 
