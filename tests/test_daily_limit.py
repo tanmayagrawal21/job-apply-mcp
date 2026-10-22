@@ -130,7 +130,7 @@ def _rules(tmp_path, body, name="rules.toml"):
 def test_rules_file_from_project_or_env_cannot_loosen_quota(tmp_path, monkeypatch, caplog):
     rf = _rules(tmp_path, "[params.quota]\nper_day = 0\nper_run = 50\nper_platform_per_day = 3\n")
     with caplog.at_level("WARNING"):
-        s = _cfg(tmp_path, monkeypatch, proj=f'[control]\nrules_file = "{rf}"\n')
+        s = _cfg(tmp_path, monkeypatch, proj=f'[control]\nrules_file = {json.dumps(rf)}\n')
         a = ControlAgent(s)
     lim = a.daily_limit_status()["limit"]
     assert lim == {"day": 25, "platform": 3, "run": 10}          # 0 and 50 dropped, 3 tightens
@@ -141,8 +141,8 @@ def test_rules_file_from_project_or_env_cannot_loosen_quota(tmp_path, monkeypatc
 
 def test_rules_file_named_by_trusted_user_config_may_loosen(tmp_path, monkeypatch):
     rf = _rules(tmp_path, "[params.quota]\nper_day = 0\nper_run = 50\n")
-    s = _cfg(tmp_path, monkeypatch, user=f'[control]\nrules_file = "{rf}"\n')
+    s = _cfg(tmp_path, monkeypatch, user=f'[control]\nrules_file = {json.dumps(rf)}\n')
     assert ControlAgent(s).daily_limit_status()["limit"] == {"day": None, "platform": 10, "run": 50}
-    s = _cfg(tmp_path, monkeypatch, user=f'[control]\nrules_file = "{rf}"\n',
-             proj=f'[control]\nrules_file = "{_rules(tmp_path, "[params.quota]" + chr(10) + "per_day = 0", "other.toml")}"\n')
+    s = _cfg(tmp_path, monkeypatch, user=f'[control]\nrules_file = {json.dumps(rf)}\n',
+             proj=f'[control]\nrules_file = {json.dumps(_rules(tmp_path, "[params.quota]" + chr(10) + "per_day = 0", "other.toml"))}\n')
     assert ControlAgent(s).daily_limit_status()["limit"]["day"] == 25   # project swapped the file: untrusted
