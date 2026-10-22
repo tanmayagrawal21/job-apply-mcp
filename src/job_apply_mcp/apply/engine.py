@@ -31,15 +31,41 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
-from .mapper import best_option, canonical_key, map_fields, normalize
+from .mapper import (
+    best_option,
+    canonical_key,
+    geo_kind,
+    looks_fabricated,
+    map_fields,
+    normalize,
+    polarity,
+    tokens,
+)
 from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
 from .writing import load_exemplar, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
 _SENSITIVE_KEYS = {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
-                   "disability", "over_18", "privacy_ack", "salary_expectation", "start_date"}
+                   "disability", "over_18", "privacy_ack", "salary_expectation", "start_date", "graduation",
+                   "pronouns", "sexual_orientation"}
 _SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|clearance|citizen|"
-                              r"agree|certify|attest|signature|ssn|social security", re.IGNORECASE)
+                              r"agree|certify|attest|signature|ssn|social security|graduat|\bdate\b|semester|\bterm\b|"
+                              r"quarter|pronoun|gender|ethnic|\brace\b|veteran|disabilit", re.IGNORECASE)
+# Attestations and AI-use questions: answered only from an explicit profile [answers] pattern, else a human.
+_HUMAN_LABEL = re.compile(
+    r"\bai\b|artificial intelligence|\bllms?\b|chatgpt|copilot|generative|certif|attest|foreign talent|"
+    r"own work|by selecting|i agree|i acknowledge|i declare|under penalty|true and (?:correct|accurate)|"
+    r"truthful|export control|conflict of interest", re.IGNORECASE)
+# Never fabricated: contact/link values exist only in the profile.
+_NO_FABRICATE_LABEL = re.compile(r"\burl\b|link|website|web site|e-?mail|phone|mobile|telephone|username|"
+                                 r"user name|handle|linkedin|github|twitter|portfolio|\bprofile\b|address",
+                                 re.IGNORECASE)
+_EXPERIENCE_LABEL = re.compile(r"experience|proficien|familiar|skilled|knowledge of|expertise|comfortable with|"
+                               r"do you (?:know|use|have)|years", re.IGNORECASE)
+_GENERIC = {"experience", "years", "year", "have", "you", "with", "any", "work", "working", "professional",
+            "using", "use", "that", "this", "about", "what", "how", "many", "much", "the", "and", "your",
+            "prior", "previous", "relevant", "hands", "knowledge", "familiar", "proficient", "proficiency",
+            "skills", "skill", "level", "are", "does", "than", "more", "least", "following", "please"}
 
 
 class PlanOut(BaseModel):
@@ -187,7 +213,8 @@ class ApplyEngine:
         if gate.decision != Decision.submit:
             return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
         with self._stage(ref, "map"):  # deterministic first
-            mapped = map_fields(ctx.form.fields, self.profile)
+            mapped = map_fields(ctx.form.fields, self.profile, referral_preference=self.s.apply.referral_preference,
+                                min_score=self.s.apply.option_min_score)
         answers = list(mapped.answers)
         short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in mapped.unresolved if f not in short]
@@ -230,7 +257,8 @@ class ApplyEngine:
     @staticmethod
     def _llm_allowed(f: FormField) -> bool:
         return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label)
-                    or f.kind == FieldKind.file)
+                    or _HUMAN_LABEL.search(f.label) or _NO_FABRICATE_LABEL.search(f.label)
+                    or geo_kind(f) or f.kind == FieldKind.file)
 
     def _task(self, f: FormField, ctx: _Ctx, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         t: dict[str, Any] = {"key": f.key, "label": f.label, "max_len": f.max_length or 0,
@@ -238,6 +266,9 @@ class ApplyEngine:
                                          "posting": ctx.summary, "facts": self.profile.facts(f.label, 6)}}
         if f.options:
             t["options"] = f.options[:30]
+        if _HUMAN_LABEL.search(f.label):
+            t["needs_human"] = True
+            t["reason"] = "attestation/AI-use question: no explicit profile answer"
         if extra:
             t.update(extra)
         return t
@@ -285,7 +316,32 @@ class ApplyEngine:
         if value in (None, "") or conf < self.s.apply.llm_min_confidence:
             return None
         value = self._validate(f, value)
+        if value is not None and not self._grounded(f, value):
+            value = None
         return None if value is None else Answer(key=f.key, value=value, source="llm:short", confidence=conf)
+
+    def _grounded(self, f: FormField, value: Any) -> bool:
+        """The LLM may only restate profile facts: no placeholder/fabricated links, no unseen numbers, and no
+        yes/no (or skill) claim about experience unless the profile facts mention the topic."""
+        vals = value if isinstance(value, list) else [value]
+        if any(looks_fabricated(v) for v in vals):
+            return False
+        facts = " ".join(self.profile.facts("", 60)).lower()
+        ftoks = set(tokens(facts))
+        raw = [str(v) for v in vals if not isinstance(v, bool)]
+        for v in raw:  # urls / emails / phones / numbers must already exist in the profile
+            for m in re.findall(r"https?://\S+|\S+@\S+|\+?\d[\d\-. ()]{5,}\d|\d+", v):
+                if m.lower().strip(".,") not in facts and m not in f.label:
+                    return False
+        if _EXPERIENCE_LABEL.search(f.label):
+            topic = {w for w in tokens(f.label) if w not in _GENERIC and len(w) > 2}
+            claim = any(isinstance(v, bool) or polarity(str(v)) != 0 or str(v).strip().lower() in ("yes", "no")
+                        for v in vals)
+            if claim and not (topic and topic <= ftoks):
+                return False
+            if not claim and not all(set(tokens(x)) <= ftoks | _GENERIC for x in raw):
+                return False
+        return True
 
     @staticmethod
     def _validate(f: FormField, value: Any) -> Any | None:
@@ -415,7 +471,7 @@ class ApplyEngine:
             hits = self._stop_hits(ctx.form)
             if hits:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
-            missing = [f.key for f in ctx.form.fields if f.required and f.key not in eff]
+            missing = [f.key for f in ctx.form.fields if f.required and f.key not in eff and not geo_kind(f)]
             if missing:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"unresolved required: {missing[:8]}")
             blocked = await self._control("submit", ctx, dry, eff)
@@ -484,7 +540,8 @@ class ApplyEngine:
             if g.decision != Decision.submit:
                 return {"ref": ref, "status": g.decision.value, "why": g.reasons, "t": out.timings}
             if out.plan.unresolved:
-                return {"ref": ref, "status": "needs_input", "unresolved": out.plan.unresolved,
+                human = any(t.get("needs_human") for t in out.client_tasks)
+                return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,
                         "client_tasks": out.client_tasks, "token": out.token, "t": out.timings}
             if not dry and not self.s.apply.auto_approve:
                 return {"ref": ref, "status": "awaiting_approval", "token": out.token, "t": out.timings}

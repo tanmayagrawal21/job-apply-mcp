@@ -44,7 +44,8 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
         r"|active clearance|TS/SCI|ITAR|export[- ]control", re.IGNORECASE),
     "grad_window": re.compile(
         r"graduat\w*[^.]{0,80}?20\d\d|(?:class|graduates?) of\s*20\d\d|20\d\d\s+(?:new\s+)?(?:grad|graduate)s?\b", re.IGNORECASE),
-    "phd_only": re.compile(r"PhD (?:required|only)|currently pursuing a PhD|New PhD Graduate", re.IGNORECASE),
+    "phd_only": re.compile(r"PhD (?:required|only)|currently pursuing a PhD|New PhD Graduate|PhD Graduate|New PhD"
+                          r"|PhD (?:student|candidate)s?", re.IGNORECASE),
     "academic": re.compile(
         r"\b(?:university|college|school of medicine|research institute|academic medical center)\b", re.IGNORECASE),
 }
