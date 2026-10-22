@@ -288,6 +288,11 @@ def phone_country_name(country: str) -> str:
     return _COUNTRY_ALIASES.get(normalize(c), c)
 
 
+def same_country(name: str, shown: str) -> bool:
+    """`shown` (a chip or a flag title such as 'United States: +1') IS `name`, exactly (dial code removed)."""
+    return country_option(name, [shown.strip()]) is not None
+
+
 def country_option(name: str, options: list[str]) -> str | None:
     """The option that IS `name` once a trailing dial code ('+1', '(+44)') is removed; never a near miss
     (no 'United States Minor Outlying Islands' for 'United States')."""
@@ -415,7 +420,7 @@ _MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
 # fieldset / role=group / role=radiogroup / consent block holding choice inputs; it is required when the group or a
 # member says so (required, aria-required) or its legend/heading carries an asterisk or a "required" class; an
 # unanswered consent radio group always counts. Custom-drawn boxes hide the real input, so visibility is the group's.
-_EMPTY_REQUIRED_JS = """() => {
+_EMPTY_REQUIRED_JS = """(rk) => { const REQK = new Set(rk || []);
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
   const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
   const labelOf = e => { let t = '';
@@ -456,36 +461,55 @@ _EMPTY_REQUIRED_JS = """() => {
     gi++;
   }
   // Radio / checkbox sets OUTSIDE any group container: members share a name (an unnamed box is its own set).
-  // Required when a member is required / aria-required, or the question heading (closest preceding heading that
-  // belongs to no other question) carries an asterisk or a "required" class.
+  // DENY BY DEFAULT (ADR-0039). A set is required if ANY of: a member is required / aria-required; an ancestor up
+  // to the field wrapper has aria-required / required / data-required; the nearest preceding text of ANY element
+  // kind (option labels excluded) ends with "*" / "✱" or contains "(required)"; the API form marks the field
+  // required. When no question text can be found inside the field wrapper, requiredness is UNCLEAR -> required.
   const sets = new Map();
   for (const e of document.querySelectorAll(CH)) { if (done.has(e) || e.disabled) continue;
     const k = e.name ? e.type + ':' + e.name : 'solo:' + sets.size;
     if (!sets.has(k)) sets.set(k, []); sets.get(k).push(e); }
-  const HS = 'legend, label, .application-label, [class*=label i], [class*=question i], [class*=title i]';
+  const REQTXT = t => /[*✱]\\s*$/.test((t || '').trim()) || /[*✱]/.test(t || '') && (t || '').trim().length < 3 || /\\(required\\)/i.test(t || '');
+  const REQATTR = n => n.getAttribute && (n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
+    || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false'));
   for (const [k, members] of sets) {
     members.forEach(m => done.add(m));
     if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement || m))) continue;
     const ids = new Set(members.map(m => m.id).filter(Boolean));
-    const isOpt = h => (h.tagName === 'LABEL' && (h.querySelector(CH) || ids.has(h.htmlFor))) || members.some(m => h.contains(m));
+    const optLabel = n => { const l = n && n.closest && n.closest('label');
+      return !!(l && (l.querySelector(CH) || ids.has(l.htmlFor))); };
     let c = members[0].parentElement; while (c && !members.every(m => c.contains(m))) c = c.parentElement;
-    let head = null;
-    if (k.startsWith('solo:')) head = null;
-    else for (let n = c, d = 0; n && n !== document.body && d < 5; n = n.parentElement, d++) {
-      if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;      // climbed into another question
-      const hs = [...n.querySelectorAll(HS)].filter(h => !isOpt(h) && clean(h.textContent)
-        && (h.compareDocumentPosition(members[0]) & Node.DOCUMENT_POSITION_FOLLOWING));
-      if (hs.length) { head = hs[hs.length - 1]; break; } }
-    const text = head ? head.textContent : (k.startsWith('solo:') ? labelOf(members[0]) : '');
-    const required = members.some(m => m.required || m.getAttribute('aria-required') === 'true')
-      || /[*✱]/.test(text || '') || !!(head && (/required/i.test(head.className) || head.querySelector('[class*=required i]')));
+    // the field wrapper: the highest ancestor (max 6 levels, below form/body) holding no other question's inputs
+    let wrap = c, anc = false;
+    for (let n = c, d = 0; n && n !== document.body && n.tagName !== 'FORM' && d < 6; n = n.parentElement, d++) {
+      if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;
+      if (REQATTR(n)) anc = true;
+      wrap = n; }
+    // nearest preceding text, any element kind, skipping option labels / scripts
+    let text = '', hel = null;
+    const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    tw.currentNode = members[0];
+    for (let n = tw.previousNode(); n; n = tw.previousNode()) {
+      const el = n.parentElement; const t = (n.textContent || '').trim();
+      if (!t || !el || el.closest('script, style, noscript') || optLabel(el)) continue;
+      if (!wrap || !wrap.contains(n)) break;                     // outside the field wrapper: not this question's
+      hel = el; text = t; break; }
+    let full = hel ? hel.textContent : '';
+    if (hel && clean(full).length < 3 && hel.parentElement && wrap.contains(hel.parentElement)) full = hel.parentElement.textContent;
+    if (k.startsWith('solo:') && !hel) { full = labelOf(members[0]); text = full; }
+    const keys = members.flatMap(m => [m.name, m.id]).filter(Boolean);
+    const apiReq = keys.some(x => REQK.has(x) || [...REQK].some(r => x.endsWith('_' + r) || x.startsWith(r + '_') || x.includes('_' + r + '-labeled-')));
+    const unclear = !clean(full);
+    const required = unclear || apiReq || anc || members.some(m => m.required || m.getAttribute('aria-required') === 'true')
+      || REQTXT(text) || REQTXT(full) || !!(hel && (/required/i.test(hel.className) || hel.querySelector('[class*=required i]')));
     if (!required || members.some(m => m.checked)) continue;
     const id = members[0].name || members[0].id || '';
     if (seen.has('s:' + id + k)) continue; seen.add('s:' + id + k);
     const opts = members.map(m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '')).slice(0, 12);
     let gid = '';
     if (c && [...c.querySelectorAll(CH)].length === members.length) { c.setAttribute('data-jam-group', String(gi)); gid = String(gi); gi++; }
-    out.push({id, label: (clean(text) || id).slice(0, 80), text: clean(text).slice(0, 1500), rs: false, group: gid,
+    const lab = clean(full) || (unclear ? 'unlabelled choice set ' + id : id);
+    out.push({id, label: lab.slice(0, 80), text: clean(full).slice(0, 1500), rs: false, group: gid,
               kind: members[0].type, consent: false, opts});
   }
   for (const e of document.querySelectorAll('input, textarea, select')) {
@@ -545,6 +569,7 @@ class PlaywrightDriver(VerificationMixin):
         self._handoff_pages: set[int] = set()
         self._net: dict[int, list[dict[str, Any]]] = {}
         self._tasks: dict[int, list[asyncio.Task]] = {}
+        self._req_keys: dict[int, list[str]] = {}         # page -> keys the API form marks required (ADR-0039)
 
     # -- lifecycle ------------------------------------------------------------------------------
     async def _context(self):
@@ -598,6 +623,7 @@ class PlaywrightDriver(VerificationMixin):
         except Exception as e:
             return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
         finally:
+            self._req_keys.pop(id(page), None)
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
@@ -620,6 +646,7 @@ class PlaywrightDriver(VerificationMixin):
         if (hit := stop_phrase_hit(scope, self.s.policy.stop_phrases)):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"attestation: '{hit}'")
 
+        self._req_keys[id(page)] = [f.key for f in form.fields if f.required and f.kind != FieldKind.file]
         steps = fill_order(form, answers, files)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
@@ -656,7 +683,7 @@ class PlaywrightDriver(VerificationMixin):
             ev = await self._save_evidence(page, ref, "fill-failed", extra={"fields": problems[:20]})
             return SubmitResult(ref=ref, status="needs_human", via="browser",
                                 detail=f"could not fill/verify: {problems[:8]}{ev}")
-        await self._fill_demographics(page, answers)
+        demo_bad = await self._fill_demographics(page, answers)
         await self._fill_education(page, answers)
         await self._fill_privacy_groups(page, answers)
         empty = await self._empty_required(page)
@@ -666,6 +693,7 @@ class PlaywrightDriver(VerificationMixin):
                 if f.key in ids:
                     await self._fill(page, ats, f, v)
             empty = await self._empty_required(page)
+        empty += [{"id": "", "label": f"{lab} (self-ID read-back mismatch)"} for lab in demo_bad]
         if empty:                                   # never submit (or call a dry run complete) with required gaps
             labels = [e["label"] for e in empty]
             ev = await self._save_evidence(page, ref, "incomplete", extra={"required_empty": labels})
@@ -1175,23 +1203,26 @@ class PlaywrightDriver(VerificationMixin):
         return False
 
     async def _empty_required(self, page) -> list[dict[str, Any]]:
-        """Every visible required control (asterisk label / aria-required / required) that is still empty."""
+        """Every visible required control (asterisk label / aria-required / required) that is still empty. Fields the
+        API form marks required count too. A scan that fails is itself reported (never an empty, 'verified' list)."""
         try:
-            return list(await page.evaluate(_EMPTY_REQUIRED_JS))
-        except Exception:
-            return []
+            return list(await page.evaluate(_EMPTY_REQUIRED_JS, self._req_keys.get(id(page), [])))
+        except Exception as e:
+            return [{"id": "", "label": f"required-field scan failed ({type(e).__name__})", "rs": False}]
 
-    async def _fill_demographics(self, page, answers: dict[str, Any]) -> None:
+    async def _fill_demographics(self, page, answers: dict[str, Any]) -> list[str]:
         """Voluntary EEO / self-ID selects that exist only in the DOM (not in the job API; planned fields are left to
         the plan). EXACT matching only (exact_choice: normalised equality or the explicit decline table; never a
         substring or fuzzy match, so Female never selects Male). The profile's [demographics] value is used when an
         option equals it; a profile value with no equal option leaves the select BLANK (a required one then makes the
         run `incomplete`). With no profile value: a REQUIRED select gets the decline-table option, an OPTIONAL one
-        stays blank. Read back from this field only."""
+        stays blank. Every pick is read back from this field and compared EXACTLY; on a mismatch the select is
+        blanked, and a required one (or one that cannot be blanked) is returned as a problem -> `incomplete`."""
+        bad: list[str] = []
         try:
             rows = list(await page.evaluate(_DOM_SELECTS_JS))
         except Exception:
-            return
+            return bad
         for row in rows:
             lab, el_id = row["label"], row["id"]
             ck = canonical_key(lab)
@@ -1211,8 +1242,18 @@ class PlaywrightDriver(VerificationMixin):
                 if row["native"]:
                     texts = [t.strip() for t in await loc.locator("option").all_inner_texts()]
                     pick = choose(texts)
-                    if pick is not None:
-                        await loc.select_option(label=pick, timeout=2000)
+                    if pick is None:
+                        continue
+                    await loc.select_option(label=pick, timeout=2000)
+                    got = await loc.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].text : ''")
+                    if normalize(got) != normalize(pick):              # exact read-back failed: blank it
+                        try:
+                            await loc.select_option(value="", timeout=2000)
+                        except Exception:
+                            pass
+                        blank = not (await loc.evaluate("e => e.value || ''"))
+                        if row["required"] or not blank:
+                            bad.append(lab)
                     continue
                 marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
                 opts = (page.locator("[data-jam-scope]") if marked else page).locator(_MENU_SCOPED)
@@ -1224,10 +1265,30 @@ class PlaywrightDriver(VerificationMixin):
                     await self._close_menu(page)
                     continue
                 await opts.nth(texts.index(pick)).click(timeout=3000)
-                if not await self._committed(page, loc, pick):
-                    await self._close_menu(page)
+                await self._close_menu(page)
+                shown: list[str] = []
+                for _ in range(8):                                     # exact read-back from THIS select only
+                    if await loc.evaluate(_COMMIT_SCOPE_JS):
+                        shown = [t.strip() for t in await page.locator("[data-jam-commit]").locator(_SELECT_VALUES)
+                                 .all_inner_texts()]
+                    if shown:
+                        break
+                    await asyncio.sleep(0.15)
+                if [normalize(t) for t in shown] != [normalize(pick)]:
+                    clear = page.locator("[data-jam-commit] [class*=select__clear-indicator]")
+                    try:
+                        if await clear.count():
+                            await clear.first.click(timeout=2000)
+                    except Exception:
+                        pass
+                    left = await page.locator("[data-jam-commit]").locator(_SELECT_VALUES).count()
+                    if row["required"] or left:
+                        bad.append(lab)
             except Exception:
                 await self._close_menu(page)
+                if row["required"]:
+                    bad.append(lab)
+        return bad
 
     async def _rs_pick(self, page, el_id: str, queries: list[str], choose) -> str | None:
         """Type each query into the react-select `el_id`, let `choose(option_texts)` pick, CLICK it and confirm
@@ -1322,7 +1383,6 @@ class PlaywrightDriver(VerificationMixin):
         the required-field scan); the tool never guesses a country (ADR-0039)."""
         if not country:
             return True
-        want = normalize(country)
         try:
             cid = await page.evaluate(_COUNTRY_JS)
         except Exception:
@@ -1330,15 +1390,14 @@ class PlaywrightDriver(VerificationMixin):
         if cid:
             loc = page.locator(f'[id="{cid}"]').first
 
-            async def current() -> str:
+            async def current() -> list[str]:
                 try:
                     if await loc.evaluate(_COMMIT_SCOPE_JS):
-                        return normalize(" ".join(await page.locator("[data-jam-commit]").locator(_SELECT_VALUES)
-                                                  .all_inner_texts()))
+                        return list(await page.locator("[data-jam-commit]").locator(_SELECT_VALUES).all_inner_texts())
                 except Exception:
                     pass
-                return ""
-            if want in await current():
+                return []
+            if any(same_country(country, t) for t in await current()):    # exact, never a substring
                 return True
             for _ in range(2):
                 if await self._rs_pick(page, cid, [country], lambda t: country_option(country, t)):
@@ -1349,8 +1408,7 @@ class PlaywrightDriver(VerificationMixin):
         try:
             if not await flag.count():
                 return True                     # no country widget on this form
-            title = ((await flag.get_attribute("title")) or "") + " " + (await flag.inner_text())
-            if want in normalize(title):
+            if same_country(country, (await flag.get_attribute("title")) or ""):     # exact, never a substring
                 return True
             await flag.click()
             items = page.locator("li.iti__country, .iti__country-list [role=option]")
@@ -1362,8 +1420,7 @@ class PlaywrightDriver(VerificationMixin):
                 await self._close_menu(page)
                 return False
             await items.nth(names.index(pick)).click()
-            title = ((await flag.get_attribute("title")) or "") + " " + (await flag.inner_text())
-            return want in normalize(title)
+            return same_country(country, (await flag.get_attribute("title")) or "")
         except Exception:
             await self._close_menu(page)
             return False

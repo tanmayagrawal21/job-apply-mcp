@@ -32,7 +32,13 @@ without a scope accepted another select's chip.
   - the legend or heading contains `*` or `✱`;
   - the legend or heading has a `required` class, or contains an element with one;
   - it is an all-radio consent group.
-  Radio/checkbox sets OUTSIDE any group container (members sharing a name, or a single unnamed box) are scanned too. Such a set is required when a member is `required` or `aria-required`, or when the closest preceding question heading that belongs to no other question carries an asterisk or a `required` class.
+  Radio/checkbox sets OUTSIDE any group container (members sharing a name, or a single unnamed box) are scanned **deny-by-default** (control review 2). A set is required if ANY of these holds:
+  - a member is `required` or `aria-required`;
+  - an ancestor up to the field wrapper has `aria-required`, `required` or `data-required`;
+  - the nearest preceding text of any element kind (option labels excluded) ends with `*` or `✱`, or contains `(required)`;
+  - the API form marks the field required.
+  If no question text can be found inside the field wrapper, requiredness is unclear and the set counts as required. A scan that throws is itself reported, never treated as an empty list.
+- **Exact read-backs (control review 2).** An already-selected phone country must equal the profile country once the dial code is removed (`same_country`), never a substring match. Native and react-select self-ID selects are read back after selection and compared exactly. On a mismatch the select is blanked; a required one (or one that cannot be blanked) makes the run `incomplete`.
   An unchecked required group is reported, so the run ends `incomplete` and never `dry_run`. A required group that
   is in the plan is refilled once, as text fields already were.
 - **DOM-only consent radios.** These are surfaced by the scan. `_fill_privacy_groups` answers one only when the owner

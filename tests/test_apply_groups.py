@@ -319,3 +319,108 @@ async def test_unwrapped_optional_radio_set_does_not_block(drv):
     res = await drv.fill_and_submit(f"{base}/acme/jobs/11", ApplicationForm(ref="greenhouse:acme:11", fields=[GH_FIRST]),
                                     {"first_name": "Alex"}, {}, dry_run=True)
     assert res.status == "dry_run", res.detail
+
+
+# ---- deny-by-default required sets outside fieldset / role=group (control review 2)
+
+def _set_page(block):
+    return ("<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>"
+            f"{block}<button type=submit>Submit application</button></form>"
+            "<script>document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>")
+
+
+RADIOS = '<label><input type=radio name=size value=s> Small</label><label><input type=radio name=size value=l> Large</label>'
+SET_SHAPES = {
+    "member-required": '<div><p>Shirt size</p><label><input type=radio name=size value=s required> Small</label>'
+                       '<label><input type=radio name=size value=l> Large</label></div>',
+    "member-aria": '<div><p>Shirt size</p><label><input type=radio name=size value=s aria-required=true> Small</label>'
+                   '<label><input type=radio name=size value=l> Large</label></div>',
+    "ancestor-aria": f'<div aria-required=true><div><p>Shirt size</p>{RADIOS}</div></div>',
+    "ancestor-required": f'<div required><p>Shirt size</p>{RADIOS}</div>',
+    "ancestor-data-required": f'<div data-required=true><p>Shirt size</p>{RADIOS}</div>',
+    "plain-text-asterisk": f'<div><b>Shirt size *</b>{RADIOS}</div>',
+    "asterisk-own-span": f'<div><div>Shirt size<span>*</span></div>{RADIOS}</div>',
+    "required-word": f'<div><strong>Shirt size (required)</strong>{RADIOS}</div>',
+    "unclear-no-text": f'<div>{RADIOS}</div>',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SET_SHAPES))
+async def test_required_set_shapes_outside_fieldset_are_incomplete(drv, shape):
+    base, _ = _serve(_set_page(SET_SHAPES[shape]))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/12", ApplicationForm(ref="greenhouse:acme:12", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", (shape, res.detail)
+
+
+async def test_set_the_api_marks_required_is_incomplete(drv):
+    base, _ = _serve(_set_page(f"<div><p>Shirt size</p>{RADIOS}</div>"))         # nothing on the page says required
+    form = ApplicationForm(ref="greenhouse:acme:12", fields=[
+        GH_FIRST, FormField(key="size", label="Shirt size", kind=FieldKind.select, options=["Small", "Large"],
+                            required=True)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/12", form, {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete" and "Shirt size" in res.detail, res.detail
+
+
+async def test_clearly_optional_set_still_does_not_block(drv):
+    base, _ = _serve(_set_page(f"<div><p>Shirt size</p>{RADIOS}</div>"))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/12", ApplicationForm(ref="greenhouse:acme:12", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+
+
+# ---- native self-ID read-back (control review 2)
+
+NATIVE_EEO = """<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>
+<label for=gender>Gender__MARK__</label><select id=gender __REQ__><option value="">Select...</option>
+<option value=m>Male</option><option value=f>Female</option><option value=d>I don't wish to answer</option></select>
+<button type=submit>Submit application</button></form>
+<script>const g = document.getElementById('gender');
+g.addEventListener('change', () => { if (g.value === 'f') g.value = 'm'; });     // a site that swaps the answer
+const rep = () => fetch('/state', {method: 'POST', body: g.value}); rep();
+['change', 'input'].forEach(t => g.addEventListener(t, () => setTimeout(rep, 0)));
+document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>"""
+
+
+@pytest.mark.parametrize("required", [True, False])
+async def test_native_self_id_mismatch_is_blanked(drv, required):
+    html = NATIVE_EEO.replace("__MARK__", " *" if required else "").replace("__REQ__", "required" if required else "")
+    base, posts = _serve(html)
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/13", ApplicationForm(ref="greenhouse:acme:13", fields=[GH_FIRST]),
+                                    {"first_name": "Alex", "demographic:gender": "Female"}, {}, dry_run=True)
+    assert [p for p in posts if p[0] == "/state"][-1][1] == ""                  # never left showing "Male"
+    assert res.status == ("incomplete" if required else "dry_run"), res.detail
+
+
+# ---- phone country: the already-selected country is compared exactly (control review 2)
+
+ITI_HTML = """<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>
+<div class=iti><button type=button class=iti__selected-country title="United States Minor Outlying Islands: +1">+1</button>
+<ul class=iti__country-list style="display:none">
+<li class=iti__country><span class=iti__country-name>United States Minor Outlying Islands</span></li>
+<li class=iti__country><span class=iti__country-name>United States</span></li>
+<li class=iti__country><span class=iti__country-name>Canada</span></li></ul>
+<label for=phone>Phone</label><input id=phone name=phone type=tel></div>
+<button type=submit>Submit application</button></form>
+<script>const b = document.querySelector('.iti__selected-country'), ul = document.querySelector('.iti__country-list');
+b.onclick = () => { ul.style.display = 'block'; };
+ul.querySelectorAll('li').forEach(li => li.onclick = () => { b.title = li.textContent.trim() + ': +1'; ul.style.display = 'none';
+  fetch('/state', {method: 'POST', body: b.title}); });
+document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>"""
+
+
+async def test_phone_country_near_miss_is_reselected_exactly(drv):
+    base, posts = _serve(ITI_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:14", fields=[GH_FIRST, FormField(key="phone", label="Phone", kind=FieldKind.text)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/14", form,
+                                    {"first_name": "Alex", "phone": "555-0101", "contact:country": "United States"},
+                                    {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+    assert [p for p in posts if p[0] == "/state"][-1][1] == "United States: +1"
+
+
+def test_same_country_is_exact():
+    from job_apply_mcp.apply.browser_playwright import same_country
+    assert same_country("United States", "United States: +1") and same_country("India", "India (+91)")
+    assert not same_country("United States", "United States Minor Outlying Islands: +1")
+    assert not same_country("India", "British Indian Ocean Territory +246")
