@@ -37,7 +37,7 @@ async def test_plan_batches_short_fields_in_one_call_and_tasks_for_prose():
     e, _ = engine(router=r, writing__max_rounds=1)
     out = await e.plan(POSTING.ref)
     ans = {a.key: a.value for a in out.plan.answers}
-    assert ans["q_source"] == "LinkedIn" and ans["q_tool"] == "bazel"          # snapped to options
+    assert ans["q_source"] == "Other" and ans["q_tool"] == "bazel"  # source from preference list; tool snapped
     assert ans["q_gender"] == "Decline To Self Identify" and ans["resume"] == "/tmp/resume.pdf"
     assert [c for c, _ in r.calls].count("short") == 1                           # ONE batched call
     assert out.plan.unresolved == ["q_why"] and out.client_tasks[0]["key"] == "q_why"
@@ -74,8 +74,8 @@ async def test_prose_pipeline_used_for_long_text_when_available():
 async def test_no_router_degrades_to_client_tasks():
     e, _ = engine(router=None)
     out = await e.plan(POSTING.ref)
-    assert set(out.plan.unresolved) == {"q_source", "q_tool", "q_why"}
-    assert {t["key"] for t in out.client_tasks} == {"q_source", "q_tool", "q_why"}
+    assert set(out.plan.unresolved) == {"q_tool", "q_why"}
+    assert {t["key"] for t in out.client_tasks} == {"q_tool", "q_why"}
 
 
 @pytest.mark.parametrize("decision,why", [(Decision.skip, "no sponsorship"), (Decision.needs_human, "attest")])

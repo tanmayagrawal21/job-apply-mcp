@@ -135,6 +135,8 @@ class PolicyCfg(BaseModel):
     has_clearance: bool = False
     graduation_flex_months: int = 0              # tolerance around a posting's graduation window
     hours_per_year: int = 2080                   # hourly -> annual conversion
+    exclude_title_patterns: list[str] = Field(default_factory=list)  # regexes on the title (e.g. "research")
+    has_phd: bool = False                        # False: skip titles aimed at PhD graduates/students (ADR-0011)
 
 
 BUILTIN_CONTROLS = ["mode", "quota", "attestation", "hard_stop", "single_submit", "prose_lint",
@@ -233,6 +235,9 @@ class ApplyCfg(BaseModel):
     context_chars: int = 900            # cap on the posting summary inside client_tasks
     plan_workers: int = 4               # concurrent planners; separate from browser_workers (pipelining)
     write_optional: bool = False        # also write optional long free-text fields (default: skip them)
+    option_min_score: float = 0.78      # fuzzy option snap threshold; below it the field stays unresolved
+    referral_preference: list[str] = Field(default_factory=lambda: [
+        "Job board", "Other job board", "Other", "LinkedIn"])  # "how did you hear"; never Referral/Employee
 
 
 class BrowserCfg(BaseModel):
