@@ -27,6 +27,7 @@ def _guarded_tool(*a: Any, **k: Any):
 
 
 mcp.tool = _guarded_tool  # type: ignore[method-assign]
+_output.install(mcp)
 _svc: Services | None = None
 
 
@@ -136,9 +137,13 @@ async def request_feature(description: str, kind: str | None = None) -> str:
 
 
 @mcp.tool()
-async def improvement_report(limit: int = 10) -> str:
-    """Ranked improvement proposals learned from recent run failures (compact)."""
-    return _out(await svc().improvement_report(limit))
+async def improvement_report(limit: int = 10, cursor: int = 0) -> str:
+    """Ranked improvement proposals learned from recent run failures (compact). Page with `cursor` (= `next`)."""
+    rep = await svc().improvement_report(cursor + limit)
+    props = rep.get("proposals", [])
+    rep["proposals"] = props[cursor:cursor + limit]
+    rep["next"] = cursor + limit if cursor + limit < rep.get("total", 0) else None
+    return _out(rep)
 
 
 @mcp.tool()

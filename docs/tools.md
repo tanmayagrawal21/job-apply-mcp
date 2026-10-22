@@ -61,7 +61,7 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 | Tool | Inputs | Output |
 |---|---|---|
 | `health` | none | enabled platforms, LLM providers, browser drivers, `dry_run`, which local models answer |
-| `improvement_report` | `limit=10` | ranked proposals learned from recent failures |
+| `improvement_report` | `limit=10`, `cursor=0` | ranked proposals learned from recent failures |
 | `request_feature` | `description`, `kind=None` | a proposal; a PR only if `improve.coder` is configured (default `none`) |
 
 ## Recommended call order (lowest token cost)

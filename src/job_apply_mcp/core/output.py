@@ -7,10 +7,11 @@ Envelope: success `{"ok":true,...}`, failure `{"ok":false,"error":{"code","messa
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
-import copy
 import functools
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -25,11 +26,47 @@ DROP_PRIORITY: dict[str, tuple[str, ...]] = {
 }
 GENERIC_DROP = ("raw", "html", "debug", "trace", "evidence", "description", "desc", "detail", "text")
 _MIN_STR = 60
+log = logging.getLogger("job_apply_mcp.tools")
+MAX_DEPTH = 24
+_start: contextvars.ContextVar[int] = contextvars.ContextVar("page_start", default=0)
 _tool_name: contextvars.ContextVar[str] = contextvars.ContextVar("tool_name", default="")
 
 
 def dumps(o: Any) -> str:
     return json.dumps(o, separators=(",", ":"), default=str, ensure_ascii=False)
+
+
+def normalize(obj: Any, max_depth: int = MAX_DEPTH) -> Any:
+    """Iterative deep copy into plain JSON types; nodes deeper than `max_depth` become "…[depth]" (no recursion,
+    so pathological nesting and cycles cannot raise RecursionError)."""
+    def leaf(x: Any) -> Any:
+        return x if x is None or isinstance(x, (bool, int, float, str)) else str(x)
+
+    def fresh(x: Any) -> Any:
+        return {} if isinstance(x, dict) else []
+
+    if not isinstance(obj, (dict, list, tuple, set, frozenset)):
+        return leaf(obj)
+    root = fresh(obj)
+    stack: list[tuple[Any, Any, int]] = [(obj, root, 1)]
+    while stack:
+        src, dst, d = stack.pop()
+        items = src.items() if isinstance(src, dict) else enumerate(src)
+        for k, v in items:
+            key = k if isinstance(k, str) else str(k)
+            if isinstance(v, (dict, list, tuple, set, frozenset)):
+                if d >= max_depth:
+                    val: Any = "…[depth]"
+                else:
+                    val = fresh(v)
+                    stack.append((v, val, d + 1))
+            else:
+                val = leaf(v)
+            if isinstance(dst, dict):
+                dst[key] = val
+            else:
+                dst.append(val)
+    return root
 
 
 def err(code: str, message: str, hint: str = "") -> str:
@@ -87,7 +124,7 @@ def _paginate(o: Any, floor: int) -> bool:
         if "omitted" in c:   # already trimmed once: cursor moves back by what was just removed
             c["next"] -= omitted
         else:
-            c["next"] = keep
+            c["next"] = _start.get() + keep   # absolute offset for the follow-up `cursor`
         c["omitted"] = c.get("omitted", 0) + omitted
     return True
 
@@ -163,12 +200,12 @@ def _drop(o: Any, names: tuple[str, ...], dropped: list[str]) -> bool:
 
 def shape(obj: Any, budget: int, tool: str = "") -> str:
     """Serialize `obj` to valid compact JSON within `budget` chars, degrading by schema, never by slicing."""
-    s = dumps(obj)
-    if len(s) <= budget:
-        return s
-    o = copy.deepcopy(json.loads(s))   # normalise (default=str) and avoid mutating caller data
+    o = normalize(obj)   # fresh plain-JSON copy: caller data is never mutated, depth is capped
     if not isinstance(o, (dict, list)):
         o = {"value": o}
+    s = dumps(o)
+    if len(s) <= budget:
+        return s
     names = tuple(dict.fromkeys(DROP_PRIORITY.get(tool, ()) + GENERIC_DROP))
     dropped: list[str] = []
 
@@ -220,6 +257,8 @@ def guarded(fn: Callable[..., Any], budget: Callable[[], int]) -> Callable[..., 
     @functools.wraps(fn)
     async def wrapper(*a: Any, **kw: Any) -> str:
         tok = _tool_name.set(name)
+        c = kw.get("cursor")
+        tok2 = _start.set(c if isinstance(c, int) and c > 0 else 0)
         try:
             res = await fn(*a, **kw)
             if isinstance(res, str):
@@ -228,9 +267,49 @@ def guarded(fn: Callable[..., Any], budget: Callable[[], int]) -> Callable[..., 
                 except ValueError:
                     res = {"text": res}
             return out(res, budget(), name)
-        except Exception as e:  # noqa: BLE001 - boundary: never leak a traceback/non-JSON to the client
+        except Exception as e:
+            log.exception("tool %s failed", name)   # full traceback -> stderr/log only
             return error_from_exc(e)
         finally:
+            _start.reset(tok2)
             _tool_name.reset(tok)
 
     return wrapper
+
+
+def _arg_message(e: BaseException) -> str:
+    errs = getattr(e, "errors", None)
+    if callable(errs):
+        with contextlib.suppress(Exception):
+            return "; ".join(f"{'.'.join(map(str, x.get('loc', ())))}: {x.get('msg', '')}" for x in errs())[:300]
+    return str(e)
+
+
+def install(mcp: Any) -> None:
+    """Catch FastMCP's pre-call argument validation (and unknown tools) and answer with the error envelope."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    tm = mcp._tool_manager
+    orig = tm.call_tool
+
+    async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False) -> Any:
+        try:
+            return await orig(name, arguments, context=context, convert_result=convert_result)
+        except ToolError as e:
+            cause = e.__cause__
+            tool = tm.get_tool(name)
+            if tool is None:
+                body = err("unknown_tool", f"no such tool: {name}", "Call list_tools for the available names.")
+            elif cause is not None and "ValidationError" not in {c.__name__ for c in type(cause).__mro__}:
+                log.error("tool %s failed: %s", name, e, exc_info=cause)
+                body = error_from_exc(cause)
+            else:
+                body = err("invalid_args", _arg_message(cause or e), "Check argument names/types against the tool schema.")
+            if not convert_result:
+                return body
+            if tool is None:
+                from mcp.types import TextContent
+                return [TextContent(type="text", text=body)]
+            return tool.fn_metadata.convert_result(body)
+
+    tm.call_tool = call_tool

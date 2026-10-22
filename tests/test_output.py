@@ -86,3 +86,87 @@ def test_every_registered_tool_error_path_returns_envelope(monkeypatch):
         assert d["ok"] is False and set(d["error"]) == {"code", "message", "hint"}, t.name
         checked += 1
     assert checked >= 10
+
+
+def _text(res):
+    blocks = res[0] if isinstance(res, tuple) else res
+    return blocks[0].text
+
+
+def test_every_tool_bad_args_return_envelope():
+    tools = asyncio.run(server.mcp.list_tools())
+    n = 0
+    for t in tools:
+        props = t.inputSchema.get("properties", {})
+        required = t.inputSchema.get("required", [])
+        if required:
+            bad = {}                                   # missing required args
+        elif props:
+            k, v = next(iter(props.items()))
+            bad = {k: {"not": ["a", "valid"]}} if v.get("type") != "object" else {k: 5}
+        else:
+            continue                                   # no arguments to get wrong
+        d = json.loads(_text(asyncio.run(server.mcp.call_tool(t.name, bad))))
+        assert d["ok"] is False and d["error"]["code"] == "invalid_args", (t.name, d)
+        assert set(d["error"]) == {"code", "message", "hint"}
+        n += 1
+    assert n >= 15
+    d = json.loads(_text(asyncio.run(server.mcp.call_tool("nope", {}))))
+    assert d["error"]["code"] == "unknown_tool"
+
+
+def test_deep_nesting_and_cycles_do_not_recurse():
+    deep = cur = {}
+    for _ in range(5000):
+        cur["a"] = {}
+        cur = cur["a"]
+    s = output.out({"x": deep}, 4000)
+    assert "…[depth]" in s and json.loads(s)["ok"] is True
+    cyc: list = []
+    cyc.append(cyc)
+    json.loads(output.out(cyc, 4000))
+
+
+def test_traceback_logged_not_returned(caplog):
+    async def boom():
+        raise RuntimeError("secret-internal-detail")
+
+    boom.__name__ = "boomtool"
+    w = output.guarded(boom, lambda: 4000)
+    with caplog.at_level("ERROR", logger="job_apply_mcp.tools"):
+        res = asyncio.run(w())
+    assert "Traceback" not in res and json.loads(res)["error"]["code"] == "internal"
+    assert any(r.exc_info for r in caplog.records)
+
+
+def test_paging_cursor_has_no_duplicates():
+    rows = [{"ref": f"r{i}", "pad": "p" * 40} for i in range(100)]
+
+    async def list_x(cursor: int = 0):
+        return {"rows": rows[cursor:cursor + 50]}
+
+    w = output.guarded(list_x, lambda: 800)
+    seen, cur = [], 0
+    for _ in range(50):
+        d = json.loads(asyncio.run(w(cursor=cur)))
+        seen += [r["ref"] for r in d["rows"]]
+        cur = d["next"] if d.get("omitted") else cur + 50
+        if cur >= 100:
+            break
+    assert seen == [f"r{i}" for i in range(100)]
+
+
+def test_improvement_report_pages(monkeypatch):
+    props = [{"id": f"p{i}"} for i in range(25)]
+
+    class S:
+        settings = type("St", (), {"response_budget_chars": 4000})()
+
+        async def improvement_report(self, limit):
+            return {"proposals": props[:limit], "total": 25}
+
+    monkeypatch.setattr(server, "_svc", S())
+    p1 = json.loads(asyncio.run(server.improvement_report(limit=10)))
+    p2 = json.loads(asyncio.run(server.improvement_report(limit=10, cursor=p1["next"])))
+    ids = [x["id"] for x in p1["proposals"] + p2["proposals"]]
+    assert len(ids) == len(set(ids)) == 20 and p2["next"] == 20
