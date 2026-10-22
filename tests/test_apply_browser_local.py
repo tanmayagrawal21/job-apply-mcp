@@ -88,6 +88,7 @@ async def drv(tmp_path):
     s.browser.channel = "chrome"
     s.browser.confirmation_wait_s = 3
     s.browser.upload_settle_s = 1
+    s.browser.captcha_handoff = False       # click-path fixtures; the handoff test turns it on
     d = PlaywrightDriver(s)
     try:
         await d._context()
@@ -256,3 +257,18 @@ async def test_react_controlled_input_needs_real_typing_on_ashby(drv):
     finally:
         ATS["ashby"] = saved
     assert bad.status == "needs_human" and "FAILED" in bad.detail and "Missing entry" in bad.detail
+
+
+async def test_captcha_page_hands_off_without_click(drv, resume):
+    extra = "var sc=document.createElement('div');sc.className='grecaptcha-badge';document.body.appendChild(sc);"
+    drv.b.captcha_handoff = True
+    for name, h in (("handoff", False), ("needs_human", True)):
+        srv = Srv(page(extra=extra), GOOD)
+        form = FORM.model_copy(update={"ref": "ashby:acme:cap" + name})
+        drv.b.headless = h                      # live context stays as launched; the flag drives the decision
+        res = await drv.fill_and_submit(srv.url, form, ANS, resume, dry_run=False)
+        assert srv.posts == 0, "must never click submit on a captcha page"
+        assert res.status == name and "evidence=" in res.detail, res.detail
+        if name == "handoff":
+            assert len(drv._ctx.pages) >= 1 and "human must click" in res.detail
+    drv.b.headless = True

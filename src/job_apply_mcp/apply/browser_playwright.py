@@ -212,6 +212,7 @@ class PlaywrightDriver:
         self._pw: Any = None
         self._ctx: Any = None
         self._lock = asyncio.Lock()
+        self._handoff_pages: set[int] = set()
         self._net: dict[int, list[dict[str, Any]]] = {}
         self._tasks: dict[int, list[asyncio.Task]] = {}
 
@@ -269,7 +270,7 @@ class PlaywrightDriver:
         finally:
             self._net.pop(id(page), None)
             self._tasks.pop(id(page), None)
-            if not self.b.keep_pages_open:
+            if not self.b.keep_pages_open and id(page) not in self._handoff_pages:
                 await page.close()
 
     async def _run(self, page, ats: AtsProfile, url: str, form: ApplicationForm, answers: dict[str, Any],
@@ -320,6 +321,18 @@ class PlaywrightDriver:
                 ev = await self._save_evidence(page, ref, "presubmit-errors", extra={"errors": errs})
                 return SubmitResult(ref=ref, status="needs_human", via="browser",
                                     detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
+        if not dry_run and self.b.captcha_handoff:
+            widgets = await self._captcha_widgets(page)
+            if widgets or ats.name == "ashby":      # never evade/solve bot checks: a human makes the final click
+                ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets})
+                if self.b.headless:
+                    return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                        detail=f"captcha-protected ({widgets or ['ashby']}); form filled and verified, "
+                                               f"not clicked; rerun with browser.headless=false{ev}")
+                self._handoff_pages.add(id(page))
+                return SubmitResult(ref=ref, status="handoff", via="browser", confirmation=page.url[:200],
+                                    detail=f"form filled and verified in the open browser tab; a human must click "
+                                           f"Submit (captcha-protected){ev}")
         if dry_run:
             ev = await self._save_evidence(page, ref, "dry-run")
             return SubmitResult(ref=ref, status="dry_run", via="browser",

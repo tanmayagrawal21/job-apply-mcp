@@ -259,6 +259,7 @@ class BrowserCfg(BaseModel):
     evidence: bool = True               # screenshot + text + errors + submit responses under <data_dir>/evidence/<ref-hash>/
     evidence_text_chars: int = 20000    # cap on saved visible page text
     evidence_body_chars: int = 500      # cap on each saved submit-response body
+    captcha_handoff: bool = True        # captcha-protected pages (always Ashby): never click submit; human does (ADR-0012). Tests only: False
     presubmit_validation: bool = True   # read back fields + check visible validation errors before the submit click
     agent_max_steps: int = 40
     agent_tier: str = "medium"          # llm tier whose model drives the generic agent

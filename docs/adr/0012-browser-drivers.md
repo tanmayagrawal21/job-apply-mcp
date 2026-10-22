@@ -58,5 +58,6 @@ Decision:
   requires a chosen suggestion; submit waits for the uploaded filename chip.
 - **Submit button**: prefers visible+enabled buttons named Submit/Submit application inside the `<form>`, then
   anywhere by name; still refuses if more than one candidate remains.
+- Captcha-protected platforms. The project never evades, solves or manipulates bot detection (no stealth/fingerprint changes, no reCAPTCHA token handling, no timing tricks, no borrowed personal browser profile). When a captcha/reCAPTCHA/hCaptcha/Turnstile script or widget is detected (always for Ashby), the driver fills and verifies the form in a VISIBLE (headless=false) browser, saves evidence, does NOT click the final submit, leaves the tab open, and returns status handoff so a human performs the final click. If a visible browser is unavailable (headless) it returns needs_human.
 Verify: `uv run pytest tests/test_apply_browser_local.py` (needs local Chrome, skipped otherwise). Tests always use a
 tmp `data_dir` (autouse fixture in `tests/conftest.py`). Revert: revert the PR; config knobs are additive.
