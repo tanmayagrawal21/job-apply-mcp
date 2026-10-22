@@ -261,25 +261,67 @@ async def test_stop_phrase_inside_short_text_is_rejected():
 @pytest.mark.parametrize("text", [
     GOOD + " I c\u200bertify this is my own w\u200bork.",                      # zero-width space
     GOOD + " I cer\u00adtify that I person\u00adally completed it.",           # soft hyphen
-    GOOD + " Thanks\u2060.",                                                   # any Cf character at all
+    GOOD + " Thanks\u2060.",                                                   # word joiner
     GOOD + "\ufeff",                                                           # BOM
+    GOOD + " \uff29 \uff43\uff45\uff52\uff54\uff49\uff46\uff59 \uff54\uff48\uff49\uff53.",   # fullwidth
+    GOOD + " \u0406 \u0441ertify th\u0456s.",                                  # Cyrillic look-alikes
+    GOOD + " I ce\u0301rtify this.",                                          # combining acute
+    GOOD + " I \u1d04ertify this.",                                           # small capital C
+    GOOD + " \u026a certify this.",                                           # U+026A
+    GOOD + " \ua4f2 certify this.",                                           # U+A4F2
+    GOOD + " \u01c0 certify this.",                                           # U+01C0
+    GOOD + " \u13a5 certify this.",                                           # U+13A5
+    GOOD + " I certify this is my \u0585wn work.",                            # U+0585
+    GOOD + " Thanks\u00a0again.",                                             # no-break space
 ])
-async def test_format_characters_are_rejected(text):
+async def test_non_allowlisted_characters_are_rejected(text):
     t, r = await _rejected(text)
-    assert t["violations"][0].startswith("[format]") and not _reviews(r)
+    assert t["violations"][0].startswith("[charset]") and not _reviews(r)
 
 
 @pytest.mark.parametrize("text", [
-    GOOD + " \uff29 \uff43\uff45\uff52\uff54\uff49\uff46\uff59 \uff54\uff48\uff49\uff53.",   # fullwidth
-    GOOD + " \u0406 \u0441ertify th\u0456s.",                                  # Cyrillic look-alikes
-    GOOD + " You have my permission to text me about openings.",
-    GOOD + " I did not use ChatGPT or any AI tool.",
-    GOOD + " There was no\nAI used in writing these answers.",
-    GOOD + " This was completed by me personally.",
+    "You have my permission to text me about openings.",
+    "I did not use ChatGPT or any AI tool.",
+    "There was no\nAI used in writing these answers.",
+    "This was completed by me personally.",
+    "l certify this is accurate.", "1 certify this is accurate.", "| certify this is accurate.",
+    "No Al was used.", "No A.I. was used.", "No A I was used.", "Written without the use of A.I. tools.",
+    "We certify the answers.", "I certified that the answers are mine.", "The applicant attests to this.",
+    "You may text me at any time.", "Happy to get SMS updates.", "Feel free to contact me by phone.",
+    "I c\u00e9rtify this.",                                                    # precomposed accent (allowlisted)
 ])
-async def test_normalised_and_paraphrased_attestations_are_rejected(text):
-    t, r = await _rejected(text)
+async def test_lookalikes_and_paraphrased_attestations_are_rejected(text):
+    t, r = await _rejected(GOOD + " " + text)
     assert t["violations"][0].startswith("[attestation]") and not _reviews(r)
+
+
+def test_accented_names_and_typography_are_allowed():
+    assert checks.charset_violations("Jos\u00e9 \u0141ukasz M\u00fcller \u2019\u2018\u201c\u201d\u2013\u2014\u2026\u2022 ok\t\n") == []
+
+
+def test_every_non_allowlisted_code_point_is_a_charset_hit():
+    allowed = 0
+    for o in range(0x110000):
+        if 0xD800 <= o <= 0xDFFF:
+            continue
+        c = chr(o)
+        if checks.allowed_char(c):
+            allowed += 1
+            continue
+        assert checks.charset_violations(f"ok {c} ok") == [f"U+{o:04X}"], hex(o)
+    assert allowed == 95 + 3 + 8 + 62 + 128                                  # ASCII, ws, typographic, Latin-1, Ext-A
+
+
+@pytest.mark.parametrize("seed", range(12))
+async def test_random_non_allowlisted_code_point_leads_to_needs_review(seed):
+    import random
+    rng = random.Random(seed)
+    while True:
+        o = rng.randrange(0x80, 0x110000)
+        if not (0xD800 <= o <= 0xDFFF) and not checks.allowed_char(chr(o)):
+            break
+    t, _ = await _rejected(GOOD + f" Thanks {chr(o)}.")
+    assert t["violations"][0].startswith("[charset]") and f"U+{o:04X}" in t["violations"][0]
 
 
 @pytest.mark.parametrize("text", [
@@ -351,33 +393,17 @@ IGNORABLE_EXAMPLES = [0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x
                       0xE0000, 0xE0001, 0xE007F, 0xE0100, 0xE01EF, 0xE0FFF]
 
 
-def test_every_default_ignorable_code_point_is_flagged():
-    for lo, hi in checks.DEFAULT_IGNORABLE:
-        for o in range(lo, hi + 1):
-            assert checks.format_chars(f"I c{chr(o)}ertify") == [f"U+{o:04X}"], hex(o)
-    assert checks.format_chars("I certify, caf\u00e9, \u4e2d\u6587, na\u0131ve") == []   # visible text is fine
-
-
 @pytest.mark.parametrize("cp", IGNORABLE_EXAMPLES, ids=[f"U+{c:04X}" for c in IGNORABLE_EXAMPLES])
 async def test_default_ignorable_inside_prose_is_rejected(cp):
     t, r = await _rejected(GOOD + f" I c{chr(cp)}ertify this is my own w{chr(cp)}ork.")
-    assert t["violations"][0].startswith("[format]") and f"U+{cp:04X}" in t["violations"][0] and not _reviews(r)
-
-
-@pytest.mark.parametrize("text", [
-    "I c\u00e9rtify this.",                     # precomposed accent
-    "I ce\u0301rtify this.",                    # combining acute
-    "I c\u0323e\u0308rtify this.",             # stacked marks
-    "I \u1d04ertify th\u0456s.",               # small-capital C, Cyrillic i
-])
-async def test_diacritics_and_confusables_do_not_hide_attestations(text):
-    t, r = await _rejected(GOOD + " " + text)
-    assert t["violations"][0].startswith("[attestation]") and not _reviews(r)
+    assert t["violations"][0].startswith("[charset]") and f"U+{cp:04X}" in t["violations"][0] and not _reviews(r)
 
 
 def test_scan_forms_normalises():
-    assert "certify" in checks.scan_forms("I ce\u0301rtify")[0]
-    assert checks.scan_forms("\uff29 \uff43\uff45\uff52\uff54\uff49\uff46\uff59")[0] == "I certify"
+    assert checks.scan_forms("I C\u00c9RTIFY")[0] == "i certify"
+    assert checks.scan_forms("l certify")[0] == "i certify" and checks.scan_forms("| certify")[0] == "i certify"
+    assert checks.scan_forms("No A.I. used")[0].startswith("no ai")
+    assert checks.scan_forms("Al Smith led the team")[0] == "al smith led the team"   # names untouched
 
 
 @pytest.mark.parametrize("value", [{"a": 1}, object(), [1, 2], b"bytes"])

@@ -65,15 +65,19 @@ _ATTEST_LABEL = re.compile(
     r"true and (?:correct|accurate)|truthful|export control|conflict of interest", re.IGNORECASE)
 # Attestation, certification, no-AI and consent wording that must never ride along inside an answer (ADR-0044).
 _ATTEST_TEXT = re.compile(
-    r"\bI\s+(?:hereby\s+|also\s+|further\s+)?(?:certify|attest|declare|affirm|acknowledge|agree|consent|"
-    r"authori[sz]e|confirm\s+that)\b|\bhereby\b|\bpersonally\s+(?:completed|wrote|written|prepared)\b|"
+    r"\b(?:i|we|the\s+applicant|applicant|the\s+candidate|candidate|the\s+undersigned)\s+"
+    r"(?:hereby\s+|also\s+|further\s+|have\s+|has\s+|do\s+|did\s+|can\s+|will\s+)?"
+    r"(?:certif(?:y|ies|ied)|attest(?:s|ed)?|affirm(?:s|ed)?|declar(?:e|es|ed)|confirm(?:s|ed)?|"
+    r"acknowledg(?:e|es|ed)|agree(?:s|d)?|consent(?:s|ed)?|authori[sz](?:e|es|ed))\b|"
+    r"\bhereby\b|\bpersonally\s+(?:completed|wrote|written|prepared)\b|"
     r"\b(?:completed|written|prepared)\s+by\s+me\s+personally\b|"
     r"\bwithout\s+(?:the\s+)?(?:use|help|assistance|aid)\s+of\s+(?:any\s+)?(?:an?\s+)?(?:ai|artificial intelligence|"
     r"llms?|chatgpt|generative)\b|\b(?:did\s+not|didn\W?t|never)\s+use(?:d)?\s+(?:any\s+|an?\s+)?(?:chatgpt|copilot|"
-    r"ai|artificial intelligence|generative|llms?)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\s+"
-    r"(?:tools?\s+)?(?:was\s+|were\s+)?used\b|\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+"
-    r"(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b|\bpermission\s+to\s+(?:text|call|contact|email|"
-    r"e\W?mail|message|sms)\b|\b(?:sms|text)\s+messages?\b",
+    r"ai|artificial intelligence|generative|llms?)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\b|"
+    r"\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b|"
+    r"\bpermission\s+to\s+(?:text|call|contact|email|e\W?mail|message|sms)\b|\bsms\b|\btexts\b|"
+    r"\btext\s+(?:me|messages?|messaging|updates?|alerts?)\b|\bcall\s+or\s+text\b|"
+    r"\bcontact\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|text|sms|mobile|cell)\b",
     re.IGNORECASE)
 # Text aimed at the reviewer model rather than the employer (ADR-0044).
 _INJECT_TEXT = re.compile(
@@ -722,7 +726,7 @@ class ApplyEngine:
                 continue
             texts = [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)] \
                 if isinstance(v, list | tuple) else []
-            bad = next((b for b in map(self._text_guard, texts) if b), None)
+            bad = next((b for b in (self._text_guard(x, x in f.options) for x in texts) if b), None)
             if bad:                                              # never reaches the reviewer or the form
                 failed.append(self._task(f, ctx, {"needs_review": True, "draft": str(v)[:2000], "violations": [bad]}))
                 continue
@@ -808,13 +812,14 @@ class ApplyEngine:
                     return True
         return bool(_EXACT_VALUE.fullmatch(t))
 
-    def _text_guard(self, text: str) -> str | None:
-        """Deterministic checks on every client string before any reviewer call (ADR-0044): Unicode format (Cf)
-        characters, then stop phrases, attestation/no-AI/consent wording and reviewer-addressed text, scanned
-        after NFKC, Cf removal and confusable mapping, and again with punctuation collapsed."""
-        cf = checks.format_chars(text)
-        if cf:
-            return f"[format] invisible characters {sorted(set(cf))[:4]}"
+    def _text_guard(self, text: str, option: bool = False) -> str | None:
+        """Deterministic checks on every client string before any reviewer call (ADR-0044). Deny by default: any
+        code point outside the prose allowlist is `[charset]` (skipped only for an exact option of the field's
+        fixed set, which is form text, not client text). Then stop phrases, attestation/no-AI/consent wording and
+        reviewer-addressed text are scanned on the normalised views from `checks.scan_forms`."""
+        bad = checks.charset_violations(text)
+        if bad and not option:
+            return f"[charset] characters outside the allowlist {bad[:4]}"
         forms = checks.scan_forms(text)
         for t in forms:
             low = t.lower()

@@ -145,49 +145,40 @@ def fact_conflicts(text: str, resume: list[Fact], today: date) -> list[Hit]:
     return out[:3]
 
 
-# Latin look-alikes from other scripts (Cyrillic, Greek, IPA) that NFKC leaves alone (ADR-0044).
-_CONFUSABLES = str.maketrans({
-    "а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t",
-    "у": "y", "х": "x", "і": "i", "ї": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "һ": "h", "ӏ": "l",
-    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
-    "І": "I", "Ј": "J", "Ѕ": "S", "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W", "Ү": "Y", "Ӏ": "I",
-    "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x",
-    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P",
-    "Τ": "T", "Υ": "Y", "Χ": "X", "ɑ": "a", "ɡ": "g", "ɩ": "i", "ʟ": "l", "ı": "i",
-    # small capitals (IPA / phonetic extensions)
-    "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ꜰ": "f", "ɢ": "g", "ʜ": "h", "ɪ": "i", "ᴊ": "j", "ᴋ": "k",
-    "ᴍ": "m", "ɴ": "n", "ᴏ": "o", "ᴘ": "p", "ʀ": "r", "ꜱ": "s", "ᴛ": "t", "ᴜ": "u", "ᴠ": "v", "ᴡ": "w", "ʏ": "y",
-    "ᴢ": "z",
-})
-_PUNCT = re.compile(r"[\W_]+", re.UNICODE)
+# Client prose allowlist (ADR-0044): deny by default. Printable ASCII, normal whitespace, Latin-1 and Latin
+# Extended-A letters (accented names), and a few typographic marks. Every other code point is a `[charset]` hit,
+# so the phrase scan below only ever sees text built from these characters.
+_TYPOGRAPHIC = frozenset("\u2019\u2018\u201c\u201d\u2013\u2014\u2026\u2022")
+_WHITESPACE = frozenset("\t\n\r")
 
 
-# Unicode Default_Ignorable_Code_Point, complete (DerivedCoreProperties.txt, Unicode 15.1/16.0): characters that
-# render as nothing. Inclusive ranges (ADR-0044).
-DEFAULT_IGNORABLE: tuple[tuple[int, int], ...] = (
-    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
-    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
-    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
-)
-
-
-def is_ignorable(c: str) -> bool:
+def allowed_char(c: str) -> bool:
     o = ord(c)
-    return any(lo <= o <= hi for lo, hi in DEFAULT_IGNORABLE)
+    return (0x20 <= o <= 0x7E or c in _WHITESPACE or c in _TYPOGRAPHIC
+            or (0xC0 <= o <= 0xFF and o not in (0xD7, 0xF7)) or 0x100 <= o <= 0x17F)
 
 
-def format_chars(text: str) -> list[str]:
-    """Invisible characters: every Default_Ignorable_Code_Point (zero-width, joiners, soft hyphen, CGJ, variation
-    selectors, Hangul fillers, Mongolian FVS, tags, ...) plus any other Unicode format (Cf) character (ADR-0044)."""
-    import unicodedata
-    return [f"U+{ord(c):04X}" for c in text if is_ignorable(c) or unicodedata.category(c) == "Cf"]
+def charset_violations(text: str) -> list[str]:
+    """Code points outside the client prose allowlist, as U+XXXX (deduplicated, in order)."""
+    return list(dict.fromkeys(f"U+{ord(c):04X}" for c in text if not allowed_char(c)))
+
+
+_PUNCT = re.compile(r"[\W_]+")
+_ATTEST_VERB = (r"(?:hereby\s+|also\s+|further\s+)?(?:certif|attest|affirm|declar|confirm|consent|agree|acknowledg|"
+                r"authori[sz])")
+_LOOKALIKE_I = re.compile(rf"(?<![\w|!])[1l|!](?=\s+{_ATTEST_VERB})")
+_AI_FORM = r"(?:a\.\s*i\.?|a\s+i|al)"
+_AI_BEFORE = re.compile(rf"\b(no|use|used|of|without|any|an|using)\s+{_AI_FORM}(?=[\W]|$)")
+_AI_AFTER = re.compile(rf"(?<![\w.]){_AI_FORM}\s*-?\s*(assisted|generated|written|tools?|used)\b")
 
 
 def scan_forms(text: str) -> list[str]:
-    """Views of `text` for deterministic phrase scans: NFKD, combining marks / Cf / default-ignorables removed,
-    confusables mapped to Latin, NFKC, then the same with every run of punctuation, slug separators and line breaks collapsed to one space."""
+    """Views of allowlisted `text` for deterministic phrase scans: NFKD, combining marks dropped, casefolded,
+    ASCII look-alikes mapped ("l certify" / "1 certify" / "| certify" -> "i certify"; "No A.I." / "A I" / "Al"
+    next to no/use/used/assisted/generated/written -> "ai"), then the same with punctuation collapsed."""
     import unicodedata
-    t = unicodedata.normalize("NFKD", text)                  # compatibility forms and decomposed accents
-    t = "".join(c for c in t if unicodedata.category(c) not in ("Mn", "Me", "Cf") and not is_ignorable(c))
-    t = unicodedata.normalize("NFKC", t.translate(_CONFUSABLES))   # cértify -> certify; Cyrillic і -> i
+    t = unicodedata.normalize("NFKD", text)
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn").casefold()
+    t = _LOOKALIKE_I.sub("i", t)
+    t = _AI_AFTER.sub(r"ai \1", _AI_BEFORE.sub(r"\1 ai", t))
     return [t, " ".join(_PUNCT.sub(" ", t).split())]
