@@ -91,6 +91,101 @@ def greenhouse_embed_url(url: str, ref: str) -> str:
     return url
 
 
+# captcha_policy="attempt" ABSOLUTE LIMITS (ADR-0036). This code will never, under any setting:
+#   - solve a challenge or call a solver service;     - interact with a challenge frame (no clicks, no reads inside);
+#   - add stealth / fingerprint plugins;               - spoof the webdriver flag or the user agent;
+#   - remove automation flags from the browser;        - inject or fabricate a captcha token;
+#   - retry a submission to improve a risk score;      - click Submit more than once per submission.
+# A visible challenge, before or after the click, means STOP and hand the open tab to a human.
+# Reads only the HOST page (element attributes and geometry, open shadow roots); never challenge-frame contents
+# (ADR-0036). FAIL CLOSED: `widgets` = known vendors present, `visible` = interactive challenge shown, `unsafe` =
+# anything unknown or inconclusive (unknown vendor, unrendered/zero-size/off-screen non-badge widget, error). Only a
+# positive allowlist is passive: reCAPTCHA badge / invisible / script-only (no checkbox container), and hCaptcha or
+# Turnstile explicitly declared invisible / interaction-only with no shown frame.
+_CAPTCHA_JS = r"""() => {
+  const w = new Set(), v = new Set(), u = new Set();
+  const roots = [];
+  const collect = root => { roots.push(root);
+    root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) collect(e.shadowRoot); }); };
+  collect(document);
+  const all = sel => roots.flatMap(r => Array.from(r.querySelectorAll(sel)));
+  const shown = el => {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement || (n.getRootNode().host || null)) {
+      const cs = getComputedStyle(n);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+    }
+    const r = el.getBoundingClientRect();
+    return r.width >= 30 && r.height >= 30 && r.right > 0 && r.bottom > 0;
+  };
+  const src = e => (e.getAttribute('src') || '') + '';
+  const KNOWN = /recaptcha|hcaptcha|turnstile|challenges\.cloudflare\.com/i;
+  const VENDOR = /arkose|funcaptcha|geetest|datadome|perimeterx|px-cdn|px-client|humansecurity|kasada|awswaf|aws-waf|captcha|challenge|verify|\bbot\b|botd/i;
+  const frames = all('iframe, frame, embed, object');
+  const scripts = all('script[src]');
+  for (const f of frames) {                       // any unrecognised challenge-ish frame -> unsafe
+    const s = src(f);
+    if (!KNOWN.test(s) && VENDOR.test(s)) u.add('unknown-frame');
+  }
+  for (const sc of scripts) {
+    const s = src(sc);
+    if (!KNOWN.test(s) && /arkose|funcaptcha|geetest|datadome|perimeterx|px-cdn|px-client|humansecurity|kasada|awswaf|aws-waf/i.test(s)) u.add('unknown-vendor');
+  }
+  if (all('[class*=funcaptcha i], [id*=funcaptcha i], [class*=geetest i], [id*=geetest i], [class*=arkose i], [id*=arkose i], [class*=datadome i], [id*=datadome i]').length) u.add('unknown-vendor');
+  if (all('[data-sitekey]:not(.g-recaptcha):not(.h-captcha):not(.cf-turnstile)').length) u.add('unknown-widget');
+  // reCAPTCHA
+  const rcF = frames.filter(f => /recaptcha/i.test(src(f)));
+  const rcBox = all('.g-recaptcha');
+  if (all('.grecaptcha-badge').length || rcF.length || rcBox.length || scripts.some(x => /recaptcha/i.test(src(x)))) w.add('recaptcha');
+  for (const c of rcBox) if (!/invisible/i.test(c.getAttribute('data-size') || '') && !shown(c.querySelector('iframe') || c) ) u.add('recaptcha-box-unrendered');
+  for (const f of rcF) {
+    const inv = /size=invisible/i.test(src(f)) || !!f.closest('.grecaptcha-badge');
+    if (shown(f) && !inv) v.add('recaptcha');
+    else if (!shown(f) && !inv && !/bframe/i.test(src(f))) u.add('recaptcha-frame-inconclusive');
+  }
+  // hCaptcha: passive only if declared invisible
+  const hcF = frames.filter(f => /hcaptcha/i.test(src(f))), hcBox = all('.h-captcha');
+  if (hcF.length || hcBox.length || scripts.some(x => /hcaptcha/i.test(src(x)))) {
+    w.add('hcaptcha');
+    const inv = hcBox.length > 0 && hcBox.every(c => /invisible/i.test(c.getAttribute('data-size') || '')) ||
+                (hcF.length > 0 && hcF.every(f => /size=invisible/i.test(src(f)) || /frame=challenge/i.test(src(f))));
+    if (!inv) u.add('hcaptcha-not-declared-invisible');
+    for (const f of hcF) if (shown(f) && !/size=invisible/i.test(src(f))) v.add('hcaptcha');
+  }
+  // Turnstile: passive only if declared interaction-only / execute-on-demand
+  const tsF = frames.filter(f => /turnstile|challenges\.cloudflare\.com/i.test(src(f))), tsBox = all('.cf-turnstile');
+  if (tsF.length || tsBox.length || scripts.some(x => /turnstile/i.test(src(x)))) {
+    w.add('turnstile');
+    const decl = tsBox.length > 0 && tsBox.every(c => /interaction-only/i.test(c.getAttribute('data-appearance') || '') ||
+                                                     /execute/i.test(c.getAttribute('data-execution') || ''));
+    if (!decl) u.add('turnstile-not-declared-passive');
+    for (const f of tsF) if (shown(f)) v.add('turnstile');
+  }
+  return {widgets: Array.from(w), visible: Array.from(v), unsafe: Array.from(u)}; }"""
+
+# Frames whose URL looks like a captcha/bot-check vendor are NEVER evaluated (no challenge-frame interaction).
+_CAPTCHA_FRAME_URL = re.compile(r"recaptcha|hcaptcha|turnstile|challenges\.cloudflare|arkose|funcaptcha|geetest|datadome|"
+                                r"perimeterx|px-cdn|humansecurity|kasada|awswaf|captcha|challenge|verify|\bbot\b",
+                                re.IGNORECASE)
+
+
+# Class/id markers found by the CDP scan (closed shadow roots included). Passive allowlist below (ADR-0036).
+_CAPTCHA_MARKER = re.compile(r"arkose|funcaptcha|geetest|datadome|perimeterx|humansecurity|kasada|awswaf|aws-waf|"
+                             r"captcha|turnstile|cf-chl", re.IGNORECASE)
+
+
+def _marker_passive(tok: str, attrs: dict[str, str]) -> bool:
+    t = tok.lower()
+    if t.startswith(("grecaptcha-badge", "grecaptcha-logo", "grecaptcha-error", "g-recaptcha-response",
+                     "h-captcha-response", "cf-turnstile-response")):
+        return True
+    if t == "g-recaptcha" or t == "h-captcha":
+        return "invisible" in attrs.get("data-size", "").lower()
+    if t == "cf-turnstile":
+        return ("interaction-only" in attrs.get("data-appearance", "").lower()
+                or "execute" in attrs.get("data-execution", "").lower())
+    return False
+
+
 _BLOCKERS: list[tuple[str, re.Pattern[str]]] = [
     ("captcha", re.compile(r"verify you are human|i'?m not a robot|checking if the site connection is secure|"
                            r"complete the security check|hcaptcha|select all (images|squares)", re.IGNORECASE)),
@@ -407,23 +502,31 @@ class PlaywrightDriver(VerificationMixin):
                 ev = await self._save_evidence(page, ref, "presubmit-errors", extra={"errors": errs})
                 return SubmitResult(ref=ref, status="needs_human", via="browser",
                                     detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
+        attempt = False
         if not dry_run and self.b.captcha_handoff:
-            widgets = await self._captcha_widgets(page)
-            if widgets or ats.name == "ashby":      # never evade/solve bot checks: a human makes the final click
-                ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets})
-                if self.b.headless:
-                    return SubmitResult(ref=ref, status="needs_human", via="browser",
-                                        detail=f"captcha-protected ({widgets or ['ashby']}); form filled and verified, "
-                                               f"not clicked; rerun with browser.headless=false{ev}")
-                self._handoff_pages.add(id(page))
-                return SubmitResult(ref=ref, status="handoff", via="browser", confirmation=page.url[:200],
-                                    detail=f"form filled and verified in the open browser tab; a human must click "
-                                           f"Submit (captcha-protected){ev}")
+            state = await self._captcha_state(page)
+            widgets = state["widgets"]
+            if widgets or state["unsafe"] or ats.name == "ashby":
+                # captcha_policy="attempt" (ADR-0036): only a passive/invisible widget and NO visible challenge may be
+                # clicked through, once, exactly like a person would. Anything else stays a human handoff.
+                if (self.b.captcha_policy == "attempt" and widgets and not state["visible"]
+                        and not state["unsafe"]):
+                    attempt = True
+                else:      # never evade/solve bot checks: a human makes the final click
+                    ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets, "unsafe": state["unsafe"]})
+                    if self.b.headless:
+                        return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                            detail=f"captcha-protected ({widgets or ['ashby']}); form filled and verified, "
+                                                   f"not clicked; rerun with browser.headless=false{ev}")
+                    self._handoff_pages.add(id(page))
+                    return SubmitResult(ref=ref, status="handoff", via="browser", confirmation=page.url[:200],
+                                        detail=f"form filled and verified in the open browser tab; a human must click "
+                                               f"Submit (captcha-protected){ev}")
         if dry_run:
             ev = await self._save_evidence(page, ref, "dry-run")
             return SubmitResult(ref=ref, status="dry_run", via="browser",
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
-        return await self._submit(page, ats, ref)
+        return await self._submit(page, ats, ref, attempt=attempt)
 
     # -- evidence / network ---------------------------------------------------------------------
     def _attach_recorder(self, page, ats: AtsProfile) -> None:
@@ -463,17 +566,93 @@ class PlaywrightDriver(VerificationMixin):
         except Exception:
             return []
 
+    async def _captcha_state(self, page) -> dict[str, list[str]]:
+        """Fail-closed captcha classification (ADR-0036): `widgets`, `visible` challenge, `unsafe` reasons. Inspects
+        the host page and non-vendor child frames; vendor/challenge frames are never evaluated. Any error is
+        recorded as unsafe, which means HANDOFF, never a click."""
+        out: dict[str, list[str]] = {"widgets": [], "visible": [], "unsafe": []}
+
+        def merge(d: dict) -> None:
+            for k, cur in out.items():
+                cur += [x for x in d.get(k, []) if x not in cur]
+        try:
+            merge(await page.evaluate(_CAPTCHA_JS))
+        except Exception:
+            out["unsafe"].append("classifier-error")
+            return out
+        for fr in list(page.frames):
+            if fr == page.main_frame:
+                continue
+            try:
+                if _CAPTCHA_FRAME_URL.search((fr.url or "") + " " + (fr.name or "")):
+                    # The browser tracks frames inside CLOSED shadow roots too. Vendor frames are never evaluated, but
+                    # their <iframe> ELEMENT (in the parent) is checked for visibility; unresolvable -> unsafe.
+                    merge(await self._frame_element_state(fr))
+                    continue
+                merge(await fr.evaluate(_CAPTCHA_JS))
+            except Exception:
+                out["unsafe"].append("frame-uninspectable")    # cross-origin/detached: cannot prove it is passive
+        merge(await self._cdp_markers(page))
+        return out
+
+    async def _frame_element_state(self, fr) -> dict[str, list[str]]:
+        """Geometry/visibility of a vendor frame's own <iframe> element. Known invisible badge or a hidden
+        recaptcha bframe container are passive; a shown frame is a visible challenge; anything else is unsafe."""
+        try:
+            el = await fr.frame_element()
+            url = fr.url or ""
+            box = await el.bounding_box()
+            shown = bool(await el.is_visible()) and bool(box) and box["width"] >= 30 and box["height"] >= 30 \
+                and box["x"] + box["width"] > 0 and box["y"] + box["height"] > 0
+            badge = bool(await el.evaluate("e => !!e.closest('.grecaptcha-badge')")) or "size=invisible" in url
+            if badge:
+                return {}
+            if shown:
+                return {"widgets": ["frame"], "visible": ["frame:" + (url.split("#")[0].split("?")[0][:60] or fr.name)]}
+            if "bframe" in url:
+                return {}
+            return {"widgets": ["frame"], "unsafe": ["vendor-frame-hidden-or-offscreen"]}
+        except Exception:
+            return {"unsafe": ["vendor-frame-unresolvable"]}
+
+    async def _cdp_markers(self, page) -> dict[str, list[str]]:
+        """Scan the whole DOM, closed shadow roots included (CDP DOM.getDocument pierce), for vendor class/id markers.
+        Contents of vendor iframes are not descended into. Any failure -> unsafe (HANDOFF)."""
+        sess = None
+        try:
+            sess = await page.context.new_cdp_session(page)
+            root = (await sess.send("DOM.getDocument", {"depth": -1, "pierce": True}))["root"]
+            found: list[str] = []
+            stack = [root]
+            while stack:
+                n = stack.pop()
+                at = n.get("attributes") or []
+                attrs = dict(zip(at[0::2], at[1::2]))
+                toks = (attrs.get("class", "").split() + [attrs.get("id", "")])
+                for t in toks:
+                    if t and _CAPTCHA_MARKER.search(t) and not _marker_passive(t, attrs):
+                        found.append(t[:40])
+                vendor_iframe = n.get("nodeName", "").lower() == "iframe" and _CAPTCHA_FRAME_URL.search(
+                    attrs.get("src", "") + " " + attrs.get("name", ""))
+                kids = list(n.get("children") or []) + list(n.get("shadowRoots") or [])
+                if n.get("templateContent"):
+                    kids.append(n["templateContent"])
+                if n.get("contentDocument") and not vendor_iframe:
+                    kids.append(n["contentDocument"])
+                stack.extend(kids)
+            return {"widgets": ["marker"] if found else [], "unsafe": [f"marker:{m}" for m in sorted(set(found))[:5]]}
+        except Exception:
+            return {"unsafe": ["cdp-unavailable"]}
+        finally:
+            if sess is not None:
+                try:
+                    await sess.detach()
+                except Exception:
+                    pass
+
     async def _captcha_widgets(self, page) -> list[str]:
         """Invisible-captcha / bot-check widgets present on the page (explains silent rejections)."""
-        try:
-            return list(await page.evaluate("""() => {
-              const o = [];
-              if (document.querySelector('.grecaptcha-badge, iframe[src*=recaptcha], script[src*=recaptcha]')) o.push('recaptcha');
-              if (document.querySelector('iframe[src*=hcaptcha], .h-captcha, script[src*=hcaptcha]')) o.push('hcaptcha');
-              if (document.querySelector('iframe[src*=turnstile], .cf-turnstile, script[src*=turnstile]')) o.push('turnstile');
-              return o; }"""))
-        except Exception:
-            return []
+        return (await self._captcha_state(page))["widgets"]
 
     async def _button_summary(self, page) -> list[str]:
         try:
@@ -1160,7 +1339,7 @@ class PlaywrightDriver(VerificationMixin):
                 break
         return None, seen
 
-    async def _submit(self, page, ats: AtsProfile, ref: str) -> SubmitResult:
+    async def _submit(self, page, ats: AtsProfile, ref: str, *, attempt: bool = False) -> SubmitResult:
         target, n = await self._pick_submit(page)
         if target is None:
             return SubmitResult(ref=ref, status="needs_human", via="browser",
@@ -1169,9 +1348,10 @@ class PlaywrightDriver(VerificationMixin):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} challenge visible")
         await target.scroll_into_view_if_needed()
         await target.click()                                   # the ONE submit click; never repeated
-        return await self._conclude(page, ats, ref)
+        return await self._conclude(page, ats, ref, attempt=attempt)
 
-    async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False) -> SubmitResult:
+    async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False,
+                        attempt: bool = False) -> SubmitResult:
         """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026)."""
         deadline = time.monotonic() + self.b.confirmation_wait_s
         text, outcome = "", None
@@ -1186,6 +1366,13 @@ class PlaywrightDriver(VerificationMixin):
             outcome = decide_outcome(ats, page.url, text, still, records)
             if outcome:
                 break
+            if attempt and (shown := [x for k in ("visible", "unsafe") for x in (await self._captcha_state(page))[k]]):
+                # A challenge appeared after our single click: STOP. No interaction, no retry; tab stays open (ADR-0036).
+                self._handoff_pages.add(id(page))
+                ev = await self._save_evidence(page, ref, "captcha-challenge", extra={"captcha": shown})
+                return SubmitResult(ref=ref, status="roadblock", via="browser", confirmation=page.url[:200],
+                                    detail=f"captcha challenge or inconclusive widget state {shown} after the single submit click; stopped, "
+                                           f"tab left open for a human; do NOT retry{ev}")
             blk = detect_blocker(text)
             stop = ("duplicate", "captcha") if after_code else ("duplicate", "captcha", "verification")
             if blk in stop or time.monotonic() >= deadline:     # after a code the old prompt lingers until the reply
@@ -1205,11 +1392,14 @@ class PlaywrightDriver(VerificationMixin):
         if blk == "verification" and (pending := await self._await_code(page, ats, ref)) is not None:
             return pending
         if blk in ("captcha", "verification"):
+            if attempt:
+                self._handoff_pages.add(id(page))          # keep the tab open for the human (ADR-0036)
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
         errs = (await self._validation_errors(page))[:5]
         why = ("ATS rejected the submission" if outcome == "failed"
                else "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)")
-        return SubmitResult(ref=ref, status="needs_human", via="browser",
+        # After an attempt-policy click, never return a re-enterable state: roadblock -> engine `unknown` (ADR-0036).
+        return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
                             detail=f"{why}; errors={errs}; do NOT retry, check manually.{ev}")
 
 

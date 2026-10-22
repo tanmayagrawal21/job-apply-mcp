@@ -4,7 +4,7 @@
 
 Settings load in this order, later wins: built-in defaults, the user file (`~/.config/job-apply-mcp/config.toml`, `%APPDATA%\job-apply-mcp\config.toml` on Windows, or `$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables `JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). Secrets (API keys, IMAP passwords) are only ever read from the environment.
 
-**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter.
+**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, `browser.captcha_policy=attempt`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter.
 
 **Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and `apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default or setting `0` is honored only from the trusted user config (same rule as the trust model above). `control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining.
 
@@ -188,6 +188,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `evidence_text_chars` | `int` | `20000` | cap on saved visible page text |
 | `evidence_body_chars` | `int` | `500` | cap on each saved submit-response body |
 | `captcha_handoff` | `bool` | `true` | captcha-protected pages (always Ashby): never click submit; human does (ADR-0012). Tests only: False |
+| `captcha_policy` | `Literal['handoff', 'attempt']` | `"handoff"` | attempt: click Submit once if only an invisible widget (no visible challenge); trusted user config only (ADR-0036) |
 | `presubmit_validation` | `bool` | `true` | read back fields + check visible validation errors before the submit click |
 | `agent_max_steps` | `int` | `40` |  |
 | `agent_tier` | `str` | `"medium"` | llm tier whose model drives the generic agent |
