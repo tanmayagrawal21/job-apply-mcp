@@ -424,6 +424,9 @@ class DedupeCfg(BaseModel):
     """Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical apply URL, with
     company+title only when neither is known. title: legacy company+fuzzy-title matching."""
     mode: str = "id_first"
+    # {"brand": "canonical"}: names that are the same employer (parent/brand). Normalized like company names.
+    company_aliases: dict[str, str] = Field(default_factory=dict)
+    title_threshold: float = Field(0.6, ge=0.0, le=1.0)    # token-Jaccard for the company+title fallback
 
 
 class Settings(BaseModel):
