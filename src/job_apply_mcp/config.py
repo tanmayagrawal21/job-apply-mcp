@@ -61,6 +61,32 @@ class PolicyCfg(BaseModel):
         "personally completed", "my own work", "without the use of ai", "no ai", "ai policy",
     ])
     dedupe_days: int = 180
+    # Gate pipeline (ADR-0009). None = run every built-in gate in default order; a list enables/reorders.
+    gates: list[str] | None = None
+    us_citizen: bool = False                     # candidate facts used by the citizenship gate
+    us_person: bool = False                      # citizen or permanent resident (ITAR "US person")
+    has_clearance: bool = False
+    graduation_flex_months: int = 0              # tolerance around a posting's graduation window
+    hours_per_year: int = 2080                   # hourly -> annual conversion
+
+
+BUILTIN_CONTROLS = ["mode", "quota", "attestation", "hard_stop", "single_submit", "prose_lint",
+                    "recipient_deny", "page_text_injection"]
+
+
+class ControlCfg(BaseModel):
+    """Control layer (ADR-0014). Per-control knobs live in `params[<control id>]`; end users add their own
+    declarative rules in a TOML file outside the repo (`rules_file`)."""
+
+    enabled: list[str] = Field(default_factory=lambda: list(BUILTIN_CONTROLS))
+    rules_file: str | None = None
+    params: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    apply_enabled: bool = True          # False blocks every side-effecting action
+    dev_mode: bool = False              # True forces dry-run for everything
+    audit: bool = True
+    review_enabled: bool = False        # optional model-based review (router task_class "review")
+    review_actions: list[str] = Field(default_factory=lambda: ["write_prose", "send_message"])
+    review_fail: str = "warn"           # what to do when the reviewer errors: warn | needs_human
 
 
 class PathsCfg(BaseModel):
@@ -93,6 +119,7 @@ class Settings(BaseModel):
     policy: PolicyCfg = Field(default_factory=PolicyCfg)
     paths: PathsCfg = Field(default_factory=PathsCfg)
     platforms: PlatformsCfg = Field(default_factory=PlatformsCfg)
+    control: ControlCfg = Field(default_factory=ControlCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this

@@ -85,6 +85,11 @@ async def health() -> str:
     return _out(await svc().health())
 
 
+from .control.tools import register as _register_control
+
+_register_control(mcp, lambda: svc().settings)
+
+
 def main() -> None:
     mcp.run()
 

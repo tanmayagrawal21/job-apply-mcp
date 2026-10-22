@@ -24,6 +24,16 @@ class Services:
         self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s)
         self._http: HttpClient | None = None
         self._adapters: dict[str, PlatformAdapter] | None = None
+        self._store = None
+
+    @property
+    def store(self):
+        """SQLite store, opened lazily so the server starts even if the data dir is unwritable."""
+        if self._store is None:
+            from .store.sqlite import SqliteStore
+
+            self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days)
+        return self._store
 
     # ------------------------------------------------------------------ platform plumbing
     @property
@@ -172,7 +182,10 @@ class Services:
         return {"results": [r if not isinstance(r, BaseException) else {"error": str(r)} for r in rows]}
 
     async def list_applications(self, status: str, limit: int, cursor: int) -> dict[str, Any]:
-        raise NotImplementedError("store lands in feat/store-policy")
+        page = await self.store.list(status="" if status in ("", "all") else status, limit=limit, cursor=cursor)
+        rows = [{"ref": r["ref"], "co": r["company"], "title": r["title"], "st": r["status"],
+                 "at": r["created_at"][:10]} for r in page["rows"]]
+        return {"rows": rows, "next": page["next"], "total": page["total"]}
 
     async def health(self) -> dict[str, Any]:
         from .core import registry
