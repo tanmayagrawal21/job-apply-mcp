@@ -31,8 +31,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - CI runs on Ubuntu, macOS and Windows with Python 3.11 to 3.13.
 
 ### Security
-- Trust-boundary guards compare typed values: string settings such as `daily_limit = "0"` or `dry_run = "false"` in a project file or env no longer bypass them, and env/project can no longer loosen the user config's own tighter value. `grants.use_keyring` and `browser.captcha_handoff` are now guarded (ADR-0037).
-- Grant use counts live in the signed grant record, so truncating the audit log no longer restores `max_uses`; grants issued before this change must be re-issued (ADR-0037).
+- Trust-boundary guards compare typed values: string settings such as `daily_limit = "0"` or `dry_run = "false"` in a project file or env no longer bypass them, and env/project can no longer loosen the user config's own tighter value. `grants.use_keyring` and `browser.captcha_handoff` are now guarded. Submission caps must be whole numbers >= 0; an invalid value (`0.5`, `"1e9"`, `-1`, `nan`) from any source falls back to the stricter of the user value and the default instead of meaning "no limit" (ADR-0037).
+- Grant use counts live only in the signed grant record, so truncating the audit log no longer restores `max_uses`, and a duplicated grant row is rejected as tampering; grants issued before this change must be re-issued (ADR-0037).
 
 ## [0.1.0]
 - Initial development release: platform adapters, apply engine, LLM router, control layer, provenance, ingest,
