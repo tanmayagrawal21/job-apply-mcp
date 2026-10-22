@@ -121,6 +121,12 @@ class PolicyCfg(BaseModel):
     max_years_required: int | None = None
     salary_floor: int | None = None              # annual, in the candidate's home market
     col_multipliers: dict[str, float] = Field(default_factory=dict)  # city substring -> multiplier
+    # Deterministic salary rule (ADR-0011 Amendment 2). base_salary defaults to salary_floor.
+    base_salary: int | None = None
+    default_ask: int | None = None               # used when the posting shows no range: ask = max(floor, default_ask)
+    salary_round_to: int = 1000                  # clean-number rounding step
+    salary_multi_level_ratio: float = 1.4        # top/bottom above this => range spans levels
+    salary_lower_middle: float = 0.33            # anchor position inside a multi-level range (0.5 = midpoint)
     requires_sponsorship: bool | None = None
     graduation: str | None = None                # e.g. "2026-05"
     exclude_employer_patterns: list[str] = Field(default_factory=list)
