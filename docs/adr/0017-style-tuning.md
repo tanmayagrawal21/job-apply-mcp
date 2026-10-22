@@ -30,7 +30,7 @@ text anywhere. Training data must be authored or approved by the user (ADR-0007 
 5. **Recursion and rollback** (`manager.py`): each run resumes from the promoted adapter; `state.json` keeps
    `promoted` and `previous` (rollback = `tune_run(trigger="rollback")`); old non-promoted adapters are pruned
    (`keep_runs`). `new_data` triggers only when >= `new_data_threshold` unseen user texts exist; `auto_run` lets
-   `tune_status` start a due run. **Guards**: never on battery, never while an Ollama model is resident, unless
+   `tune_status` start a due run. **Guards**: never on battery, never while a heavy (>= `heavy_model_gb`, default 4 GB) Ollama model is resident, unless
    `allow_on_battery` / `allow_with_heavy_model`. One run at a time.
 6. **Tools**: `tune_status`, `tune_run(trigger, wait)` (deviation from ADR-0005's tool budget: two compact tools).
 7. **Ollama export** (`export.py`, optional, needs `tune.ollama_base`): writes `Modelfile` with `FROM` + `ADAPTER`.
