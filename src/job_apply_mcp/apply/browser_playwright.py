@@ -380,6 +380,9 @@ class PlaywrightDriver(VerificationMixin):
                     await self._fill(page, ats, f, v)
             bad = await self._verify(page, [(f, v) for f, v in texty if f.key in bad], ats)
         problems = sorted(set(failed) | set(bad))
+        optional = {f.key: f for f, _ in steps if not f.required}
+        skipped = [k for k in problems if k in optional and await self._is_empty(page, optional[k])]
+        problems = [k for k in problems if k not in skipped]   # an optional field left fully EMPTY never blocks
         if problems:
             ev = await self._save_evidence(page, ref, "fill-failed", extra={"fields": problems[:20]})
             return SubmitResult(ref=ref, status="needs_human", via="browser",
@@ -585,6 +588,8 @@ class PlaywrightDriver(VerificationMixin):
                 except Exception:
                     continue
             return False
+        if tag == "FIELDSET":                                   # checkbox / radio group (Greenhouse multi_value_*)
+            return await self._check_in_group(loc, value)
         marked = False
         try:
             marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
@@ -656,6 +661,48 @@ class PlaywrightDriver(VerificationMixin):
             if pick is not None:
                 return pick
         return None
+
+    @staticmethod
+    async def _check_in_group(group, value: str) -> bool:
+        """Tick the box whose label snaps to `value` (best_option: never a different answer), then read it back."""
+        boxes = group.locator("input[type=checkbox], input[type=radio]")
+        labels = [t.strip() for t in await group.locator("label").all_inner_texts()]
+        pick = best_option(value, labels) if labels else None
+        if pick is None:
+            return False
+        for i in range(await boxes.count()):
+            box = boxes.nth(i)
+            text = (await box.evaluate("e => (e.labels && e.labels[0] ? e.labels[0].innerText : '')")).strip()
+            if text == pick:
+                if not await box.is_checked():
+                    await box.check(timeout=3000)
+                return await box.is_checked()
+        return False
+
+    async def _is_empty(self, page, f: FormField) -> bool:
+        """True only when the control holds no value at all (no text, no checked box, no select chip). Anything
+        partially filled counts as non-empty, so a half-applied answer still blocks the submit."""
+        loc = await self._locate(page, f)
+        if loc is None:
+            return False
+        try:
+            if await self._is_rs(loc):
+                await loc.evaluate(_MARK_SCOPE_JS)
+                chips = await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).count()
+                return chips == 0 and not (await loc.input_value()).strip()
+            kind = await loc.evaluate("e => (e.type || e.tagName).toLowerCase()")
+            if kind == "fieldset":
+                return await loc.locator("input:checked").count() == 0
+            if kind in ("checkbox", "radio"):
+                name = await loc.get_attribute("name")
+                if not name:
+                    return not await loc.is_checked()
+                return await page.locator(f"input[name='{name}']:checked").count() == 0
+            if kind == "select" or kind.startswith("select"):
+                return not (await loc.evaluate("e => e.value || ''")).strip()
+            return not (await loc.input_value()).strip()
+        except Exception:
+            return False
 
     @staticmethod
     async def _close_menu(page) -> None:
@@ -1000,6 +1047,13 @@ class PlaywrightDriver(VerificationMixin):
                     if loc is not None and (await loc.evaluate("e => e.tagName")).upper() == "SELECT":
                         got = await loc.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].text : ''")
                         if not got or (f.options and not best_option(v if isinstance(v, str) else v[0], [got])):
+                            bad.append(f.key)
+                        continue
+                    if loc is not None and (await loc.evaluate("e => e.tagName")).upper() == "FIELDSET":
+                        ticked = [normalize(t) for t in await loc.evaluate(
+                            "e => [...e.querySelectorAll('input:checked')].map(i => i.labels && i.labels[0] ? i.labels[0].innerText : '')")]
+                        if any(normalize(str(one)) not in " | ".join(ticked) and not best_option(one, ticked)
+                               for one in (v if isinstance(v, list) else [v])):
                             bad.append(f.key)
                         continue
                 except Exception:
