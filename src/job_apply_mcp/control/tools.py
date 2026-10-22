@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from ..config import Settings
 from .agent import ControlAgent, Reviewer
 
+log = logging.getLogger(__name__)
 _agent: ControlAgent | None = None
 _reviewer: Reviewer | None = None
 
@@ -41,4 +43,17 @@ def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
     @mcp.tool()
     async def control_status() -> str:
         """Active mode, quotas used/remaining, enabled controls and recent blocks."""
-        return json.dumps(get_agent(get_settings()).status(), separators=(",", ":"), default=str)
+        settings = get_settings()
+        st = get_agent(settings).status()
+        try:  # ADR-0025: confirmation checks still pending (counts only)
+            from ..apply.approvals import ApprovalBook
+            from ..ingest.reconcile import pending_summary
+
+            book = ApprovalBook(settings.paths.data_dir, reconcile_delays_min=settings.ingest.reconcile_delays_min)
+            summary = pending_summary(book)
+            book._db.close()
+            if summary["open"]:
+                st["pending_reconciliations"] = summary
+        except Exception as e:  # noqa: BLE001 - status must never fail on an unwritable data dir
+            log.debug("reconciliation summary unavailable: %s", e)
+        return json.dumps(st, separators=(",", ":"), default=str)

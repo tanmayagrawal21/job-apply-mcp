@@ -71,6 +71,7 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
         except ImportError:
             control = None
     from .approvals import ApprovalBook
-    book = ApprovalBook(settings.paths.data_dir, ttl_s=settings.apply.approval_ttl_s)
+    book = ApprovalBook(settings.paths.data_dir, ttl_s=settings.apply.approval_ttl_s,
+                       reconcile_delays_min=settings.ingest.reconcile_delays_min)
     return ApplyEngine(settings, approvals=book, resolve_adapter=resolve_adapter or adapter_resolver(settings), profile=profile,
                        router=router, gates=gates, store=store, driver_factory=driver_factory, control=control)
