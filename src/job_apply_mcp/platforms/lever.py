@@ -64,10 +64,10 @@ class LeverAdapter(BaseAdapter):
         """Lever's `country` covers the primary location only; any other location makes the set unconfirmed, so
         job_is_us() is False (deny-by-default, ADR-0040)."""
         c = self.country_code(d.get("country"))
-        if not c:
-            return []
         others = [x for x in cat.get("allLocations") or [] if x and x != cat.get("location")]
-        return [c] if not others else [c, "UNCONFIRMED"]
+        if others:                      # more than one location: the primary's country or text never confirms
+            return [c, "UNCONFIRMED"] if c else ["UNCONFIRMED"]
+        return [c] if c else []
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:

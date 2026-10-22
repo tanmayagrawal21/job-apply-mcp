@@ -502,6 +502,9 @@ def test_adapters_extract_structured_countries():
     multi = d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY", "Toronto, ON"]}}
     pm = lv._to_posting("acme", multi, with_description=False)
     assert not job_is_us(pm.location, pm.countries)
+    no_country = {k: v for k, v in multi.items() if k != "country"}
+    pn = lv._to_posting("acme", no_country, with_description=False)
+    assert pn.countries == ["UNCONFIRMED"] and not job_is_us(pn.location, pn.countries)
     same = d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY"]}}
     ps = lv._to_posting("acme", same, with_description=False)
     assert job_is_us(ps.location, ps.countries)
@@ -517,6 +520,9 @@ def test_adapters_extract_structured_countries():
     j3 = j | {"location": "New York, NY", "secondaryLocations": [{"location": "Toronto"}]}   # secondary without a country
     p3 = ab._to_posting("acme", j3, with_description=False)
     assert not job_is_us(p3.location, p3.countries)
+    j6 = {"id": "x4", "title": "E", "location": "New York, NY", "secondaryLocations": [{"location": "Toronto"}]}
+    p6 = ab._to_posting("acme", j6, with_description=False)                # no structured country anywhere
+    assert p6.countries == ["UNCONFIRMED"] and not job_is_us(p6.location, p6.countries)
     p4 = ab._to_posting("acme", {"id": "x3", "title": "E", "location": "New York, NY"}, with_description=False)
     assert p4.countries == [] and job_is_us(p4.location, p4.countries)                        # single: text fallback
     assert not job_is_us(p3.location, ab._to_posting("acme", j2, with_description=False).countries)
