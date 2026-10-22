@@ -123,7 +123,7 @@ async def test_json_failure_escalates_one_tier():
     schema = {"type": "object", "required": ["a"]}
 
     def resp(prompt, model, k):
-        return '{"a": 1}' if model == "qwen2.5:7b" else "garbage"
+        return '{"a": 1}' if k >= 3 else "garbage"   # small fails + repair fails, medium succeeds
 
     res = await mk(all_fake(responses=resp)).run(Task(prompt="p", field_kind="text", json_schema=schema))
     assert res.ok and res.tier == "medium" and res.escalations == 1
@@ -269,3 +269,65 @@ async def test_live_ollama():
     res = await r.run(Task(prompt='Reply with JSON {"ok": true}', field_kind="text",
                            json_schema={"type": "object", "required": ["ok"]}))
     assert res.ok and res.data["ok"] is True
+
+
+async def test_known_answer_skips_llm():
+    f = all_fake()
+    r = mk(f)
+    res = await r.run(Task(prompt="Email?", known="a@b.co"))
+    assert res.text == "a@b.co" and res.provider == "rules" and not f["ollama"].calls
+    r.resolvers.append(lambda t: "Yes" if "sponsor" in t.prompt else None)
+    assert (await r.run(Task(prompt="need sponsorship?"))).text == "Yes" and not f["ollama"].calls
+
+
+async def test_batch_one_call_for_short_fields():
+    f = all_fake(responses=['{"city": "Tucson", "pronouns": "they", "notice": "2 weeks"}'])
+    r = mk(f)
+    tasks = [Task(prompt="City?", key="city", question="City?", field_kind="text"),
+             Task(prompt="Pronouns?", key="pronouns", question="Pronouns?", field_kind="text"),
+             Task(prompt="Notice?", key="notice", question="Notice period?", field_kind="text"),
+             Task(prompt="email", key="email", known="x@y.z")]
+    res = await r.run_batch(tasks)
+    assert len(f["ollama"].calls) == 1
+    assert [x.text for x in res] == ["Tucson", "they", "2 weeks", "x@y.z"]
+    assert f["ollama"].calls[0]["think"] is False and f["ollama"].calls[0]["num_ctx"] == 4096
+
+
+async def test_batch_missing_key_falls_back_to_single():
+    f = all_fake(responses=lambda p, m, k: '{"a": "1"}' if "Fields:" in p else "single")
+    res = await mk(f).run_batch([Task(prompt="A", key="a", field_kind="text"),
+                                 Task(prompt="B", key="b", field_kind="text")])
+    assert [x.text for x in res] == ["1", "single"] and len(f["ollama"].calls) == 2
+
+
+async def test_warmup_and_medium_thinks_same_model():
+    f = all_fake()
+    r = mk(f)
+    assert (await r.warmup()) == {"ollama:qwen3:4b": True} and f["ollama"].warmed == ["qwen3:4b"]
+    m = r.cfg.tiers
+    assert m["small"].model == m["medium"].model and m["medium"].think and not m["small"].think
+
+
+async def test_timeout_falls_to_next_then_client_task():
+    f = {"ollama": FakeProvider("ollama", latency_s=0.2), "client": FakeProvider("client", is_cloud=True)}
+    cfg = LLMCfg(retries=0, tiers={"small": LLMTier(provider="ollama", model="m", timeout_s=0.01)},
+                 task_tiers={}, fallbacks={})
+    res = await LLMRouter(cfg, {"default": 2}, providers=f).run(Task(prompt="p", field_kind="text"))
+    assert res.client_task is not None and "m" in res.error or res.client_task is not None
+
+
+async def test_stable_system_prefix_and_percentiles():
+    f = all_fake()
+    r = mk(f)
+    for _ in range(3):
+        await r.run(Task(prompt="x", field_kind="text"))
+    assert len({c["system"] for c in f["ollama"].calls}) == 1 and f["ollama"].calls[0]["system"]
+    st = (await r.health())["stats"]["ollama:qwen3:4b"]
+    assert "p50_ms" in st and "p95_ms" in st
+
+
+async def test_per_model_semaphore():
+    f = all_fake(latency_s=0.02)
+    r = LLMRouter(LLMCfg(retries=0), {"ollama": 4, "ollama:qwen3:4b": 1, "default": 4}, providers=f)
+    await asyncio.gather(*(r.run(Task(prompt="p", field_kind="text")) for _ in range(4)))
+    assert f["ollama"].peak == 1

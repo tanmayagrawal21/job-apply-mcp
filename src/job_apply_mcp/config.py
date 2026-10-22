@@ -25,7 +25,8 @@ class ConcurrencyCfg(BaseModel):
     per_host: int = 4               # max concurrent requests per host
     min_interval_s: float = 0.25    # polite spacing per host
     browser_workers: int = 2        # concurrent browser sessions
-    llm_parallel: dict[str, int] = Field(default_factory=lambda: {"ollama": 1, "default": 4})
+    # keys: "provider" or "provider:model" (most specific wins). Match OLLAMA_NUM_PARALLEL for ollama.
+    llm_parallel: dict[str, int] = Field(default_factory=lambda: {"ollama": 2, "default": 4})
 
 
 class LLMTier(BaseModel):
@@ -34,6 +35,9 @@ class LLMTier(BaseModel):
     max_tokens: int = 512
     temperature: float | None = None   # None -> the task's own temperature
     heavy: bool = False                # large local model: calls are serialized (llm.heavy_parallel)
+    num_ctx: int | None = None         # Ollama context window; small = faster, less RAM, KV reuse
+    think: bool = False                # reasoning mode for models that support it (qwen3); off = fast
+    timeout_s: float | None = None     # latency budget for this tier (None -> llm.timeout_s)
 
 
 class RoutingCfg(BaseModel):
@@ -52,6 +56,9 @@ class RoutingCfg(BaseModel):
     self_check: bool = False           # ask the small model to rate its confidence before committing
     self_check_min: int = 6            # confidence 0-10 below this adds confidence_points
     confidence_points: int = 2
+    batch_enabled: bool = True         # one LLM call per form for all short unresolved fields
+    batch_max_fields: int = 12
+    batch_max_expected_chars: int = 200   # fields expecting more are answered individually
     narrative_min_words: int = 60      # prose at least this long is class "narrative"
     narrative_keywords: list[str] = Field(default_factory=lambda: [
         "cover letter", "why us", "why do you want", "why are you interested", "tell us about yourself",
@@ -61,21 +68,24 @@ class RoutingCfg(BaseModel):
 class LLMCfg(BaseModel):
     # Ordered tiers for ordinary fields; the router picks the cheapest tier whose capability >= complexity.
     tiers: dict[str, LLMTier] = Field(default_factory=lambda: {
-        "small": LLMTier(provider="ollama", model="qwen3:4b", max_tokens=256),
-        "medium": LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=768),
+        # One small model stays resident for all short fields. "medium" is the SAME model with reasoning on,
+        # so escalating small -> medium never swaps weights on a 16 GB machine.
+        "small": LLMTier(provider="ollama", model="qwen3:4b", max_tokens=256, num_ctx=4096, timeout_s=25),
+        "medium": LLMTier(provider="ollama", model="qwen3:4b", max_tokens=1024, num_ctx=4096, think=True,
+                          timeout_s=60),
         "large": LLMTier(provider="client", model="client-default", max_tokens=1500),
     })
     # Task-class tiers, chosen by class before complexity. "narrative" = cover letters / why-us / prose;
     # "review" = a second reader that critiques a narrative (default: the calling agent).
     task_tiers: dict[str, LLMTier] = Field(default_factory=lambda: {
         "narrative": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=1200,
-                             temperature=0.6, heavy=True),
+                             temperature=0.6, heavy=True, num_ctx=8192, timeout_s=150),
         "review": LLMTier(provider="client", model="client-default", max_tokens=1200, temperature=0.2),
     })
     # Tried in order after the primary of a tier or task tier (keys: tier names and task-tier names).
     fallbacks: dict[str, list[LLMTier]] = Field(default_factory=lambda: {
         "small": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=256)],
-        "medium": [LLMTier(provider="ollama", model="qwen3:4b", max_tokens=768)],
+        "medium": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=768, num_ctx=4096)],
         "large": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1500)],
         "narrative": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1200, temperature=0.6),
                       LLMTier(provider="client", model="client-default", max_tokens=1200)],
@@ -87,9 +97,20 @@ class LLMCfg(BaseModel):
     retries: int = 2                # transient-error retries per candidate
     backoff_s: float = 0.5          # base for exponential backoff
     availability_ttl_s: float = 30.0
+    retry_on_timeout: bool = False  # a timeout moves to the next faster/other candidate instead of retrying
+    client_on_failure: bool = True  # if every local option fails/times out, hand the task to the calling agent
+    warmup: bool = True             # preload models in the background on first use (and via router.warmup())
+    warmup_tiers: list[str] = Field(default_factory=lambda: ["small"])  # tiers/task tiers to preload
+    # Stable per-class system prefixes: identical bytes across calls let Ollama reuse its KV cache.
+    system_prefix: dict[str, str] = Field(default_factory=lambda: {
+        "field": "You fill job application forms. Answer concisely and factually. No preamble.",
+        "batch": "You fill job application forms. Reply with one JSON object mapping each field key to its answer.",
+        "narrative": "You write first-person application prose: specific, honest, no clichés.",
+        "review": "You review application drafts for specificity, accuracy and tone.",
+    })
     heavy_parallel: int = 1         # concurrent calls to `heavy` local models (one big model resident on 16 GB)
     providers: dict[str, dict[str, Any]] = Field(default_factory=lambda: {
-        "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "5m"},
+        "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
         "anthropic": {"api_key_env": "ANTHROPIC_API_KEY"},
         "hf_local": {"device": "mps"},

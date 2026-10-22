@@ -16,6 +16,7 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 class OpenAICompatProvider:
     name = "openai_compat"
+    supports_options = True
 
     def __init__(self, base_url: str = "", api_key_env: str = "OPENAI_API_KEY", timeout_s: float = 120.0,
                  probe_timeout_s: float = 3.0, local: bool | None = None, extra_headers: dict | None = None, **_):
@@ -47,11 +48,14 @@ class OpenAICompatProvider:
         return bool(await self.list_models()) if not self.is_cloud else True
 
     async def complete_ex(self, prompt: str, *, model: str, system: str | None = None, max_tokens: int = 512,
-                          temperature: float = 0.2, json_schema: dict | None = None) -> Completion:
+                          temperature: float = 0.2, json_schema: dict | None = None, think: bool = False,
+                          num_ctx: int | None = None) -> Completion:
         sys_txt = system
         if json_schema:
             hint = "Reply with only JSON matching this schema: " + json.dumps(json_schema, separators=(",", ":"))
             sys_txt = f"{system}\n{hint}" if system else hint
+        if not think and "qwen3" in model.lower():
+            prompt = f"{prompt} /no_think"   # qwen3 soft switch for servers without a think flag
         msgs = ([{"role": "system", "content": sys_txt}] if sys_txt else []) + [{"role": "user", "content": prompt}]
         body: dict = {"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature}
         url = f"{self.base_url}/chat/completions"

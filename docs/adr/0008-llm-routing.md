@@ -42,6 +42,32 @@ model per task, automatic fallback, and no hidden hard-coding. Cloud use is a us
 LiteLLM is an optional extra (`litellm>=1.83.0`, version re-checked at runtime; see ADR-0006). Nothing else
 imports it.
 
+## Speed (all knobs in `llm.*`, defaults conservative)
+1. **Deterministic first.** `Task.known` or any `router.resolvers` callable that returns a value short-circuits
+   with no model call (`task_class="rules"`, provider `rules`).
+2. **Batch.** `run_batch(tasks)` resolves rules first, then sends ONE JSON-object call for all short fields
+   (`routing.batch_enabled`, `batch_max_fields` 12, `batch_max_expected_chars` 200). Keys missing from the
+   reply fall back to individual calls; long, company-specific or retried fields are never batched.
+3. **Warm.** `providers.ollama.keep_alive` defaults to `30m`. `router.warmup()` preloads `llm.warmup_tiers`
+   (default `small`) via an empty `/api/generate`; the first routed call also starts it in the background
+   (`llm.warmup`). Servers can call `router.start_warmup()` at startup.
+4. **No thrash on 16 GB.** `small` and `medium` are the same resident model (qwen3:4b); `medium` only
+   turns reasoning on (`think=true`, longer budget). `think=false` is sent for short fields (Ollama `think`,
+   `/no_think` for OpenAI-compatible qwen3). The narrative model loads only for prose, and `heavy` models
+   share one semaphore (`heavy_parallel=1`).
+5. **Small contexts.** `num_ctx` per tier (4096 short, 8192 narrative) and tight `max_tokens` (`num_predict`).
+6. **KV-cache reuse.** Each class has a fixed `system_prefix`; variable content is only in the user turn.
+   `Task.system` overrides it.
+7. **Latency budgets.** `LLMTier.timeout_s` (small 25 s, medium 60 s, narrative 150 s). A timeout is not
+   retried (`retry_on_timeout=false`); the router tries the next candidate, then escalates, and if everything
+   fails returns a `client_task` for the calling agent (`client_on_failure`, needs `allow_cloud`).
+8. **Parallelism.** `concurrency.llm_parallel` accepts `provider` or `provider:model` keys; ollama defaults
+   to 2. Set it equal to `OLLAMA_NUM_PARALLEL`.
+9. **Latency stats.** `health()` reports calls, errors, tokens, avg, p50 and p95 (last 200) per provider:model,
+   plus warm state.
+10. **Benchmark.** `scripts/bench_llm.py` (live, optional) prints cold start, warm latency and tokens/s per
+    configured local model.
+
 ## Consequences
 Cheap fields never wake the 12B model; narratives get a better model with a hot-swap guard. Rule scoring is
 crude but transparent and tunable. Without Ollama, `client` fallbacks hand work back to the caller.

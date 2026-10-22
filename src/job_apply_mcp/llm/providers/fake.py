@@ -10,6 +10,8 @@ from ..base import Completion, ProviderError, estimate_tokens
 
 
 class FakeProvider:
+    supports_options = True
+
     def __init__(self, name: str = "fake", responses: list[Any] | Callable[..., Any] | None = None,
                  is_up: bool = True, models: list[str] | None = None, latency_s: float = 0.0,
                  is_cloud: bool = False, **_):
@@ -18,6 +20,7 @@ class FakeProvider:
         self.responses = responses if responses is not None else ["ok"]
         self.calls: list[dict] = []
         self.active = self.peak = 0
+        self.warmed: list[str] = []
 
     async def available(self) -> bool:
         return self.is_up
@@ -29,9 +32,10 @@ class FakeProvider:
         return self.models is None or model in self.models
 
     async def complete_ex(self, prompt: str, *, model: str, system: str | None = None, max_tokens: int = 512,
-                          temperature: float = 0.2, json_schema: dict | None = None, **_) -> Completion:
+                          temperature: float = 0.2, json_schema: dict | None = None, think: bool = False,
+                          num_ctx: int | None = None, **_) -> Completion:
         self.calls.append({"prompt": prompt, "model": model, "system": system, "max_tokens": max_tokens,
-                           "json_schema": json_schema})
+                           "json_schema": json_schema, "think": think, "num_ctx": num_ctx})
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:
@@ -48,6 +52,10 @@ class FakeProvider:
             return Completion(r, estimate_tokens(prompt), estimate_tokens(r))
         finally:
             self.active -= 1
+
+    async def warm(self, model: str, num_ctx: int | None = None) -> bool:
+        self.warmed.append(model)
+        return True
 
     async def complete(self, prompt: str, *, model: str, **kw) -> str:
         return (await self.complete_ex(prompt, model=model, **kw)).text

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -53,6 +54,7 @@ class Completion:
     text: str
     tokens_in: int = 0
     tokens_out: int = 0
+    gen_ms: float = 0.0   # provider-reported generation time, when known (for tokens/s)
 
 
 def estimate_tokens(s: str) -> int:
@@ -80,6 +82,7 @@ class Task(BaseModel):
     field_kind: str | None = None       # a core.models.FieldKind value
     expected_chars: int = 0             # expected answer length
     company_specific: bool = False      # needs reasoning about the specific employer/role
+    known: Any = None                   # already resolved by rules/profile: no LLM call is made
     prior_failures: int = 0             # validation failures already seen upstream
     json_schema: dict | None = None
     max_tokens: int | None = None       # override the tier's max_tokens
@@ -172,11 +175,19 @@ class CallStats:
     tokens_in: int = 0
     tokens_out: int = 0
     total_ms: float = 0.0
+    lat: deque = field(default_factory=lambda: deque(maxlen=200))
     last_error: str = ""
+
+    def pct(self, q: int) -> int:
+        if not self.lat:
+            return 0
+        xs = sorted(self.lat)
+        return round(xs[min(len(xs) - 1, int(len(xs) * q / 100))])
 
     def view(self) -> dict[str, Any]:
         return {"calls": self.calls, "errors": self.errors, "tok_in": self.tokens_in,
                 "tok_out": self.tokens_out, "avg_ms": round(self.total_ms / self.calls) if self.calls else 0,
+                "p50_ms": self.pct(50), "p95_ms": self.pct(95),
                 **({"last_error": self.last_error} if self.last_error else {})}
 
 

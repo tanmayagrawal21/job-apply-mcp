@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections import defaultdict
@@ -20,6 +21,7 @@ from ..core import registry
 from . import providers as _providers  # noqa: F401  (registers built-ins)
 from .base import (
     CallStats,
+    ClientTask,
     ClientTaskRequired,
     Completion,
     LLMResult,
@@ -46,6 +48,10 @@ class LLMRouter:
         self.stats: dict[str, CallStats] = defaultdict(CallStats)
         self.class_counts: dict[str, int] = defaultdict(int)
         self.escalation_count = 0
+        self.resolvers: list = []         # callables(Task) -> str | None: deterministic answers, tried first
+        self.warm: dict[str, bool] = {}
+        self.warm_error = ""
+        self._warm_task: asyncio.Task | None = None
 
     # ---- providers -------------------------------------------------------------------------------
     def provider(self, name: str):
@@ -54,10 +60,12 @@ class LLMRouter:
                                                                    **self.cfg.providers.get(name, {}))
         return self._providers[name]
 
-    def _sem(self, name: str) -> asyncio.Semaphore:
-        if name not in self._sems:
-            self._sems[name] = asyncio.Semaphore(max(1, self.parallel.get(name, self.parallel.get("default", 4))))
-        return self._sems[name]
+    def _sem(self, provider: str, model: str = "") -> asyncio.Semaphore:
+        """Semaphore for "provider:model" if configured, else for the provider (mirror OLLAMA_NUM_PARALLEL)."""
+        key = f"{provider}:{model}" if f"{provider}:{model}" in self.parallel else provider
+        if key not in self._sems:
+            self._sems[key] = asyncio.Semaphore(max(1, self.parallel.get(key, self.parallel.get("default", 4))))
+        return self._sems[key]
 
     async def _available(self, name: str) -> bool:
         now = time.monotonic()
@@ -167,6 +175,9 @@ class LLMRouter:
                                   "temperature": c.temperature if c.temperature is not None else task.temperature}
         if c.provider == "client":
             kw["key"] = task.key
+        if getattr(p, "supports_options", False):
+            kw["think"] = c.think
+            kw["num_ctx"] = c.num_ctx
         fn = getattr(p, "complete_ex", None)
         if fn is None:
             text = await p.complete(prompt, **kw)
@@ -177,29 +188,32 @@ class LLMRouter:
         key = f"{c.provider}:{c.model}"
         st = self.stats[key]
         last: Exception | None = None
+        budget = c.timeout_s or self.cfg.timeout_s
         for attempt in range(self.cfg.retries + 1):
             t0 = time.monotonic()
             try:
-                async with self._sem(c.provider):
+                async with self._sem(c.provider, c.model):
                     if c.heavy and c.provider != "client":
                         async with self._heavy:
-                            comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema),
-                                                          self.cfg.timeout_s)
+                            comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema), budget)
                     else:
-                        comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema), self.cfg.timeout_s)
+                        comp = await asyncio.wait_for(self._call_once(c, prompt, task, schema), budget)
             except ClientTaskRequired:
                 raise
             except (ProviderError, TimeoutError) as e:
                 st.errors += 1
                 st.last_error = str(e)[:120] or type(e).__name__
                 last = e
-                if isinstance(e, ProviderError) and not e.retryable:
+                if (isinstance(e, ProviderError) and not e.retryable) or (
+                        isinstance(e, TimeoutError) and not self.cfg.retry_on_timeout):
                     break
                 if attempt < self.cfg.retries:
                     await asyncio.sleep(self.cfg.backoff_s * (2 ** attempt))
                 continue
             st.calls += 1
-            st.total_ms += (time.monotonic() - t0) * 1000
+            ms = (time.monotonic() - t0) * 1000
+            st.total_ms += ms
+            st.lat.append(ms)
             st.tokens_in += comp.tokens_in
             st.tokens_out += comp.tokens_out
             return comp
@@ -238,12 +252,19 @@ class LLMRouter:
         return [start, *names[-1:]]
 
     async def run(self, task: Task, *, force_tier: str | None = None) -> LLMResult:
-        from .providers.client import current_sampler  # noqa: F401  (sampler is read inside the provider)
-
+        # 1. deterministic first: profile/rules answers never reach a model
+        known = self._resolve(task)
+        if known is not None:
+            self.class_counts["rules"] += 1
+            return LLMResult(ok=True, text=str(known), data=known, tier="rules", provider="rules",
+                             model="-", task_class="rules")
+        self._kick_warmup()
         d = await self.decide(task)
         if force_tier:
             d["tier"] = force_tier
         self.class_counts[d["task_class"]] += 1
+        if task.system is None:   # stable per-class prefix -> Ollama KV-cache reuse
+            task = task.model_copy(update={"system": self.cfg.system_prefix.get(d["task_class"])})
         base = {"task_class": d["task_class"], "score": d["score"], "reasons": d["reasons"]}
         order = self._order(d["tier"])
         schema = task.json_schema
@@ -278,8 +299,96 @@ class LLMRouter:
             if i + 1 < len(order):
                 esc += 1
                 self.escalation_count += 1
+        if self.cfg.client_on_failure and self.cfg.allow_cloud:
+            # every local option failed or timed out: let the calling agent write it
+            ct = ClientTask(field_key=task.key, instruction=task.prompt, system=task.system,
+                            max_tokens=task.max_tokens or 512, json_schema=task.json_schema)
+            return LLMResult(ok=True, client_task=ct, tier="client", provider="client", model="client-default",
+                             escalations=esc, error=last_err, **base)
         return LLMResult(ok=False, error=last_err or "no provider available", tier=order[-1],
                          escalations=esc, **base)
+
+    def _resolve(self, t: Task) -> Any:
+        if t.known is not None:
+            return t.known
+        for r in self.resolvers:
+            v = r(t)
+            if v is not None:
+                return v
+        return None
+
+    # ---- batching --------------------------------------------------------------------------------
+    def _batchable(self, t: Task) -> bool:
+        r = self.cfg.routing
+        return (t.known is None and t.json_schema is None and t.validator is None and t.key != ""
+                and not t.company_specific and not t.prior_failures
+                and t.expected_chars <= r.batch_max_expected_chars and self.classify(t) == "field")
+
+    async def run_batch(self, tasks: list[Task]) -> list[LLMResult]:
+        """Answer a whole form: deterministic first, then ONE call for all short fields, then the rest in
+        parallel. Results are returned in input order. Fields missing from the batch reply run individually."""
+        out: list[LLMResult | None] = [None] * len(tasks)
+        r = self.cfg.routing
+        pending = []
+        for i, t in enumerate(tasks):
+            if self._resolve(t) is not None:
+                out[i] = await self.run(t)
+            else:
+                pending.append(i)
+        group = [i for i in pending if self._batchable(tasks[i])][: r.batch_max_fields] if r.batch_enabled else []
+        if len(group) >= 2:
+            schema = {"type": "object"}   # tolerant: keys missing from the reply are asked individually
+            lines = "\n".join(f"- {tasks[i].key}: {tasks[i].question or tasks[i].prompt}" for i in group)
+            ctx = next((tasks[i].system for i in group if tasks[i].system), None)
+            prompt = ("Answer every field. Keep each answer short.\nFields:\n" + lines
+                      + (f"\nContext: {ctx}" if ctx else ""))
+            bt = Task(prompt=prompt, key="batch", task_class="batch_field", json_schema=schema,
+                      system=self.cfg.system_prefix.get("batch"),
+                      field_kind="text", max_tokens=min(1024, 48 * len(group) + 64))
+            res = await self.run(bt, force_tier=self.tier_for_score(0))
+            if res.ok and isinstance(res.data, dict):
+                for i in group:
+                    k = tasks[i].key
+                    if k in res.data and res.data[k] not in (None, ""):
+                        v = res.data[k]
+                        out[i] = LLMResult(ok=True, text=v if isinstance(v, str) else json.dumps(v), data=v,
+                                           tier=res.tier, provider=res.provider, model=res.model,
+                                           task_class="field", reasons=["batched"])
+            elif res.client_task:
+                for i in group:
+                    out[i] = LLMResult(ok=True, client_task=ClientTask(
+                        field_key=tasks[i].key, instruction=tasks[i].prompt, max_tokens=tasks[i].max_tokens or 256),
+                        tier="client", provider="client", model="client-default", task_class="field")
+        rest = [i for i in range(len(tasks)) if out[i] is None]
+        done = await asyncio.gather(*(self.run(tasks[i]) for i in rest))
+        for i, res in zip(rest, done, strict=True):
+            out[i] = res
+        return out  # type: ignore[return-value]
+
+    # ---- warm-up ---------------------------------------------------------------------------------
+    async def warmup(self, tiers: list[str] | None = None) -> dict[str, bool]:
+        """Preload models (provider.warm) for the given tiers so the first real call is fast."""
+        for name in tiers or self.cfg.warmup_tiers:
+            try:
+                c = self._tier_cfg(name)
+                p = self.provider(c.provider)
+                if hasattr(p, "warm") and await self._available(c.provider):
+                    self.warm[f"{c.provider}:{c.model}"] = bool(await p.warm(c.model, c.num_ctx))
+            except Exception as e:  # noqa: BLE001 - warming is best effort
+                self.warm[f"{name}"] = False
+                self.warm_error = str(e)[:100]
+        return dict(self.warm)
+
+    def _kick_warmup(self) -> None:
+        if self.cfg.warmup and self._warm_task is None:
+            try:
+                self._warm_task = asyncio.get_running_loop().create_task(self.warmup())
+            except RuntimeError:
+                pass
+
+    def start_warmup(self) -> None:
+        """Fire-and-forget background warm-up; call from server startup."""
+        self._kick_warmup()
 
     async def review(self, draft: str, *, criteria: str = "", key: str = "") -> LLMResult:
         """Second-reader pass on a narrative using the configured `review` tier (default: calling agent)."""
@@ -311,6 +420,7 @@ class LLMRouter:
             "allow_cloud": self.cfg.allow_cloud,
             "task_classes": dict(self.class_counts),
             "escalations": self.escalation_count,
+            "warm": dict(self.warm),
             "stats": {k: v.view() for k, v in self.stats.items()},
         }
 
