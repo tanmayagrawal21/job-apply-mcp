@@ -256,3 +256,48 @@ def test_profile_education_rows_newest_first():
                            Education(school="B", degree="MS", field="CS", start="2022-08", end="2024-05")])
     r = p.education_rows()
     assert [x["school"] for x in r] == ["B", "A"] and r[0]["start_year"] == "2022" and r[0]["discipline"] == "CS"
+
+
+OPT_HTML = """<html><body><form id=f>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<label for=question_9>How did you hear about us?</label><div id=question_9_wrap></div>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('question_9', ['Conference', 'News Article'], {multi: true});
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+@pytest.mark.parametrize("required", [False, True])
+async def test_optional_field_left_empty_does_not_block(drv, required):
+    srv, _ = _serve(OPT_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:3", fields=[
+        FormField(key="first_name", label="First Name", kind=FieldKind.text),
+        FormField(key="question_9", label="How did you hear about us?", kind=FieldKind.multiselect,
+                  options=["Conference", "News Article"], required=required)])
+    ans = {"first_name": "Alex", "question_9": ["Company Website"]}   # not an option: the fill fails, field stays empty
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/3", form, ans, {}, dry_run=True)
+    assert res.status == ("needs_human" if required else "dry_run"), res.detail
+
+
+GROUP_HTML = """<html><body><form id=f>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<fieldset id="question_7[]"><legend>How did you hear about us?</legend>
+<input type=checkbox id=c1 name="question_7[]" value=1><label for=c1>Conference</label>
+<input type=checkbox id=c2 name="question_7[]" value=2><label for=c2>Company Website</label>
+<input type=checkbox id=c3 name="question_7[]" value=3><label for=c3>News Article</label></fieldset>
+<button type=submit>Submit application</button></form>
+<script>document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>"""
+
+
+async def test_checkbox_group_ticks_only_the_matching_box(drv):
+    srv, _ = _serve(GROUP_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:4", fields=[
+        FormField(key="first_name", label="First Name", kind=FieldKind.text),
+        FormField(key="question_7[]", label="How did you hear about us?", kind=FieldKind.multiselect,
+                  options=["Conference", "Company Website", "News Article"])])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/4", form,
+                                    {"first_name": "Alex", "question_7[]": ["Company Website"]}, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+    page = drv._pages[-1] if getattr(drv, "_pages", None) else None
+    if page is not None:
+        assert await page.locator("#c2").is_checked() and not await page.locator("#c1").is_checked()
