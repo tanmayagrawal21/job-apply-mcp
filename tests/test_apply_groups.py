@@ -250,3 +250,72 @@ async def test_ssr_form_waits_for_hydration_before_typing(drv, wait):
         assert not early
     else:                                       # the fixture really does punish early typing
         assert early
+
+
+# ---- control review: a consent group next to the real group; unwrapped required sets; near-miss options
+
+SMS_NEXT_HTML = """<html><body><div id=app>
+<div data-field-path="q-contact"><fieldset class=consent><legend>Text messages</legend>
+<label><input type=radio id=sms-yes name=smsConsent value=yes>Yes - I consent to receiving text messages</label>
+<label><input type=radio id=sms-no name=smsConsent value=no>No - I do not consent</label></fieldset>
+<fieldset class="radio-group"><label class="_required_ab12_9 question-title" for="q-contact">May we contact your references?</label>
+<span><input type=radio id="e1_q-contact-labeled-radio-0" name="e1_q-contact"><label for="e1_q-contact-labeled-radio-0">Yes</label></span>
+<span><input type=radio id="e1_q-contact-labeled-radio-1" name="e1_q-contact"><label for="e1_q-contact-labeled-radio-1">No</label></span>
+</fieldset></div>
+<input type=file id=r style="display:none"><button type=button>Submit Application</button></div>
+<script>__REPORT__</script></body></html>""".replace("__REPORT__", REPORT_JS)
+
+
+async def test_sms_group_next_to_the_real_group_is_never_ticked(drv):
+    base, posts = _serve(SMS_NEXT_HTML)
+    form = ApplicationForm(ref="ashby:acme:job9", fields=[
+        FormField(key="q-contact", label="May we contact your references?", kind=FieldKind.select,
+                  options=["Yes", "No"], required=True)])
+    res = await drv.fill_and_submit(f"{base}/acme/job9/application", form, {"q-contact": "Yes"}, {}, dry_run=True)
+    assert _checked(posts) == ["e1_q-contact-labeled-radio-0"]
+    assert "sms-yes" not in _checked(posts)
+    assert res.status == "incomplete" and "Text messages" in res.detail, res.detail   # consent left for the user
+
+
+@pytest.mark.parametrize("value,opts", [("Female", ["Male", "Non-binary"]), ("Woman", ["Man", "Non-binary"]),
+                                        ("Asian", ["Asian Indian", "White"])])
+async def test_choice_group_near_miss_is_never_ticked(drv, value, opts):
+    boxes = "".join(f'<label><input type=radio id=o{i} name="q-eeo" value="{o}">{o}</label>' for i, o in enumerate(opts))
+    html = (f"<html><body><form id=f><fieldset id=q-eeo aria-required=true><legend>Self-identification *</legend>"
+            f"{boxes}</fieldset><button type=submit>Submit application</button></form>"
+            f"<script>document.getElementById('f').onsubmit = e => e.preventDefault();{REPORT_JS}</script></body></html>")
+    base, posts = _serve(html)
+    form = ApplicationForm(ref="greenhouse:acme:9", fields=[
+        FormField(key="q-eeo", label="Self-identification", kind=FieldKind.select, options=opts, required=True)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/9", form, {"q-eeo": value}, {}, dry_run=True)
+    assert _checked(posts) == []
+    assert res.status != "dry_run", res.detail
+
+
+@pytest.mark.parametrize("variant", ["asterisk", "required", "aria"])
+async def test_unwrapped_required_radio_set_blocks_dry_run(drv, variant):
+    mark = " *" if variant == "asterisk" else ""
+    attr = {"asterisk": "", "required": "required", "aria": "aria-required=true"}[variant]
+    html = (f"<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>"
+            f"<div class=q><p class=question-text>Are you at least 18 years old?{mark}</p>"
+            f"<label><input type=radio name=adult value=yes {attr}> Yes</label>"
+            f"<label><input type=radio name=adult value=no {attr}> No</label></div>"
+            f"<button type=submit>Submit application</button></form>"
+            f"<script>document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>")
+    base, _ = _serve(html)
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/10", ApplicationForm(ref="greenhouse:acme:10", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", res.detail
+    assert "18 years" in res.detail or "adult" in res.detail
+
+
+async def test_unwrapped_optional_radio_set_does_not_block(drv):
+    html = ("<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>"
+            "<div class=q><p>Newsletter?</p><label><input type=radio name=nl value=y> Yes</label>"
+            "<label><input type=radio name=nl value=n> No</label></div>"
+            "<button type=submit>Submit application</button></form>"
+            "<script>document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>")
+    base, _ = _serve(html)
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/11", ApplicationForm(ref="greenhouse:acme:11", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail

@@ -32,7 +32,6 @@ from .mapper import (
     DEMOGRAPHIC_KEYS,
     best_option,
     canonical_key,
-    decline_option,
     degree_queries,
     discipline_queries,
     normalize,
@@ -244,6 +243,39 @@ def _bare_url(u: str) -> str:
     return re.sub(r"^(https?://)?(www\.)?", "", u.strip().lower()).rstrip("/")
 
 
+# Choice groups and EEO / self-ID selects use EXACT option matching (ADR-0039): case, punctuation and whitespace are
+# normalised, then the texts must be equal. The ONLY other accepted equivalence is this explicit decline table, so
+# "Decline to self-identify" can select "I don't wish to answer". No substring, no fuzzy score: Female never selects
+# Male, Woman never Man, Asian never Asian Indian. No exact match -> the field stays blank.
+_DECLINE_SYNONYMS = frozenset(normalize(x) for x in (
+    "decline", "decline to answer", "decline to self identify", "decline to self-identify", "decline to identify",
+    "decline to state", "i decline to answer", "i decline to self identify", "i decline to self-identify",
+    "i decline to identify", "i don't wish to answer", "i do not wish to answer", "i don't want to answer",
+    "i do not want to answer", "prefer not to say", "prefer not to answer", "i prefer not to say",
+    "i prefer not to answer", "i choose not to disclose", "choose not to disclose", "i wish not to answer",
+    "i don't wish to self identify", "i do not wish to self identify", "i don't wish to self-identify",
+    "i do not wish to self-identify"))
+# Options the driver never ticks unless the planned field ITSELF is about them.
+_CONSENT_WORDS = re.compile(r"consent|\bsms\b|text messag|marketing|newsletter|promotion|opt[ -]?in\b", re.IGNORECASE)
+
+
+def exact_choice(value: Any, options: list[str]) -> str | None:
+    """The option equal to `value` after normalisation, or (for a decline value) the single decline-table option."""
+    nv = normalize(str(value or ""))
+    if not nv:
+        return None
+    for o in options:
+        if normalize(o) == nv:
+            return o
+    return exact_decline(options) if nv in _DECLINE_SYNONYMS else None
+
+
+def exact_decline(options: list[str]) -> str | None:
+    """The single option in the explicit decline table; none or several -> None."""
+    hits = [o for o in options if normalize(o) in _DECLINE_SYNONYMS]
+    return hits[0] if len(hits) == 1 else None
+
+
 _COUNTRY_ALIASES = {"us": "United States", "usa": "United States", "u s": "United States", "u s a": "United States",
                     "united states of america": "United States", "america": "United States",
                     "uk": "United Kingdom", "gb": "United Kingdom", "great britain": "United Kingdom",
@@ -366,8 +398,19 @@ _HYDRATED_JS = """() => { if (document.readyState !== 'complete') return false;
 _CHOICE = "input[type=checkbox], input[type=radio]"
 _IS_GROUP_JS = """e => !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tagName)
   && !!e.querySelector('input[type=checkbox], input[type=radio]')"""
-_OPT_TEXTS_JS = """els => els.map(e => ((e.labels && e.labels[0] ? e.labels[0].innerText : '')
-  || (e.closest('label') || {}).innerText || e.getAttribute('aria-label') || e.value || '').replace(/\\s+/g, ' ').trim())"""
+# A choice group's members THAT BELONG TO THE FIELD (ADR-0039): when some member's name/id carries the field key, only
+# those count (a wrapper may also hold another question or an SMS consent block); consent / SMS / marketing options are
+# dropped unless the planned field's own label is about consent. Returns index, option text, value and checked state.
+_MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
+  const CONS = /consent|\\bsms\\b|text messag|marketing|newsletter|promotion|opt[ -]?in\\b/i;
+  let rows = els.map((e, i) => ({i, name: e.name || '', id: e.id || '', value: e.value || '', checked: !!e.checked,
+    text: ((e.labels && e.labels[0] ? e.labels[0].innerText : '') || (e.closest('label') || {}).innerText
+           || e.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim()}));
+  if (key) { const own = rows.filter(r => r.name === key || r.name.endsWith('_' + key) || r.id === key
+      || r.id.startsWith(key + '_') || r.id.includes('_' + key + '-labeled-'));
+    if (own.length) rows = own; }
+  if (!CONS.test(fl)) rows = rows.filter(r => !CONS.test(r.text) && !CONS.test(r.name) && !CONS.test(r.value));
+  return rows; }"""
 # Every visible required control that is still empty, CHECKBOX AND RADIO GROUPS INCLUDED (ADR-0039). A group is a
 # fieldset / role=group / role=radiogroup / consent block holding choice inputs; it is required when the group or a
 # member says so (required, aria-required) or its legend/heading carries an asterisk or a "required" class; an
@@ -412,6 +455,39 @@ _EMPTY_REQUIRED_JS = """() => {
     out.push({id, label: clean(text).slice(0, 80), text: clean(text).slice(0, 1500), rs: false, group: String(gi), kind: members[0].type, consent, opts});
     gi++;
   }
+  // Radio / checkbox sets OUTSIDE any group container: members share a name (an unnamed box is its own set).
+  // Required when a member is required / aria-required, or the question heading (closest preceding heading that
+  // belongs to no other question) carries an asterisk or a "required" class.
+  const sets = new Map();
+  for (const e of document.querySelectorAll(CH)) { if (done.has(e) || e.disabled) continue;
+    const k = e.name ? e.type + ':' + e.name : 'solo:' + sets.size;
+    if (!sets.has(k)) sets.set(k, []); sets.get(k).push(e); }
+  const HS = 'legend, label, .application-label, [class*=label i], [class*=question i], [class*=title i]';
+  for (const [k, members] of sets) {
+    members.forEach(m => done.add(m));
+    if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement || m))) continue;
+    const ids = new Set(members.map(m => m.id).filter(Boolean));
+    const isOpt = h => (h.tagName === 'LABEL' && (h.querySelector(CH) || ids.has(h.htmlFor))) || members.some(m => h.contains(m));
+    let c = members[0].parentElement; while (c && !members.every(m => c.contains(m))) c = c.parentElement;
+    let head = null;
+    if (k.startsWith('solo:')) head = null;
+    else for (let n = c, d = 0; n && n !== document.body && d < 5; n = n.parentElement, d++) {
+      if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;      // climbed into another question
+      const hs = [...n.querySelectorAll(HS)].filter(h => !isOpt(h) && clean(h.textContent)
+        && (h.compareDocumentPosition(members[0]) & Node.DOCUMENT_POSITION_FOLLOWING));
+      if (hs.length) { head = hs[hs.length - 1]; break; } }
+    const text = head ? head.textContent : (k.startsWith('solo:') ? labelOf(members[0]) : '');
+    const required = members.some(m => m.required || m.getAttribute('aria-required') === 'true')
+      || /[*✱]/.test(text || '') || !!(head && (/required/i.test(head.className) || head.querySelector('[class*=required i]')));
+    if (!required || members.some(m => m.checked)) continue;
+    const id = members[0].name || members[0].id || '';
+    if (seen.has('s:' + id + k)) continue; seen.add('s:' + id + k);
+    const opts = members.map(m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '')).slice(0, 12);
+    let gid = '';
+    if (c && [...c.querySelectorAll(CH)].length === members.length) { c.setAttribute('data-jam-group', String(gi)); gid = String(gi); gi++; }
+    out.push({id, label: (clean(text) || id).slice(0, 80), text: clean(text).slice(0, 1500), rs: false, group: gid,
+              kind: members[0].type, consent: false, opts});
+  }
   for (const e of document.querySelectorAll('input, textarea, select')) {
     if (done.has(e)) continue;
     const type = (e.type || '').toLowerCase();
@@ -424,12 +500,7 @@ _EMPTY_REQUIRED_JS = """() => {
     let empty = false, grp = '';
     if (rs) { const sh = e.closest('[class*=select__control]').parentElement;
       empty = !sh.querySelector('[class*=select__single-value], [class*=select__multi-value]'); }
-    else if (choice) {                                          // a required GROUP needs one checked member
-      const same = [...document.querySelectorAll('input[type=' + type + ']')].filter(x => x.name === e.name);
-      empty = !same.some(x => x.checked); grp = e.name;
-      const q = e.closest('.application-question');
-      const h = q && q.querySelector('.application-label, legend, [class*=label]');
-      if (h) grp = clean(h.textContent.split('✱')[0]) || grp; }
+    else if (choice) continue;                                  // handled as sets above
     else if (e.tagName === 'SELECT') empty = !e.value;
     else empty = !(e.value || '').trim();
     if (!empty) continue;
@@ -825,11 +896,14 @@ class PlaywrightDriver(VerificationMixin):
             # the FULL question text is judged (the 80-char label could cut off an excluded topic such as SMS)
             ff = FormField(key=row["id"] or "dom-group", label=row.get("text") or row["label"], kind=FieldKind.select,
                            options=[o for o in row.get("opts") or [] if o])
+            if _CONSENT_WORDS.search(ff.label) or any(_CONSENT_WORDS.search(o) for o in ff.options):
+                continue                           # consent / SMS / marketing: never ticked for a DOM-only group
             want = privacy_ack_value(ff, self.s.policy.stop_phrases)
             if want is None:
                 continue
             try:
-                await self._check_in_group(page.locator(f'[data-jam-group="{row["group"]}"]').first, str(want))
+                await self._check_in_group(page.locator(f'[data-jam-group="{row["group"]}"]').first, str(want),
+                                           ff.model_copy(update={"key": ""}))
             except Exception:
                 pass
 
@@ -848,11 +922,11 @@ class PlaywrightDriver(VerificationMixin):
         # Ashby wraps each question in [data-field-path=<key>]; radio/checkbox members carry entry-scoped names
         # (or the option text), so the group container is the only stable handle (ADR-0039).
         fp = f'[data-field-path="{key}"]'
-        cands += [page.locator(f"{fp} fieldset, {fp} [role=radiogroup], {fp} [role=group]")]
+        own = (f'label[for="{key}"], input[name="{key}"], input[name$="_{key}"], input[id*="_{key}-labeled-"]')
+        cands += [page.locator(f"{fp} :is(fieldset, [role=radiogroup], [role=group]):has({own})")]
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
         cands.append(page.get_by_label(re.compile(rf"^\s*{re.escape(label)}\s*\*?\s*$", re.IGNORECASE)))
         cands.append(page.get_by_label(re.compile(re.escape(label), re.IGNORECASE)))
-        cands.append(page.locator(fp))
         for c in cands:
             try:
                 n = await c.count()
@@ -910,21 +984,9 @@ class PlaywrightDriver(VerificationMixin):
             return False
 
     async def _choose_input(self, page, f: FormField, value: str) -> bool:
-        """Radio / checkbox group sharing one name (Lever custom questions): click the member whose value or label
-        best matches `value`, then read the state back."""
-        group = page.locator(f'input[name="{f.key}"]')
-        vals = await group.evaluate_all("els => els.map(e => e.value)")
-        labels = await group.evaluate_all("els => els.map(e => (e.closest('label') || {}).innerText || e.value)")
-        pick = best_option(value, [v for v in vals if v]) or best_option(value, [t.strip() for t in labels if t])
-        if pick is None:
-            return False
-        idx = next((i for i, (v, t) in enumerate(zip(vals, labels)) if pick in (v, t.strip())), None)
-        if idx is None:
-            return False
-        box = group.nth(idx)
-        if not await box.is_checked():
-            await box.click()                       # real click: programmatic check does not register
-        return bool(await box.is_checked())
+        """Radio / checkbox group sharing one name (Lever custom questions): tick the member whose option text or value
+        EXACTLY matches `value`, then read the state back."""
+        return await self._tick_member(page.locator(f'input[name="{f.key}"]'), page, value, f)
 
     @staticmethod
     async def _checked_values(page, key: str) -> list[str]:
@@ -944,7 +1006,7 @@ class PlaywrightDriver(VerificationMixin):
                     continue
             return False
         if await self._is_group(loc):            # checkbox / radio group (Greenhouse multi_value_*, Ashby fieldsets)
-            return await self._check_in_group(loc, value)
+            return await self._check_in_group(loc, value, f)
         marked = False
         try:
             marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
@@ -952,8 +1014,11 @@ class PlaywrightDriver(VerificationMixin):
             pass
         scope = page.locator("[data-jam-scope]") if marked else page
         opts = scope.locator(_MENU_SCOPED if marked else _MENU_OPTS)
-        async_lookup = f.kind == FieldKind.location or not f.options
-        snapped = best_option(value, f.options) if f.options else None
+        # EEO / self-ID questions: exact option matching only, never a substring or fuzzy snap (ADR-0039)
+        eeo = canonical_key(f.label) in DEMOGRAPHIC_KEYS or bool(_DEMOGRAPHIC_LABEL.search(f.label))
+        match = exact_choice if eeo else best_option
+        async_lookup = (f.kind == FieldKind.location or not f.options) and not eeo
+        snapped = match(value, f.options) if f.options else None
         flt = value if async_lookup else (snapped or value)
         if f.kind == FieldKind.location:                        # geocoder: "City, ST" often returns nothing
             pick = await self._geo_pick(page, loc, opts, value)
@@ -979,7 +1044,7 @@ class PlaywrightDriver(VerificationMixin):
                     await self._close_menu(page)
                     return False
             texts = [t.strip() for t in await opts.all_inner_texts()]
-            pick = best_option(value, texts) if texts else None
+            pick = match(value, texts) if texts else None
             if pick is None and async_lookup and texts:
                 pick = texts[0]
         if pick is None:
@@ -1026,25 +1091,29 @@ class PlaywrightDriver(VerificationMixin):
             return False
 
     @staticmethod
-    async def _group_texts(group) -> list[str]:
-        """Each member's own option text (its <label for>, wrapping label, aria-label, else value); the question
-        heading is never a candidate."""
-        return list(await group.locator(_CHOICE).evaluate_all(_OPT_TEXTS_JS))
+    async def _members(boxes, f: FormField | None) -> list[dict[str, Any]]:
+        return list(await boxes.evaluate_all(_MEMBERS_JS, [f.key if f else "", f.label if f else ""]))
 
-    @staticmethod
-    async def _check_in_group(group, value: str) -> bool:
-        """Tick the member whose option text snaps to `value` (best_option: never a different answer), then read it
-        back. Custom-drawn boxes cover the real input, so the click falls back to the option's label."""
-        boxes = group.locator(_CHOICE)
-        texts = await PlaywrightDriver._group_texts(group)
-        pick = best_option(value, [t for t in texts if t]) if texts else None
-        if pick is None:
+    async def _check_in_group(self, group, value: str, f: FormField | None = None) -> bool:
+        return await self._tick_member(group.locator(_CHOICE), group, value, f)
+
+    async def _tick_member(self, boxes, scope, value: str, f: FormField | None) -> bool:
+        """Tick the field's member whose option text (else value attribute) EXACTLY equals `value` (exact_choice:
+        normalised equality or the explicit decline table; never a substring or fuzzy match), then read it back.
+        Custom-drawn boxes cover the real input, so the click falls back to the option's label."""
+        rows = await self._members(boxes, f)
+        pick = exact_choice(value, [r["text"] for r in rows if r["text"]])
+        row = next((r for r in rows if pick is not None and r["text"] == pick), None)
+        if row is None:
+            nv = normalize(str(value))
+            row = next((r for r in rows if r["value"] not in ("", "on") and normalize(r["value"]) == nv), None)
+        if row is None:
             return False
-        box = boxes.nth(texts.index(pick))
+        box = boxes.nth(row["i"])
         if await box.is_checked():
             return True
         bid = await box.get_attribute("id")
-        label = group.locator(f'label[for="{bid}"]') if bid else box.locator("xpath=ancestor::label[1]")
+        label = scope.locator(f'label[for="{bid}"]') if bid else box.locator("xpath=ancestor::label[1]")
         for act in (lambda: box.check(timeout=2000), lambda: label.first.click(timeout=2000),
                     lambda: box.check(force=True, timeout=2000)):
             try:
@@ -1067,7 +1136,7 @@ class PlaywrightDriver(VerificationMixin):
                 chips = await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).count()
                 return chips == 0 and not (await loc.input_value()).strip()
             if await self._is_group(loc):
-                return await loc.locator("input:checked").count() == 0
+                return not any(r["checked"] for r in await self._members(loc.locator(_CHOICE), f))
             kind = await loc.evaluate("e => (e.type || e.tagName).toLowerCase()")
             if kind in ("checkbox", "radio"):
                 name = await loc.get_attribute("name")
@@ -1114,10 +1183,11 @@ class PlaywrightDriver(VerificationMixin):
 
     async def _fill_demographics(self, page, answers: dict[str, Any]) -> None:
         """Voluntary EEO / self-ID selects that exist only in the DOM (not in the job API; planned fields are left to
-        the plan). Only two answers are ever chosen, both via best_option on the offered options: the profile's
-        [demographics] value, else the decline / 'I don't wish to answer' option. A REQUIRED select with no usable
-        profile value gets the decline option; an OPTIONAL one with no profile value stays blank. Never invents a
-        demographic; no matching option and no decline option -> left empty. Read back from this field only."""
+        the plan). EXACT matching only (exact_choice: normalised equality or the explicit decline table; never a
+        substring or fuzzy match, so Female never selects Male). The profile's [demographics] value is used when an
+        option equals it; a profile value with no equal option leaves the select BLANK (a required one then makes the
+        run `incomplete`). With no profile value: a REQUIRED select gets the decline-table option, an OPTIONAL one
+        stays blank. Read back from this field only."""
         try:
             rows = list(await page.evaluate(_DOM_SELECTS_JS))
         except Exception:
@@ -1130,13 +1200,11 @@ class PlaywrightDriver(VerificationMixin):
             prof = str(answers.get(f"demographic:{ck}") or "").strip() if ck in DEMOGRAPHIC_KEYS else ""
             if not prof and not row["required"]:
                 continue                                   # optional, nothing in the profile: stay blank
-            declined = not prof or normalize(prof).startswith("decline") or normalize(prof) == "prefer not to say"
+            declined = not prof or normalize(prof) in _DECLINE_SYNONYMS
 
             def choose(texts: list[str], prof=prof, declined=declined) -> str | None:
-                texts = [t for t in texts if t and normalize(t) not in ("select", "select ...", "")]
-                if declined:
-                    return decline_option(texts)
-                return best_option(prof, texts) or decline_option(texts)
+                texts = [t for t in texts if t and normalize(t) not in ("select", "")]
+                return exact_decline(texts) if declined else exact_choice(prof, texts)
             loc = page.locator(f'[id="{el_id}"]').first
             try:
                 await loc.scroll_into_view_if_needed()
@@ -1451,7 +1519,7 @@ class PlaywrightDriver(VerificationMixin):
                 loc = await self._locate(page, f)
                 if loc is not None and await self._is_choice_input(loc):
                     got = [normalize(x) for x in await self._checked_values(page, f.key)]
-                    want = [normalize(str((best_option(o, f.options) if f.options else None) or o))
+                    want = [normalize(str((exact_choice(o, f.options) if f.options else None) or o))
                             for o in (v if isinstance(v, list) else [v])]
                     if not got or any(w not in got for w in want):
                         bad.append(f.key)
@@ -1463,12 +1531,12 @@ class PlaywrightDriver(VerificationMixin):
                             bad.append(f.key)
                         continue
                     if await self._is_group(loc):
-                        texts = await self._group_texts(loc)
-                        states = await loc.locator(_CHOICE).evaluate_all("els => els.map(e => e.checked)")
-                        ticked = [t for t, on in zip(texts, states) if on and t]
-                        # every wanted option must be ticked; an empty group is never "verified"
-                        if not ticked or any(best_option(one, ticked) is None
-                                             for one in (v if isinstance(v, list) else [v])):
+                        rows = [r for r in await self._members(loc.locator(_CHOICE), f) if r["checked"]]
+                        ticked = [r["text"] for r in rows if r["text"]]
+                        vals = {normalize(r["value"]) for r in rows if r["value"] not in ("", "on")}
+                        # every wanted option must be ticked (exact); an empty group is never "verified"
+                        if not rows or any(exact_choice(one, ticked) is None and normalize(str(one)) not in vals
+                                           for one in (v if isinstance(v, list) else [v])):
                             bad.append(f.key)
                         continue
                 except Exception:

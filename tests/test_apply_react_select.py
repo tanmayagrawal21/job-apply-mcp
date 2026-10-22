@@ -260,11 +260,54 @@ async def test_dom_only_self_id_uses_profile_or_decline_and_never_invents(drv):
     res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/5", form, ans, {}, dry_run=True)
     assert res.status == "dry_run", res.detail
     st = json.loads([p for p in posts if p[0] == "/state"][-1][1])
-    assert st == {"gender": "Female",                                   # profile value
+    assert st == {"gender": "Female",                                   # profile value, exact option
                   "race": "",                                           # optional, no profile value: blank
-                  "hispanic_ethnicity": "I don't wish to answer",       # unmatched profile value: decline
-                  "veteran_status": "I don't wish to answer",           # required, no profile value: decline
-                  "disability_status": "No, I do not have a disability"}   # native select, profile value
+                  "hispanic_ethnicity": "",                             # no equal option: blank, never decline/guess
+                  "veteran_status": "I don't wish to answer",           # required, no profile value: decline table
+                  "disability_status": ""}                              # "No" is not "No, I do not have ...": blank
+
+
+SELFID_PAIR_HTML = """<html><body><form id=f>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<label for=gender>__LABEL__</label><div id=gender_wrap></div>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('gender', __OPTS__);
+if (__REQ__) document.getElementById('gender').setAttribute('aria-required', 'true');
+function report() { const v = document.querySelector('#gender_wrap .select__single-value');
+  fetch('/state', {method: 'POST', body: v ? v.textContent : ''}); }
+new MutationObserver(report).observe(document.body, {subtree: true, childList: true}); report();
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+@pytest.mark.parametrize("label,profile,opts", [
+    ("Gender", "Female", ["Male", "Non-binary", "I don't wish to answer"]),
+    ("Gender identity", "Woman", ["Man", "Non-binary", "I don't wish to answer"]),
+    ("Race", "Asian", ["Asian Indian", "White", "I don't wish to answer"]),
+])
+@pytest.mark.parametrize("required", [False, True])
+async def test_self_id_near_miss_is_never_selected(drv, label, profile, opts, required):
+    """Female must never select Male, Woman never Man, Asian never Asian Indian: blank, and `incomplete` if required."""
+    html = (SELFID_PAIR_HTML.replace("__LABEL__", label).replace("__OPTS__", json.dumps(opts))
+            .replace("__REQ__", "true" if required else "false"))
+    srv, posts = _serve(html)
+    key = "race" if label == "Race" else "gender"
+    form = ApplicationForm(ref="greenhouse:acme:6", fields=[FormField(key="first_name", label="First Name", kind=FieldKind.text)])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/6", form,
+                                    {"first_name": "Alex", f"demographic:{key}": profile}, {}, dry_run=True)
+    assert [p for p in posts if p[0] == "/state"][-1][1] == ""
+    assert res.status == ("incomplete" if required else "dry_run"), res.detail
+
+
+def test_exact_choice_never_substring():
+    from job_apply_mcp.apply.browser_playwright import exact_choice
+    assert exact_choice("Female", ["Male", "Female"]) == "Female"
+    assert exact_choice("Female", ["Male", "Non-binary"]) is None
+    assert exact_choice("Woman", ["Man", "Transgender man"]) is None
+    assert exact_choice("Asian", ["Asian Indian", "Asian American"]) is None
+    assert exact_choice("asian ", ["ASIAN"]) == "ASIAN"
+    assert exact_choice("Decline to self-identify", ["Male", "I don't wish to answer"]) == "I don't wish to answer"
+    assert exact_choice("No", ["No, I do not have a disability"]) is None
 
 
 def test_located_in_us_maps_from_country():

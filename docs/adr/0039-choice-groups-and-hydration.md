@@ -24,12 +24,15 @@ without a scope accepted another select's chip.
   aria-label, value). The question heading is never a candidate. Ticking tries `check()`, then a click on the
   option's label, then a forced check, and reads `checked` back after each step. Verification fails when the group
   is empty or any wanted option is not ticked.
+- **Exact option matching (control review).** Choice groups (radio/checkbox) and EEO / self-ID selects, whether planned or DOM-only, use `exact_choice`: case, punctuation and whitespace are normalised, then the texts must be equal. The only other accepted equivalence is an explicit decline-synonym table (e.g. "Decline to self-identify" = "I don't wish to answer"). There is no substring, `best_option` or fuzzy matching, so Female never selects Male, Woman never Man, and Asian never Asian Indian. Without an exact match the field stays blank, and a required one makes the run `incomplete`.
+- **Own-member scoping (control review).** A group is located by the field's OWN attributes: its heading has `label[for=key]`, or its members have `name=key`, `name=*_key`, an id that starts with `key_`, or an id that contains `_key-labeled-`. There is no bare-wrapper fallback and no "first group in the container". Inside a group, only members whose name or id carries the key count when any do. Consent, SMS and marketing options are never ticked unless the planned field's own label is about consent. DOM-only privacy groups whose text or options mention consent, SMS or marketing are never ticked.
 - **Required-group scan.** `_EMPTY_REQUIRED_JS` first walks the groups (`fieldset`, `role=group|radiogroup`, consent
   blocks), using the group's visibility rather than the hidden input's. A group is required when any of these holds:
   - the group or a member is `required` or `aria-required`;
   - the legend or heading contains `*` or `✱`;
   - the legend or heading has a `required` class, or contains an element with one;
   - it is an all-radio consent group.
+  Radio/checkbox sets OUTSIDE any group container (members sharing a name, or a single unnamed box) are scanned too. Such a set is required when a member is `required` or `aria-required`, or when the closest preceding question heading that belongs to no other question carries an asterisk or a `required` class.
   An unchecked required group is reported, so the run ends `incomplete` and never `dry_run`. A required group that
   is in the plan is refilled once, as text fields already were.
 - **DOM-only consent radios.** These are surfaced by the scan. `_fill_privacy_groups` answers one only when the owner
@@ -45,7 +48,7 @@ without a scope accepted another select's chip.
   option is chosen only on an exact name match after the dial code is stripped, so "United States" never selects
   "United States Minor Outlying Islands". If no country is configured, the widget is left alone; a required empty
   Country field is then reported by the scan.
-- **DOM-only voluntary self-ID selects** (EEO questions that the job API does not list) are filled by `_fill_demographics`. This complements the mapper work in #54. A scan of visible, empty react-selects and native selects (required or not) feeds it, and fields in the plan are skipped. Only two answers are ever chosen, both with `best_option` against the offered options: the profile's `[demographics]` value, otherwise the decline option. A required select with no profile value gets the decline option. An optional select with no profile value stays blank. If neither a matching option nor a decline option exists, the select is left empty. The read-back is scoped to the field.
+- **DOM-only voluntary self-ID selects** (EEO questions that the job API does not list) are filled by `_fill_demographics`. This complements the mapper work in #54. A scan of visible, empty react-selects and native selects (required or not) feeds it, and fields in the plan are skipped. They use exact matching only. An option equal to the profile's `[demographics]` value is chosen; if no option is equal, the select stays blank. With no profile value, a required select gets the decline-table option and an optional select stays blank. The read-back is scoped to the field.
 - **`_committed(page, loc, pick)`** always scopes the read-back to the field's own container: the react-select
   shell, or the closest `[data-field-path]`, fieldset, group or field wrapper. With no container the answer is
   `False`.
