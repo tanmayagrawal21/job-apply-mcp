@@ -19,6 +19,8 @@ the cap.
   config values that loosen are dropped with a warning; lowering is accepted from every source. A value above
   the default from env/project is dropped even if it is below the user's own higher cap (the comparison is to
   the default, so the rule stays stateless).
+  *Amended by ADR-0037:* values are compared after type coercion (a string `"0"` is a `0`), and against the user
+  config's own value where set, so env/project can never raise a user's tighter cap.
 - `control_status` gains a read-only `daily_limit` block: `limit`, `used` (rolling 24h for day and per platform,
   this run for run) and `remaining` per scope; `null` limit = no limit. `job-apply-mcp doctor` prints the same
   data and warns when a cap is off. Counts use `UsageState`, so `submit_release` (ADR-0032) is honored.

@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..config import Settings
+from ..config import Settings, parse_cap
 from .controls import Context, Control, ControlConfigError, Violation, controls, parse_actions, parse_severity
 from .sanitize import sanitize_untrusted
 
@@ -116,12 +116,9 @@ def effective_limits(params: dict[str, Any], settings: Settings) -> dict[str, in
         if v is None:
             out[scope] = None
             continue
-        try:
-            n = int(v)
-        except (TypeError, ValueError):
-            raise ControlConfigError(f"quota {key} must be a whole number (0 = no limit), got {v!r}") from None
-        if n < 0:
-            raise ControlConfigError(f"quota {key} must be >= 0 (0 = no limit), got {n}")
+        n = parse_cap(v)            # strict: int(0.5) == 0 would silently mean "no limit" (ADR-0037)
+        if n is None:
+            raise ControlConfigError(f"quota {key} must be a whole number >= 0 (0 = no limit), got {v!r}")
         out[scope] = n or None
     return out
 
