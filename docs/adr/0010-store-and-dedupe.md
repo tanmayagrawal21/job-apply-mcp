@@ -39,3 +39,24 @@ behavior. `store.seen_why(...)` returns the matched reason (`req_id:...`, `url:.
 Existing databases are migrated on open with `ALTER TABLE ADD COLUMN` (nullable, idempotent) and `req_id` is
 backfilled from `ref`. The engine passes `ref=` and `url=` to `seen`/`record`. Revert: `dedupe.mode = "title"`.
 Verify: `uv run pytest tests/test_store.py tests/test_search_ranking.py::test_old_db_migrates -q`.
+
+## Amendment 2 (2026-10-22): id-less fallback, company aliases, fuzzy titles
+Context: a real run let through two jobs already applied to. (a) Same company and identical title, but the stored
+historical row (imported) had no requisition id / url_key while the new posting had one. (b) One employer under two
+names (a brand and its parent's long legal name).
+Decision:
+1. In `id_first` mode an id/URL that matches nothing no longer ends the check: the company+title fallback still runs
+   against stored rows that lack both `req_id` and `url_key`. Rows that HAVE a different id remain distinct
+   requisitions (two postings with ids and identical titles are never merged). Synthetic refs (`mail:`, `import:`,
+   `csv:`, `manual:`, `history:`, `legacy:`) are not requisition ids and never populate `req_id`.
+2. Company identity = normalized key (more suffix words: global, technologies, group, holdings, ...), compared
+   separator-insensitively so board slugs (`acme-games`, `acmegames`) equal display names, then mapped through
+   `dedupe.company_aliases = {"brand": "canonical"}`. Matching resolves stored `company` text at query time, so alias
+   edits apply retroactively to history.
+3. Title fallback uses token Jaccard with `dedupe.title_threshold` (default 0.6, was fixed 0.75); level words must
+   still agree exactly.
+4. `seen_why` returns `title~<jaccard> company=<exact|alias>[ legacy-row]` (or `req_id:`/`url:`); the engine puts it in
+   the `duplicate` detail.
+Consequences: more conservative (more duplicates caught); a lower threshold or a broad alias can merge distinct roles
+at one employer; rows with ids are unaffected. Verify: `uv run pytest tests/test_store.py -q`.
+Revert: `dedupe.title_threshold = 0.75`, empty `company_aliases`, or `dedupe.mode = "title"`.

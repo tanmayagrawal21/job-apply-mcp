@@ -56,7 +56,9 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
         gates = ad.PolicyGates(settings)
     if store is None:
         sqlite = _need("store.sqlite", "application store", "feat/store-policy")
-        store = sqlite.SqliteStore(settings.paths.data_dir, dedupe_days=settings.policy.dedupe_days)
+        store = sqlite.SqliteStore(settings.paths.data_dir, dedupe_days=settings.policy.dedupe_days,
+                                  dedupe_mode=settings.dedupe.mode, company_aliases=settings.dedupe.company_aliases,
+                                  title_threshold=settings.dedupe.title_threshold)
     if router is None:
         try:
             llm = importlib.import_module("job_apply_mcp.llm.router")
