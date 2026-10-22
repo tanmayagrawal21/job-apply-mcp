@@ -31,6 +31,20 @@ class Services:
         self._llm = None
 
     @property
+    def improve(self):
+        from .improve.service import ImproveService
+
+        if getattr(self, "_improve", None) is None:
+            self._improve = ImproveService(self.settings)
+        return self._improve
+
+    async def request_feature(self, description: str, kind: str | None = None) -> dict[str, Any]:
+        return await self.improve.request_feature(description, kind)
+
+    async def improvement_report(self, limit: int = 10) -> dict[str, Any]:
+        return await self.improve.improvement_report(limit)
+
+    @property
     def llm(self):
         """Task-class + complexity router (ADR-0008), created lazily."""
         if self._llm is None:
