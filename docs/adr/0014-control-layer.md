@@ -55,3 +55,11 @@ The sanitizer is defense in depth, not a guarantee.
 ## Verify / revert
 `uv run pytest tests/test_control.py`. Revert: drop `control/`, the `ControlCfg` block in config.py and the
 two server.py lines; nothing else depends on them.
+
+## Amendment (2026-10-22, reviewer follow-ups)
+- `sanitize_untrusted` patterns narrowed (only direct address to AI readers, and role prefixes followed by
+  an instruction verb), so "AI agents and models...", "Developer: Python", "System: Linux" survive. ZWJ/ZWNJ
+  are no longer stripped (emoji, Persian/Indic text); other invisible characters still are.
+- An unknown id in `control.enabled` becomes `config_error` (fail closed) instead of a KeyError.
+- Audit log: `_replay`/`recent_blocks` read only the file tail; the log rotates to `control_audit.jsonl.1`
+  above 5 MB (replay needs only 2 days). Revert: restore the previous functions in agent.py / sanitize.py.

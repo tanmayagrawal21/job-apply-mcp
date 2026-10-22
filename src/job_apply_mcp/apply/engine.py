@@ -1,0 +1,500 @@
+"""Apply engine (ADR-0011): plan -> approve (hash-bound token) -> submit, plus a bounded-parallel batch.
+
+Collaborators are injected and typed by the Protocols in ports.py / core/interfaces.py, so the engine is
+testable with small fakes and independent of how profile, router, gates and store are implemented.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import re
+import time
+from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from ..config import Settings
+from ..core.concurrency import bounded_gather
+from ..core.interfaces import BrowserDriver, PlatformAdapter, Store
+from ..core.models import (
+    Answer,
+    ApplicationForm,
+    ApplicationPlan,
+    Decision,
+    FieldKind,
+    FormField,
+    GateResult,
+    Posting,
+    SubmitResult,
+)
+from .mapper import best_option, canonical_key, map_fields, normalize
+from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
+from .writing import load_exemplar, summarize_posting, write_text
+
+# Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
+_SENSITIVE_KEYS = {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
+                   "disability", "over_18", "privacy_ack", "salary_expectation", "start_date"}
+_SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|clearance|citizen|"
+                              r"agree|certify|attest|signature|ssn|social security", re.IGNORECASE)
+
+
+class PlanOut(BaseModel):
+    plan: ApplicationPlan
+    client_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    token: str | None = None
+    timings: dict[str, int] = Field(default_factory=dict)
+
+    def compact(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"ref": self.plan.ref, "gate": self.plan.gate.decision.value}
+        if self.plan.gate.reasons:
+            d["why"] = self.plan.gate.reasons
+        if self.plan.answers:
+            d["answers"] = {a.key: a.value for a in self.plan.answers}
+            d["src"] = {a.key: a.source for a in self.plan.answers if a.source != "profile"}
+        if self.plan.unresolved:
+            d["unresolved"] = self.plan.unresolved
+        if self.client_tasks:
+            d["client_tasks"] = self.client_tasks
+        if self.token:
+            d["token"] = self.token
+        if self.timings:
+            d["t"] = self.timings
+        return d
+
+
+def canonical_digest(ref: str, answers: dict[str, Any]) -> str:
+    blob = json.dumps({"ref": ref, "answers": answers}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+@dataclass
+class _Cached:
+    token: str
+    answers: dict[str, Any]
+    unresolved: list[str]
+    posting: Posting
+    form: ApplicationForm
+    expires: float
+    adapter: Any = None
+    summary: str = ""
+
+
+@dataclass
+class _Ctx:
+    adapter: PlatformAdapter
+    posting: Posting
+    form: ApplicationForm
+    summary: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+class ApplyEngine:
+    def __init__(self, settings: Settings, *, resolve_adapter: Callable[[str], PlatformAdapter],
+                 profile: ProfileLike, router: RouterLike | None, gates: GatesLike, store: Store,
+                 driver_factory: Callable[[str], BrowserDriver] | None = None,
+                 control: ControlLike | None = None):
+        self.s = settings
+        self._resolve = resolve_adapter
+        self.profile, self.router, self.gates, self.store = profile, router, gates, store
+        self._driver_factory = driver_factory or self._default_driver
+        self._drivers: dict[str, BrowserDriver | None] = {}
+        self._plans: dict[str, _Cached] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self.control = control
+        self._browser_sem = asyncio.Semaphore(max(1, settings.concurrency.browser_workers))
+        self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
+        self.timings: dict[str, dict[str, int]] = {}
+        self._exemplar: str | None = None
+
+    # ---------------------------------------------------------------- helpers
+    def _default_driver(self, name: str) -> BrowserDriver:
+        import importlib
+
+        from ..core import registry
+        mod = {"playwright": "browser_playwright", "browser_use": "browser_use_driver"}.get(name)
+        if mod:
+            try:
+                importlib.import_module(f"{__package__}.{mod}")
+            except ImportError as e:
+                raise ComponentMissing(f"browser driver '{name}' needs its extra installed: {e}") from e
+        return registry.browser_drivers.create(name, settings=self.s)
+
+    def _driver(self, name: str | None) -> BrowserDriver | None:
+        if not name:
+            return None
+        if name not in self._drivers:
+            try:
+                self._drivers[name] = self._driver_factory(name)
+            except (ComponentMissing, KeyError):
+                self._drivers[name] = None
+        return self._drivers[name]
+
+    def _lock(self, company: str) -> asyncio.Lock:
+        own = getattr(self.store, "company_lock", None)
+        if own is not None:
+            return own(company)
+        return self._locks.setdefault(normalize(company) or "?", asyncio.Lock())
+
+    @contextmanager
+    def _stage(self, ref: str, name: str):
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            d = self.timings.setdefault(ref, {})
+            d[name] = d.get(name, 0) + int((time.monotonic() - t0) * 1000)
+
+    async def _context(self, ref: str) -> _Ctx:
+        adapter = self._resolve(ref)
+        with self._stage(ref, "fetch"):  # posting + form concurrently
+            posting, form = await asyncio.gather(adapter.get_posting(ref, with_description=True),
+                                                 adapter.get_form(ref))
+        return _Ctx(adapter, posting, form, summarize_posting(posting.description, self.s.apply.context_chars))
+
+    def _stop_hits(self, form: ApplicationForm) -> list[str]:
+        phrases = [p.lower() for p in self.s.policy.stop_phrases]
+        return [f.label for f in form.fields if any(p in f.label.lower() for p in phrases)]
+
+    async def _gate(self, ctx: _Ctx) -> GateResult:
+        ref = ctx.form.ref
+        with self._stage(ref, "gate"):  # policy gates and the dedupe lookup run concurrently
+            gate, dup = await asyncio.gather(
+                self.gates.evaluate(ctx.posting, ctx.form),
+                self.store.seen(ctx.posting.company, ctx.posting.title, within_days=self.s.policy.dedupe_days))
+        reasons = list(gate.reasons)
+        decision = gate.decision
+        hits = self._stop_hits(ctx.form)
+        if hits and decision == Decision.submit:
+            decision = Decision.needs_human
+            reasons.append(f"attestation/policy field: {hits[0][:60]}")
+        if dup and decision != Decision.skip:
+            decision = Decision.skip
+            reasons.append("duplicate")
+        return GateResult(decision=decision, reasons=reasons)
+
+    # ------------------------------------------------------------------- plan
+    async def plan(self, ref: str) -> PlanOut:
+        async with self._plan_sem:
+            ctx = await self._context(ref)
+            return await self._plan_ctx(ref, ctx)
+
+    async def _plan_ctx(self, ref: str, ctx: _Ctx) -> PlanOut:
+        gate = await self._gate(ctx)
+        if gate.decision != Decision.submit:
+            return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
+        with self._stage(ref, "map"):  # deterministic first
+            mapped = map_fields(ctx.form.fields, self.profile)
+        answers = list(mapped.answers)
+        short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
+        long_ = [f for f in mapped.unresolved if f not in short]
+        tasks: list[dict[str, Any]] = []
+        if self.router is not None:
+            # one batched short-field call and the prose pipeline run concurrently
+            with self._stage(ref, "llm"):
+                (got, leftover), (written, long_, wtasks) = await asyncio.gather(
+                    self._llm_short(short, ctx), self._write_long(long_, ctx))
+            answers += got
+            long_ += leftover
+            answers += written
+            tasks += wtasks
+        else:
+            long_ += short
+        unresolved_keys: list[str] = []
+        have = {t["key"] for t in tasks}
+        for f in long_:
+            if f.key in have:
+                continue
+            if not f.required and not (f.kind == FieldKind.textarea and self.s.apply.write_optional):
+                continue
+            unresolved_keys.append(f.key)
+            tasks.append(self._task(f, ctx))
+        unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
+        planned = {a.key: a.value for a in answers}
+        token = canonical_digest(ref, planned)
+        self._plans[ref] = _Cached(token, planned, unresolved_keys, ctx.posting, ctx.form,
+                                   time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary)
+        return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys),
+                       client_tasks=tasks, token=token, timings=self.timings.get(ref, {}))
+
+    def _is_short(self, f: FormField) -> bool:
+        if f.kind == FieldKind.file:
+            return False
+        if f.kind == FieldKind.textarea:
+            return bool(f.max_length and f.max_length <= self.s.apply.short_text_max)
+        return True
+
+    @staticmethod
+    def _llm_allowed(f: FormField) -> bool:
+        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label)
+                    or f.kind == FieldKind.file)
+
+    def _task(self, f: FormField, ctx: _Ctx, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        t: dict[str, Any] = {"key": f.key, "label": f.label, "max_len": f.max_length or 0,
+                             "context": {"role": f"{ctx.posting.title} @ {ctx.posting.company}",
+                                         "posting": ctx.summary, "facts": self.profile.facts(f.label, 6)}}
+        if f.options:
+            t["options"] = f.options[:30]
+        if extra:
+            t.update(extra)
+        return t
+
+    async def _llm_short(self, fields: list[FormField], ctx: _Ctx) -> tuple[list[Answer], list[FormField]]:
+        """ONE router call for every remaining short field; each reply is validated independently."""
+        if not fields or self.router is None:
+            return [], list(fields)
+        spec = []
+        for f in fields:
+            row: dict[str, Any] = {"key": f.key, "q": f.label, "type": f.kind.value}
+            if f.options:
+                row["options"] = f.options[:40]
+            if f.max_length:
+                row["max_chars"] = f.max_length
+            spec.append(row)
+        facts = "\n".join(f"- {x}" for x in self.profile.facts(" ".join(f.label for f in fields), 14))
+        prompt = (f"Fill application fields for {ctx.posting.title} at {ctx.posting.company}. Use ONLY these "
+                  f"facts; when they do not determine an answer use null. For options answer with one option "
+                  f"exactly.\nFACTS:\n{facts}\nFIELDS:\n{json.dumps(spec, separators=(',', ':'))}\n"
+                  'Return one JSON object keyed by field key: {"<key>": {"value": ..., "confidence": 0..1}}.')
+        schema = {"type": "object"}
+        try:
+            raw = await self.router.complete(prompt, task_class="short", max_tokens=80 + 60 * len(fields),
+                                             json_schema=schema)
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
+        except Exception:  # noqa: BLE001 - a flaky model must never break planning
+            return [], list(fields)
+        out, left = [], []
+        for f in fields:
+            d = data.get(f.key) if isinstance(data, dict) else None
+            ans = self._accept(f, d)
+            (out if ans else left).append(ans or f)
+        return out, left
+
+    def _accept(self, f: FormField, d: Any) -> Answer | None:
+        if not isinstance(d, dict):
+            return None
+        value = d.get("value")
+        try:
+            conf = float(d.get("confidence") or 0)
+        except (TypeError, ValueError):
+            return None
+        if value in (None, "") or conf < self.s.apply.llm_min_confidence:
+            return None
+        value = self._validate(f, value)
+        return None if value is None else Answer(key=f.key, value=value, source="llm:short", confidence=conf)
+
+    @staticmethod
+    def _validate(f: FormField, value: Any) -> Any | None:
+        if f.kind == FieldKind.multiselect:
+            vals = [o for o in (best_option(v, f.options) for v in (value if isinstance(value, list) else [value])) if o]
+            return vals or None
+        if f.kind == FieldKind.select or f.options:
+            return best_option(value, f.options)
+        if f.kind == FieldKind.boolean:
+            return value if isinstance(value, bool) else {"yes": True, "no": False}.get(str(value).lower())
+        if f.kind == FieldKind.number:
+            try:
+                return float(value) if "." in str(value) else int(value)
+            except ValueError:
+                return None
+        s = str(value).strip()
+        return s if not f.max_length or len(s) <= f.max_length else None
+
+    async def _write_long(self, fields: list[FormField], ctx: _Ctx):
+        """Prose only for required (or opted-in) long text; fields written concurrently."""
+        written: list[Answer] = []
+        rest: list[FormField] = []
+        tasks: list[dict[str, Any]] = []
+        if not fields or self.router is None or not self.s.writing.enabled:
+            return written, list(fields), tasks
+        if self._exemplar is None:
+            self._exemplar = load_exemplar(self.s.writing.style_exemplar)
+        avail = getattr(self.router, "available", None)
+        todo: list[FormField] = []
+        for f in fields:
+            wanted = f.required or self.s.apply.write_optional
+            if f.kind == FieldKind.textarea and wanted and self._llm_allowed(f):
+                todo.append(f)
+            else:
+                rest.append(f)
+        if todo and avail is not None:
+            try:
+                if not await avail("narrative"):
+                    return written, rest + todo, tasks
+            except Exception:  # noqa: BLE001
+                return written, rest + todo, tasks
+
+        async def one(f: FormField):
+            cover = "cover" in normalize(f.label)
+            return await write_text(
+                self.router, self.s.writing, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
+                company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
+                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "")
+
+        with self._stage(ctx.form.ref, "write"):
+            results = await bounded_gather((one(f) for f in todo), self.s.concurrency.global_limit)
+        for f, res in zip(todo, results, strict=True):
+            if isinstance(res, BaseException):
+                rest.append(f)
+            elif res.status == "pass":
+                written.append(Answer(key=f.key, value=res.text, source="llm:narrative"))
+            elif res.status == "needs_review":
+                tasks.append(self._task(f, ctx, {"draft": res.text, "review": res.rubric}))
+            else:
+                tasks.append(self._task(f, ctx, {"draft": res.text, "needs_human": True,
+                                                 "violations": [v.line() for v in res.violations][:6]}))
+        return written, rest, tasks
+
+    # ----------------------------------------------------------------- submit
+    def _cached(self, ref: str) -> _Cached | None:
+        c = self._plans.get(ref)
+        if c and c.expires < time.monotonic():
+            del self._plans[ref]
+            return None
+        return c
+
+    def _approve(self, ref: str, supplied: dict[str, Any], token: str | None) -> tuple[dict[str, Any] | None, str]:
+        """Return (effective answers, error). The token binds the server-generated answers; text the client
+        writes for `unresolved` keys is free, but it can never override an approved answer."""
+        cached = self._cached(ref)
+        if token and cached and token == cached.token:
+            for k, v in supplied.items():
+                if k in cached.answers and cached.answers[k] != v:
+                    return None, f"answer '{k}' differs from the approved plan; re-plan"
+            return {**cached.answers, **supplied}, ""
+        if token and token == canonical_digest(ref, supplied):
+            return dict(supplied), ""
+        return None, "missing or invalid approval token; call plan_application and pass its token"
+
+    async def _control(self, action: str, ctx: _Ctx, dry: bool, eff: dict[str, Any] | None = None) -> str | None:
+        """Optional control layer (ADR-0014). Returns a block reason, or None when allowed."""
+        if self.control is None:
+            return None
+        res = await self.control.check(action, {"ref": ctx.form.ref, "company": ctx.posting.company,
+                                                "title": ctx.posting.title, "dry_run": dry,
+                                                "platform": ctx.posting.platform, "answers": eff or {}})
+        verdict = res
+        for attr in ("decision", "verdict", "status", "allowed", "ok"):
+            v = res.get(attr) if isinstance(res, dict) else getattr(res, attr, None)
+            if v is not None:
+                verdict = v
+                break
+        v = getattr(verdict, "value", verdict)
+        if v is None or v is True or str(v).lower() in ("allow", "allowed", "ok", "pass", "submit", "proceed"):
+            return None
+        reasons = res.get("reasons") if isinstance(res, dict) else getattr(res, "reasons", None)
+        return f"control: {v}" + (f" ({'; '.join(map(str, reasons))[:120]})" if reasons else "")
+
+    async def submit(self, ref: str, answers: dict[str, Any] | None = None, token: str | None = None,
+                     dry_run: bool | None = None) -> SubmitResult:
+        dry = self.s.dry_run if dry_run is None else dry_run
+        supplied = dict(answers or {})
+        try:
+            cached = self._cached(ref)
+            if cached and cached.adapter is not None:
+                ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)  # no refetch
+            else:
+                ctx = await self._context(ref)
+            if self.s.apply.auto_approve or dry:
+                if cached:
+                    eff = {**cached.answers, **supplied}
+                else:
+                    plan = await self._plan_ctx(ref, ctx)
+                    if plan.plan.gate.decision != Decision.submit:
+                        return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
+                                            else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
+                    eff = {**{a.key: a.value for a in plan.plan.answers}, **supplied}
+            else:
+                eff, err = self._approve(ref, supplied, token)
+                if eff is None:
+                    return SubmitResult(ref=ref, status="error", detail=err)
+            hits = self._stop_hits(ctx.form)
+            if hits:
+                return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
+            missing = [f.key for f in ctx.form.fields if f.required and f.key not in eff]
+            if missing:
+                return SubmitResult(ref=ref, status="needs_human", detail=f"unresolved required: {missing[:8]}")
+            blocked = await self._control("submit", ctx, dry, eff)
+            if blocked:
+                return SubmitResult(ref=ref, status="needs_human", detail=blocked)
+            async with self._lock(ctx.posting.company):
+                if await self.store.seen(ctx.posting.company, ctx.posting.title,
+                                         within_days=self.s.policy.dedupe_days):
+                    return SubmitResult(ref=ref, status="duplicate", detail="already applied")
+                with self._stage(ref, "submit"):
+                    result = await self._dispatch(ctx, eff, dry)
+                if result.status in ("submitted", "needs_human", "roadblock"):
+                    await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title)
+                if result.status == "submitted":
+                    self._plans.pop(ref, None)
+                return result
+        except ComponentMissing:
+            raise
+        except Exception as e:  # noqa: BLE001
+            return SubmitResult(ref=ref, status="error", detail=f"{type(e).__name__}: {e}"[:200])
+
+    async def _dispatch(self, ctx: _Ctx, eff: dict[str, Any], dry: bool) -> SubmitResult:
+        form, ref = ctx.form, ctx.form.ref
+        kinds = {f.key: f.kind for f in form.fields}
+        files = {k: str(v) for k, v in eff.items() if kinds.get(k) == FieldKind.file}
+        values = {k: v for k, v in eff.items() if k not in files}
+        last = SubmitResult(ref=ref, status="needs_human", detail="no submission path available")
+        for path in form.submit_via or ["api", "browser"]:
+            if path == "api":
+                res = await ctx.adapter.submit(form, values, files, dry_run=dry)
+                if res.status != "needs_browser":
+                    return res
+                last = res
+            elif path == "browser":
+                res = await self._browser(ctx, values, files, dry)
+                if res is not None:
+                    return res
+        return SubmitResult(ref=ref, status="needs_human", detail=(last.detail or last.status)[:200])
+
+    async def _browser(self, ctx: _Ctx, values: dict[str, Any], files: dict[str, str],
+                       dry: bool) -> SubmitResult | None:
+        url = ctx.posting.apply_url or ctx.posting.url
+        last: SubmitResult | None = None
+        for name in (self.s.browser.driver, self.s.browser.fallback_driver):
+            drv = self._driver(name)
+            if drv is None:
+                continue
+            async with self._browser_sem:
+                last = await drv.fill_and_submit(url, ctx.form, values, files, dry_run=dry)
+            if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
+                return last
+        return last or SubmitResult(ref=ctx.form.ref, status="needs_human",
+                                    detail="no browser driver available (install extra 'browser')")
+
+    # ------------------------------------------------------------------ batch
+    async def apply_batch(self, refs: list[str], dry_run: bool | None = None,
+                          max_parallel: int | None = None) -> list[dict[str, Any]]:
+        """Pipelined: planning workers (apply.plan_workers) and browser workers (concurrency.browser_workers)
+        are separate pools, so job N+1 is planned (and its prose written) while job N is in the browser."""
+        dry = self.s.dry_run if dry_run is None else dry_run
+        browser_cap = asyncio.Semaphore(max_parallel or self.s.concurrency.browser_workers)
+
+        async def one(ref: str) -> dict[str, Any]:
+            out = await self.plan(ref)
+            g = out.plan.gate
+            if g.decision != Decision.submit:
+                return {"ref": ref, "status": g.decision.value, "why": g.reasons, "t": out.timings}
+            if out.plan.unresolved:
+                return {"ref": ref, "status": "needs_input", "unresolved": out.plan.unresolved,
+                        "client_tasks": out.client_tasks, "token": out.token, "t": out.timings}
+            if not dry and not self.s.apply.auto_approve:
+                return {"ref": ref, "status": "awaiting_approval", "token": out.token, "t": out.timings}
+            async with browser_cap:
+                r = await self.submit(ref, {}, out.token, dry)
+            row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail,
+                   "t": self.timings.get(ref, {})}
+            return {k: v for k, v in row.items() if v}
+
+        # every ref starts at once; the pools above (plan_sem, browser_cap/_browser_sem) do the limiting
+        rows = await bounded_gather((one(r) for r in refs), max(len(refs), 1))
+        return [r if not isinstance(r, BaseException) else {"status": "error", "detail": str(r)[:160]}
+                for r in rows]
