@@ -29,3 +29,7 @@ labels (for example a notice that mentions "terms of use") still need the owner.
 ## Verify / revert
 `uv run pytest tests/test_privacy_ack.py`. Revert by removing the preference, the mapper block and this ADR; with the
 preference unset nothing changes, so setting it to `false` is the no-code revert.
+
+## Amendment (ADR-0036)
+The check no longer runs before alias lookup: it runs only for fields whose canonical key is `None`/`privacy_ack` and
+that are not sensitive questions, and the chosen option must itself be an acknowledgement. See ADR-0036.

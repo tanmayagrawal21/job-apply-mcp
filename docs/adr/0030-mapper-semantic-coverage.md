@@ -33,3 +33,6 @@ Users must set the new facts once (`examples/profile.example.toml`). Unset facts
 
 ## Verify / revert
 `uv run pytest tests/test_apply_mapper_coverage.py`. Revert the PR; profile files with the new keys still load.
+
+## Amendment (ADR-0036)
+Authorization and sponsorship answers apply to US or unspecified-country questions only; a non-US country needs an `[answers]` pattern naming it. See ADR-0036.

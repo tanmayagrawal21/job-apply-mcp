@@ -138,6 +138,11 @@ class ProfileView:
             return self._citizenship_country()
         if key.startswith("gpa:"):
             return self._gpa(key[4:])
+        if key.startswith("country_answer:"):       # ADR-0036: only an [answers] pattern that names the country
+            from .mapper import question_countries
+            _, country, question = key.split(":", 2)
+            mine = {pat: v for pat, v in self.p.answers.items() if country in question_countries(pat)[1]}
+            return self.p.model_copy(update={"answers": mine}).answer_for(question) if mine else None
         if key.startswith("employer:"):
             want = key[9:]
             return "Yes" if any(same_company(o, want) for o in self._employers()) else None
@@ -169,7 +174,7 @@ class ProfileView:
 
     def lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
-                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:"))):
+                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:"))):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v
