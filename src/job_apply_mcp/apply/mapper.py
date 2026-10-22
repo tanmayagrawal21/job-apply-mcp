@@ -342,7 +342,9 @@ _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relo
                   "open_to_onsite", "knows_employee", "years_experience", "languages_known"}
 # Never sent to the local LLM: a guess is a false statement about the candidate.
 SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"}
-_TOTAL_GENERIC = frozenset(["how", "many", "total", "years", "yrs", "year", "of", "experience", "professional", "software", "engineering", "engineer", "work", "working", "relevant", "practical", "career", "industry", "overall", "do", "you", "have", "at", "least", "a", "an", "the", "your", "please", "input", "enter", "number", "in", "that", "are", "to", "this", "role", "position", "related", "full", "time", "hands", "on", "is", "what", "minimum", "prior", "paid", "commercial", "real", "world", "combined", "cumulative", "amount", "can", "say", "for", "with", "or", "and", "i", "am", "if", "any", "has", "s", "plus", "more"])
+_TOTAL_GENERIC = frozenset(
+    ["how", "many", "total", "years", "yrs", "year", "of", "experience", "professional", "software", "engineering", "engineer", "work", "working", "relevant", "practical", "career", "industry", "overall", "do", "you", "have", "at", "least", "a", "an", "the", "your", "please", "input", "enter", "number", "in", "that", "are", "to", "this", "role", "position", "related", "full", "time", "hands", "on", "is", "what", "minimum", "prior", "paid", "commercial", "real", "world", "combined", "cumulative", "amount", "can", "say", "for", "with", "or", "and", "i", "am", "if", "any", "has", "s", "plus", "more", "field"]
+)
 
 
 def _truth(v: Any) -> bool | None:
@@ -392,7 +394,10 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any
     n = normalize(f.label)
     auth, req = _truth(profile.lookup("work_authorized")), _truth(profile.lookup("requires_sponsorship"))
     cit = _truth(profile.lookup("us_citizen"))
-    has_auth, has_sp = bool(_AUTH_WORDS.search(n)), bool(re.search(r"sponsor|\bvisa\b", n))
+    ma, ms = _AUTH_WORDS.search(n), re.search(r"sponsor|\bvisa\b", n)
+    has_auth, has_sp = bool(ma), bool(ms)
+    if ma and ms and ms.start() < ma.start():    # "require sponsorship ... for work authorization": a sponsorship question
+        has_auth = False
     if f.options and not _yes_no_options(f.options):
         if has_auth:
             return True, pick_auth_option(f.options, auth, req, cit)

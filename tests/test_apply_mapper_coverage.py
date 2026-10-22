@@ -52,7 +52,8 @@ def test_authorized_yes(label):
     "Do you now or will you in the future require immigration sponsorship",
     "Do you currently, or will you in the future, require visa sponsorship",
     "Will you now or in the future require sponsorship for employment visa status?",
-    "Will you need visa sponsorship?"])
+    "Will you need visa sponsorship?",
+    "Do you now or will you in the future require immigration sponsorship by the company for continued work-authorization?\n"])
 def test_sponsorship_yes_never_flips(label):
     assert run(sel(label))[0] == "Yes"
     assert run(sel(label), prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False)))[0] == "No"
@@ -180,7 +181,8 @@ def test_total_years_select_range_never_rounds_up():
 
 @pytest.mark.parametrize("label", [
     "Do you have at least 5 years of practical career experience?",
-    "Do you have 5+ years of professional experience?"])
+    "Do you have 5+ years of professional experience?",
+    "Do you have at least 5 years of practical career experience in this field?\n"])
 def test_at_least_n_compares_truthfully(label):
     assert run(sel(label))[0] == "Yes"
     assert run(sel(label.replace("5", "7")))[0] == "No"
