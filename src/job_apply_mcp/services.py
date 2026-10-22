@@ -37,6 +37,7 @@ class Services:
         self._llm = None
         self._skills: list[str] | None = None
         self._desc: dict[str, Posting | None] = {}
+        self._late: set[asyncio.Task] = set()   # timed-out board fetches left to finish into the cache (ADR-0043)
 
     @property
     def improve(self):
@@ -93,7 +94,7 @@ class Services:
             self._http = HttpClient(
                 cache_dir=Path(self.settings.paths.data_dir).expanduser() / "http_cache", ttl_s=p.cache_ttl_s,
                 limiter=self.hosts, timeout_s=p.timeout_s, retries=p.retries, backoff_s=p.backoff_s,
-                user_agent=p.user_agent, prune_days=p.cache_prune_days)
+                user_agent=p.user_agent, prune_days=p.cache_prune_days, memo_entries=p.memo_boards)
         return self._http
 
     @property
@@ -103,6 +104,8 @@ class Services:
         return self._adapters
 
     async def aclose(self) -> None:
+        for t in list(self._late):
+            t.cancel()
         if self._http:
             await self._http.aclose()
 
@@ -133,7 +136,17 @@ class Services:
                 out += [(ads[n], b) for b in cfg.boards.get(n, [])]
             if "jobspy" in names and platforms:
                 out.append((ads["jobspy"], ",".join(cfg.jobspy_sites)))
-        return list(dict.fromkeys((a, b) for a, b in out)), errors
+        return self._interleave(list(dict.fromkeys((a, b) for a, b in out))), errors
+
+    @staticmethod
+    def _interleave(targets: list[tuple[Any, str]]) -> list[tuple[Any, str]]:
+        """Round-robin the targets across platforms (ADR-0043). In config order every global slot first fills with
+        one platform's boards, so that host's per-host cap idles the rest and the hosts run one after another."""
+        by: dict[str, list[tuple[Any, str]]] = {}
+        for t in targets:
+            by.setdefault(getattr(t[0], "name", ""), []).append(t)
+        queues = list(by.values())
+        return [q[i] for i in range(max(map(len, queues), default=0)) for q in queues if i < len(q)]
 
     def _policy_drop(self, p: Posting) -> bool:
         pol, f = self.settings.policy, p.flags
@@ -208,6 +221,8 @@ class Services:
             out["filtered"] = meta["filtered"]
         if meta.get("errors"):
             out["errors"] = meta["errors"][:10]
+        if meta.get("timings"):
+            out["timings"] = meta["timings"]
         budget = self.settings.response_budget_chars   # shrink the page rather than let the server truncate JSON
         while len(page) > 1 and len(json.dumps(out, separators=(",", ":"), default=str)) > budget:
             page.pop()
@@ -225,22 +240,38 @@ class Services:
             return
         since = (datetime.now(UTC).date() - timedelta(days=since_days)).isoformat() if since_days else None
         step = max(1, len(targets) // 50)
+        cfg = self.settings.search
+        t_start, http = time.monotonic(), self.http
+        t0, s0 = dict(http.timings), dict(http.stats)
+        slow: list[tuple[float, str]] = []
+
+        async def collect(a: Any, b: str, kw: dict[str, Any]) -> list[Posting]:
+            return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
 
         async def one(a: Any, b: str) -> list[Posting]:
             kw = {"location": location} if a.name == "jobspy" else {}
-            try:
-                return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
+            t = time.monotonic()
+            task = asyncio.ensure_future(collect(a, b, kw))
+            try:   # per-board budget so one slow board cannot stall the fan-out (ADR-0043)
+                return await asyncio.wait_for(asyncio.shield(task), cfg.board_timeout_s or None)
+            except TimeoutError:
+                # the fetch keeps running so its response lands in the HTTP cache for the next search
+                self._late.add(task)
+                task.add_done_callback(lambda tk: (self._late.discard(tk), tk.cancelled() or tk.exception()))
+                sess.boards_failed += 1
+                raise TimeoutError(f"timed out after {cfg.board_timeout_s:g}s") from None
             except BaseException:
                 sess.boards_failed += 1
                 raise
             finally:
+                slow.append((time.monotonic() - t, f"{a.name}:{b}"))
                 sess.boards_done += 1
                 if progress and (sess.boards_done % step == 0 or sess.boards_done == sess.boards_total):
                     with contextlib.suppress(Exception):   # a broken client channel must not fail the search
                         await progress(sess.boards_done, sess.boards_total)
 
         results = await bounded_gather((one(a, b) for a, b in targets), self.settings.concurrency.global_limit)
-        cfg = self.settings.search
+        t_fetch = time.monotonic()
         terms = [t for t in query.lower().split() if t]
         loc = location.lower().strip()
         rows: list[Posting] = []
@@ -264,11 +295,13 @@ class Services:
                 rows.append(p)
         extra: dict[str, Any] = {}
         scored: dict[str, tuple[float, list[str]]] = {}
+        t_rank = time.monotonic()
         if cfg.rank:
             rows, scored, extra, d2 = await self._rank(rows, query, server_side, apply_policy)
             dropped += d2
         else:
             rows.sort(key=lambda p: (p.posted_at or "", p.ref), reverse=True)
+        t_end = time.monotonic()
         out_rows = []
         for p in rows[: cfg.sessions.max_rows]:
             r = {**p.compact(), "d": p.posted_at}
@@ -276,7 +309,13 @@ class Services:
                 r["score"], r["why"] = scored[p.ref][0], scored[p.ref][1]
             out_rows.append(r)
         sess.rows = out_rows
-        sess.meta = {"extra": extra, "filtered": dropped, "errors": errors}
+        slow.sort(reverse=True)
+        timings = {"total_s": t_end - t_start, "fetch_s": t_fetch - t_start, "filter_s": t_rank - t_fetch,
+                   "rank_s": t_end - t_rank, **{k: http.timings[k] - t0.get(k, 0.0) for k in http.timings}}
+        sess.meta = {"extra": extra, "filtered": dropped, "errors": errors, "timings": {
+            **{k: round(v, 2) for k, v in timings.items()},
+            "n": {k: http.stats[k] - s0.get(k, 0) for k in ("requests", "cache_hits", "memo_hits", "revalidated")},
+            "slowest": [[b, round(d, 1)] for d, b in slow[:3]]}}
 
     # ------------------------------------------------------------------ relevance ranking (ADR-0022)
     def _profile_skills(self) -> list[str]:

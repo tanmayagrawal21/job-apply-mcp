@@ -50,6 +50,46 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
         r"\b(?:university|college|school of medicine|research institute|academic medical center)\b", re.IGNORECASE),
 }
 
+# Cheap necessary-substring guards (ADR-0043): every match of a pattern contains at least one of its words
+# (lowercase), so a text without any of them cannot match and the regex is skipped. Searching 100k descriptions
+# spends most of its CPU in these IGNORECASE alternations; most texts never mention sponsorship, PhDs or clearance.
+_NEEDS: dict[str, tuple[str, ...]] = {
+    "no_sponsorship": ("sponsor",),
+    "opt_excluded": ("f-1", "f1", "opt", "i-983", "cpt", "j-1", "j1"),
+    "citizenship": ("citizen", "clearance", "ts/sci", "itar", "export"),
+    "grad_window": ("grad", "class"),
+    "phd_only": ("phd",),
+    "academic": ("university", "college", "school of medicine", "research institute", "academic medical center"),
+    "years": ("year", "yr"),
+    "salary": ("$", "usd", "£", "€", "cad"),
+}
+
+
+# Every non-ASCII character that `re.IGNORECASE` matches to an ASCII letter (a full scan of Unicode finds exactly
+# these four; tests/test_textflags.py repeats the scan). `str.lower()` leaves ı and ſ unchanged and expands İ to two
+# characters, so they are mapped explicitly before lowercasing. The guard is therefore a superset test: it may only
+# skip a pattern that provably cannot match, and it never changes a flag result (ADR-0043).
+_FOLD = str.maketrans({"\u0130": "i", "\u0131": "i", "\u017f": "s", "\u212a": "k"})
+
+
+def _low(text: str) -> str:
+    return text.translate(_FOLD).lower()
+
+
+def _may(kind: str, low: str) -> bool:
+    """`low` must come from `_low(text)`."""
+    return any(w in low for w in _NEEDS[kind])
+
+
+# First characters of every alternative of each pattern (ADR-0043). A `(?=[...])` guard rejects other start
+# positions with one class test instead of trying every IGNORECASE alternative there; the set of matches is
+# unchanged (tests/test_textflags.py checks the guarded and plain patterns agree).
+_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "umsatie",
+                          "grad_window": "gc2", "phd_only": "pcn", "academic": "ucsra"}
+_FAST: dict[str, re.Pattern[str]] = {
+    k: re.compile(f"(?=[{_FIRST[k]}])(?:{pat.pattern})", pat.flags) for k, pat in _PATTERNS.items()}
+
+
 _YEARS = re.compile(
     r"(?<![\d,.$])(\d{1,2})\s*\+?\s*(?:(?:-|–|—|to)\s*\d{1,2}\s*)?(?:years?|yrs?)\b[^.\n]{0,60}?experience", re.IGNORECASE)
 _YEARS_LEAD = re.compile(
@@ -171,6 +211,8 @@ class SalaryRange:
 
 def extract_salary(text: str) -> SalaryRange | None:
     """First plausible pay range in the text ('$120,000 - $150,000', '$95k-$120k', '$45 to $60 per hour')."""
+    if not _may("salary", _low(text)):
+        return None
     for m in _SAL.finditer(text):
         a, b = float(m["a"].replace(",", "")), float(m["b"].replace(",", ""))
         if m["bk"] or m["ak"]:
@@ -199,9 +241,10 @@ def flag_text(text: str, *, max_hits: int = 3, hit_len: int = 140) -> dict[str, 
     'years' snippets are the matched phrases; use `years_required` for the number.
     """
     out: dict[str, list[str]] = {}
-    for k, pat in _PATTERNS.items():
-        if h := _hits(pat, text, max_hits, hit_len):
+    low = _low(text)
+    for k, pat in _FAST.items():
+        if _may(k, low) and (h := _hits(pat, text, max_hits, hit_len)):
             out[k] = h
-    if h := _hits(_YEARS, text, max_hits, hit_len):
+    if _may("years", low) and (h := _hits(_YEARS, text, max_hits, hit_len)):
         out["years"] = h
     return out
