@@ -3,8 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from job_apply_mcp.platforms import HttpClient
-
 
 def pytest_collection_modifyitems(config, items):
     if os.environ.get("JAM_LIVE") == "1":
@@ -17,31 +15,67 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture
 async def http(tmp_path):
+    from job_apply_mcp.platforms import HttpClient
     c = HttpClient(cache_dir=tmp_path / "cache", ttl_s=900, retries=2, backoff_s=0)
     yield c
     await c.aclose()
 
 
-def _snapshot(root: Path) -> dict[str, int]:
-    """Path -> mtime_ns of everything under root (names/mtimes only; file contents are never read)."""
-    out: dict[str, int] = {}
-    if root.exists():
-        for p in [root, *root.rglob("*")]:
-            try:
-                out[str(p)] = p.stat().st_mtime_ns
-            except OSError:
-                pass
-    return out
+_REAL_DATA_DIR: Path | None = None
+_REAL_CONFIG_DIR: Path | None = None
+_VIOLATIONS: list[str] = []
+_ENV_KEYS = ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA")
+
+
+def _is_under(path, root: Path | None) -> bool:
+    try:
+        p = Path(os.fsdecode(path)).expanduser().absolute()
+    except (TypeError, ValueError):
+        return False
+    return root is not None and (p == root or root in p.parents)
+
+
+def _audit(event, args):
+    """Record (never raise) any write-ish access to the developer's real data dir by THIS process.
+    Process-local on purpose: another process (e.g. a live server) may legitimately use that dir meanwhile."""
+    if event == "open":
+        path, mode, flags = args
+        writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (
+            isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND))
+        if writing and _is_under(path, _REAL_DATA_DIR):
+            _VIOLATIONS.append(f"open({os.fsdecode(path)!r}, {mode!r})")
+    elif event in ("os.mkdir", "os.rename", "os.remove", "os.rmdir", "shutil.rmtree", "os.truncate"):
+        if _is_under(args[0], _REAL_DATA_DIR):
+            _VIOLATIONS.append(f"{event}({os.fsdecode(args[0])!r})")
+
+
+def pytest_configure(config):
+    """Runs before any project module is imported by test collection: remember the real dirs (for the
+    guard), then point the process env at a throwaway HOME so import-time config reads are isolated too."""
+    global _REAL_DATA_DIR, _REAL_CONFIG_DIR
+    import atexit
+    import shutil
+    import sys
+    import tempfile
+
+    from job_apply_mcp import paths
+    _REAL_DATA_DIR, _REAL_CONFIG_DIR = paths.data_dir().absolute(), paths.config_dir().absolute()
+    sys.addaudithook(_audit)
+    boot = Path(tempfile.mkdtemp(prefix="jam-test-home-"))
+    atexit.register(shutil.rmtree, boot, ignore_errors=True)
+    for k in list(os.environ):
+        if k.startswith("JOB_APPLY__") or k == "JOB_APPLY_MCP_CONFIG":
+            del os.environ[k]
+    os.environ.update(HOME=str(boot), USERPROFILE=str(boot), XDG_CONFIG_HOME=str(boot / ".config"),
+                      XDG_DATA_HOME=str(boot / ".local" / "share"), APPDATA=str(boot / "AppData" / "Roaming"),
+                      LOCALAPPDATA=str(boot / "AppData" / "Local"))
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _real_data_dir_untouched():
-    """Fail the session if any test created or modified anything under the developer's real data dir."""
-    from job_apply_mcp import paths
-    real = paths.data_dir()
-    before = _snapshot(real)
+    """Fail the session if this process wrote to the developer's real data dir."""
     yield
-    assert _snapshot(real) == before, f"test suite touched the real data dir {real}"
+    assert not _VIOLATIONS, f"test suite touched the real data dir {_REAL_DATA_DIR}: {_VIOLATIONS[:5]}"
 
 
 @pytest.fixture(autouse=True)

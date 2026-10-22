@@ -48,3 +48,15 @@ def test_hostile_real_home_has_no_effect_on_suite(tmp_path):
                        env=env, cwd=root.parent, capture_output=True, text=True, timeout=120, check=False)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-1000:]
     assert not (fake_real / ".local").exists()  # the data dir under the hostile home was never created
+
+
+def test_guard_flags_writes_to_real_data_dir():
+    import conftest
+    before = len(conftest._VIOLATIONS)
+    target = conftest._REAL_DATA_DIR / "__probe_never_created__"
+    try:
+        open(target, "w")  # noqa: SIM115
+    except OSError:
+        pass
+    assert len(conftest._VIOLATIONS) == before + 1
+    del conftest._VIOLATIONS[before:]

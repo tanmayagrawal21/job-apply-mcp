@@ -19,8 +19,24 @@ jobs:
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --extra dev --python ${{ matrix.python }}
       - run: uv run ruff check .
+      - name: Plant a hostile user config in the runner's real HOME (the suite must ignore it)
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import os
+          from job_apply_mcp import paths
+          d = paths.config_dir()
+          d.mkdir(parents=True, exist_ok=True)
+          f = d / "config.toml"
+          f.write_text('dry_run = false\n[apply]\napproval_mode = "agent"\nauto_approve = true\n[control]\napply_enabled = true\n')
+          os.chmod(f, 0o600)
+          PY
       # Live tests (real Ollama / browser) are skipped unless JAM_LIVE=1, which CI never sets.
       - run: uv run pytest -q
+        env:
+          JOB_APPLY__APPLY__APPROVAL_MODE: agent
+          JOB_APPLY__DRY_RUN: "false"
+          JOB_APPLY_MCP_CONFIG: ${{ runner.temp }}/hostile.toml
       - name: Generated docs are current
         if: runner.os == 'Linux' && matrix.python == '3.12'
         run: uv run python scripts/gen_config_docs.py --check
