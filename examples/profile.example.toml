@@ -49,6 +49,8 @@ citizen = true
 willing_to_relocate = true
 open_to_hybrid = true
 # needs_relocation_support = false                 # unset -> "will you require relocation support?" stays unresolved
+# acknowledge_privacy_notices = false              # true: tick/choose "I acknowledge" on applicant PRIVACY NOTICES only (ADR-0034).
+#                                                  # Never attestations, truthfulness, AI-use, background/drug checks, arbitration or opt-ins.
 
 [referrals]                                        # company -> referrer; otherwise "do you know anyone at X?" = No
 # "Initech" = "Sam Lee"

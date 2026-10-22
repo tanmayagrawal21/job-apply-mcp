@@ -111,7 +111,8 @@ class ProfileView:
         return {"work_authorized": a.work_authorized, "requires_sponsorship": a.requires_sponsorship,
                 "us_citizen": a.citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
-                "open_to_onsite": pr.open_to_onsite}.get(key)
+                "open_to_onsite": pr.open_to_onsite,
+                "acknowledge_privacy_notices": pr.acknowledge_privacy_notices}.get(key)
 
     def _citizenship_country(self) -> str | None:
         """[authorization].citizenship, else the user's own "country of citizenship" answer (never a Yes/No)."""
@@ -156,7 +157,8 @@ class ProfileView:
                 if n and want and (n == want or re.search(rf"\b{re.escape(n)}\b", want)):
                     return who or "Yes"
             return None
-        if key in self._ANSWER_PHRASES or key in ("us_citizen", "open_to_onsite"):
+        if key in self._ANSWER_PHRASES or key in ("us_citizen", "open_to_onsite",
+                                                       "acknowledge_privacy_notices"):
             st = self._structured(key)
             if st is not None:
                 return self._TRI[st]
@@ -167,7 +169,7 @@ class ProfileView:
 
     def lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
-                    "open_to_hybrid", "citizenship_country") or key.startswith(("referral:", "gpa:", "employer:"))):
+                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:"))):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v

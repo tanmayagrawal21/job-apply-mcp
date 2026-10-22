@@ -72,6 +72,8 @@ class Preferences(BaseModel):
     needs_relocation_support: bool | None = None
     open_to_hybrid: bool | None = None
     open_to_onsite: bool | None = None
+    # ADR-0034: True lets the mapper acknowledge applicant privacy notices on the owner's behalf. Default off.
+    acknowledge_privacy_notices: bool | None = None
 
 
 class Authorization(BaseModel):

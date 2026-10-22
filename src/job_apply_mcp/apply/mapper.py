@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -613,8 +614,58 @@ class MapResult:
     omitted: list[FormField] = field(default_factory=list)   # derived fields with no source (never tasks)
 
 
+# ---- applicant privacy-notice acknowledgement (ADR-0034) ---------------------------------------------
+# Opt-in only (profile.preferences.acknowledge_privacy_notices is True). A label must be a privacy notice /
+# data-processing acknowledgement AND must not touch anything in _PRIVACY_EXCLUDE; otherwise behaviour is unchanged.
+_PRIVACY_LABEL = re.compile(
+    r"\bprivacy (notice|policy|statement|acknowledg\w*|disclosure)\b|"
+    r"\b(data|applicant|candidate|recruitment|job applicant) privacy\b|"
+    r"\bdata (processing|protection) (notice|policy|statement|acknowledg\w*)\b|"
+    r"\bprivacy\b.*\backnowledg|\backnowledg\w*\b.*\bprivacy\b")
+_PRIVACY_EXCLUDE = re.compile(
+    r"personally|\bmy own\b|\bown (work|words|effort)\b|completed (this|the) application|"          # authorship
+    r"\bai\b|artificial intelligence|\bllms?\b|chat ?gpt|generative|machine learning|"               # no-AI / AI use
+    r"truth|accura|\bcertif|attest|\bcorrect\b|complete and|best of my knowledge|misrepresent|falsif|"   # certifications
+    r"\bbackground\b|\bdrug\b|screening|consumer report|\bfcra\b|fingerprint|credit check|criminal|"   # checks
+    r"arbitrat|dispute resolution|class action|\bwaive|binding|"                                        # arbitration
+    r"marketing|\bsms\b|text messag|mobile messag|newsletter|promotion|talent (community|network|pool)|"  # opt-ins
+    r"future (opportunit|roles|openings)|stay in touch|job alerts?|email updates|opt ?-? ?in\b|"
+    r"terms of (employment|use|service)|terms and conditions|employment (terms|agreement|contract|offer)|"  # terms
+    r"conditions of employment|at will|non ?compete|confidentiality|"
+    r"consent to (receive|be contacted)|contact me|\bsubscribe", re.IGNORECASE)
+_ACK_OPTION = re.compile(r"\b(acknowledg\w*|agree\w*|accept\w*|confirm\w*|yes|understand\w*|read)\b")
+
+
+def is_privacy_notice(label: str, stop_phrases: Sequence[str] = ()) -> bool:
+    """True only for a plain privacy-notice acknowledgement label; any excluded topic or stop phrase -> False."""
+    from ..config import PolicyCfg
+    default_stop = PolicyCfg.model_fields["stop_phrases"].get_default(call_default_factory=True)
+    low = label.lower()
+    if _PRIVACY_EXCLUDE.search(low) or any(p.lower() in low for p in (*default_stop, *stop_phrases) if p):
+        return False
+    return bool(_PRIVACY_LABEL.search(normalize(label)))
+
+
+def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = ()) -> Any | None:
+    """The affirmative answer for a privacy-notice field, or None (leave unresolved) if unsure."""
+    if not is_privacy_notice(f.label, stop_phrases):
+        return None
+    if f.kind == FieldKind.boolean:
+        return True
+    if f.kind in (FieldKind.select, FieldKind.multiselect) or f.options:
+        if any(_PRIVACY_EXCLUDE.search(o) for o in f.options):
+            return None
+        aff = [o for o in f.options if _ACK_OPTION.search(normalize(o)) and not has_negator(o)
+               and not any(w in normalize(o) for w in DECLINE_MARKERS)]
+        if len(aff) != 1:
+            return None
+        return [aff[0]] if f.kind == FieldKind.multiselect else aff[0]
+    return None
+
+
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
-               min_score: float = 0.78, company: str = "", top_languages: int = 3) -> MapResult:
+               min_score: float = 0.78, company: str = "", top_languages: int = 3,
+               stop_phrases: Sequence[str] = ()) -> MapResult:
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
     res = MapResult()
 
@@ -640,6 +691,11 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             else:
                 res.answers.append(Answer(key=f.key, value=str(v), source="derived:geo"))
             continue
+        if _truth(profile.lookup("acknowledge_privacy_notices")) is True:   # opt-in, ADR-0034
+            pv = privacy_ack_value(f, stop_phrases)
+            if pv is not None:
+                res.answers.append(Answer(key=f.key, value=pv, source="rule:privacy_ack"))
+                continue
         ck = canonical_key(f.label)
         if ck == "graduation" and f.kind not in (FieldKind.boolean,):
             ok(f, derive_graduation(f, profile.lookup("graduation")), "derived:graduation")
