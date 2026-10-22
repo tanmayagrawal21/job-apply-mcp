@@ -12,12 +12,15 @@ never from the project file, so a repo checkout cannot leak them.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 
 class ConcurrencyCfg(BaseModel):
@@ -234,7 +237,13 @@ class ProvenanceCfg(BaseModel):
 
 
 class ApplyCfg(BaseModel):
-    auto_approve: bool = False          # True skips the hash-bound approval token (ADR-0011)
+    @property
+    def auto_approve_active(self) -> bool:
+        return self.auto_approve and self.approval_mode == "agent"
+
+    approval_mode: Literal["agent", "human"] = "human"  # human: a human channel must approve (ADR-0021)
+    approval_ttl_s: int = 1800          # lifetime of a server-held approval record
+    auto_approve: bool = False          # USER CONFIG FILE ONLY (env/project file ignored); needs approval_mode="agent"
     short_text_max: int = 200           # unresolved fields up to this length go to the local LLM
     llm_min_confidence: float = 0.6     # below this an LLM answer is treated as unresolved
     plan_ttl_s: int = 1800              # how long a plan (and its token) stays valid
@@ -406,11 +415,28 @@ def _coerce(v: str) -> Any:
     return v
 
 
+def _strip_auto_approve(d: dict, source: str) -> dict:
+    """auto_approve is honored only from the user config file (ADR-0021)."""
+    if isinstance(d.get("apply"), dict) and "auto_approve" in d["apply"]:
+        d["apply"] = {k: v for k, v in d["apply"].items() if k != "auto_approve"}
+        log.warning("apply.auto_approve ignored from %s: it can only be set in the user config file", source)
+    return d
+
+
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
     user = Path(os.environ.get("JOB_APPLY_MCP_CONFIG", "~/.config/job-apply-mcp/config.toml")).expanduser()
-    for p in (user, (project_dir or Path.cwd()) / "job-apply-mcp.toml"):
-        if p.is_file():
-            data = _deep_merge(data, tomllib.loads(p.read_text()))
-    data = _deep_merge(data, _env_overrides())
-    return Settings.model_validate(data)
+    if user.is_file():
+        data = _deep_merge(data, tomllib.loads(user.read_text()))
+    proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
+    if proj.is_file() and proj != user:
+        data = _deep_merge(data, _strip_auto_approve(tomllib.loads(proj.read_text()), str(proj)))
+    data = _deep_merge(data, _strip_auto_approve(_env_overrides(), "environment"))
+    s = Settings.model_validate(data)
+    if s.apply.auto_approve:
+        if s.apply.approval_mode == "human":
+            log.warning("apply.auto_approve=true is IGNORED because apply.approval_mode='human'")
+        else:
+            log.warning("!!! apply.auto_approve=true: real submissions need NO approval id (agent mode). "
+                        "Set it back to false unless you accept unattended submissions !!!")
+    return s

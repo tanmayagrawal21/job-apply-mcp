@@ -131,7 +131,8 @@ class FakeDriver:
 def settings(**over) -> Settings:
     s = Settings()
     s.dry_run = False
+    s.apply.approval_mode = "agent"   # tests opt into human mode explicitly
     for k, v in over.items():
         sect, _, key = k.partition("__")
-        setattr(getattr(s, sect), key, v)
+        setattr(getattr(s, sect) if key else s, key or sect, v)
     return s

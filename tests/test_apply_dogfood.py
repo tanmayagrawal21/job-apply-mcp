@@ -108,7 +108,7 @@ async def test_geo_not_client_task_and_submit_not_blocked():
     e = eng(form, FakeRouter())
     out = await e.plan(POSTING.ref)
     assert out.client_tasks == [] and out.plan.unresolved == []
-    res = await e.submit(POSTING.ref, {}, out.token, dry_run=True)
+    res = await e.submit(POSTING.ref, {}, out.approval_id, dry_run=True)
     assert res.status == "dry_run"
 
 
