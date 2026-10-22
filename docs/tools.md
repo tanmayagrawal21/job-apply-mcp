@@ -8,6 +8,9 @@ calls take the short `ref` returned earlier.
 
 Tool names are the MCP tool names your client shows. Argument defaults are shown after `=`.
 
+
+Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","hint"}}` (ADR-0005 Amendment 1).
+
 ## Discover
 
 | Tool | Inputs | Output | Token notes |
@@ -21,7 +24,8 @@ Tool names are the MCP tool names your client shows. Argument defaults are shown
 | Tool | Inputs | Output | Token notes |
 |---|---|---|---|
 | `plan_application` | `ref_or_url` | `{ref, gate, why?, answers, src, unresolved, client_tasks?, token?, t}` | Runs gates and duplicate check, fills from profile and local LLMs. `client_tasks` are the only things you must write (short, with bounded context). `token` is the hash-bound approval token. |
-| `submit_application` | `ref_or_url`, `answers=None`, `dry_run=None`, `token=None` | `{ref, status, via, confirmation?, detail?}`; status is one of `submitted`, `dry_run`, `duplicate`, `needs_human`, `roadblock`, `error` | Real submits need `token` from `plan_application` unless `apply.auto_approve`. Global `dry_run` wins unless you pass `dry_run=false` and config allows it. |
+| `submit_application` | `ref_or_url`, `answers=None`, `dry_run=None`, `approval_id=None` | `{ok, ref, status, via, confirmation?, detail?}`; status is one of `submitted`, `dry_run`, `duplicate`, `needs_human`, `roadblock`, `error` | Real submits need the server-issued `approval_id` from `plan_application` (human approval unless `approval_mode=agent`). Global `dry_run` wins. |
+| `resolve_submission` | `ref`, `outcome=""`, `note=""`, `evidence=""` | `{ok, state, ...}` | Only exposed when `apply.approval_mode=agent`; resolves a submission stuck in submitting/unknown, evidence folder required. |
 | `apply_batch` | `refs`, `dry_run=None`, `max_parallel=None` | `{results:[{ref,status,...}]}` one row per ref; unresolved items come back as `needs_input` with `client_tasks`, never silently skipped | Use for dozens of refs; rows stay under ~60 tokens each unless they carry `client_tasks`. |
 | `list_applications` | `status=""`, `limit=50`, `cursor=0` | `{rows:[{ref,co,title,st,...}], next, total}` | Local store only. |
 
@@ -58,7 +62,7 @@ Tool names are the MCP tool names your client shows. Argument defaults are shown
 | Tool | Inputs | Output |
 |---|---|---|
 | `health` | none | enabled platforms, LLM providers, browser drivers, `dry_run`, which local models answer |
-| `improvement_report` | `limit=10` | ranked proposals learned from recent failures |
+| `improvement_report` | `limit=10`, `cursor=0` | ranked proposals learned from recent failures |
 | `request_feature` | `description`, `kind=None` | a proposal; a PR only if `improve.coder` is configured (default `none`) |
 
 ## Recommended call order (lowest token cost)
