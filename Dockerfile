@@ -2,7 +2,7 @@
 #   docker build -t job-apply-mcp .
 #   docker build --build-arg BROWSER=1 -t job-apply-mcp:browser .     # adds Playwright + Chromium
 #   docker run --rm -p 127.0.0.1:8765:8765 -e JOB_APPLY_MCP_TOKEN="$(openssl rand -base64 32)" \
-#     -v jam-config:/home/jam/.config/job-apply-mcp -v jam-data:/home/jam/.local/share/job-apply-mcp job-apply-mcp
+#     -v jam-config:/home/user/.config/job-apply-mcp -v jam-data:/home/user/.local/share/job-apply-mcp job-apply-mcp
 # The server refuses to listen on 0.0.0.0 without JOB_APPLY_MCP_TOKEN. Publish the port on 127.0.0.1 only,
 # or put a TLS reverse proxy in front.
 FROM python:3.12-slim AS base
@@ -19,10 +19,10 @@ RUN if [ "$BROWSER" = "1" ]; then pip install ".[browser]" && playwright install
     else pip install .; fi \
     && rm -rf /src
 
-RUN useradd --create-home --uid 10001 jam && mkdir -p /home/jam/.config/job-apply-mcp /home/jam/.local/share/job-apply-mcp \
-    && chown -R jam:jam /home/jam && { [ ! -d /opt/ms-playwright ] || chmod -R a+rX /opt/ms-playwright; }
-USER jam
-WORKDIR /home/jam
+RUN useradd --create-home --uid 10001 user && mkdir -p /home/user/.config/job-apply-mcp /home/user/.local/share/job-apply-mcp \
+    && chown -R user:user /home/user && { [ ! -d /opt/ms-playwright ] || chmod -R a+rX /opt/ms-playwright; }
+USER user
+WORKDIR /home/user
 # Create config on first start: `docker run ... job-apply-mcp init --yes` (mount the config volume).
 
 EXPOSE 8765
