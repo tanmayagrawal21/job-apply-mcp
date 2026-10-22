@@ -1,0 +1,57 @@
+# FICTIONAL candidate. Copy to ~/.config/job-apply-mcp/profile.toml and replace with your own details.
+# This file is never committed with real data (see CONTRIBUTING.md).
+
+skills = ["Python", "SQL", "Data analysis", "Git", "Statistics"]
+
+[contact]
+first_name = "Alex"
+last_name = "Rivera"
+email = "alex.rivera@example.com"
+phone = "+1-555-0100"
+city = "Springfield"
+region = "IL"
+country = "United States"
+postal_code = "62701"
+
+[links]
+linkedin = "https://www.linkedin.com/in/example-alex-rivera"
+github = "https://github.com/example-alex"
+website = "https://alex.example.com"
+
+[[education]]
+school = "Example State University"
+degree = "BS"
+field = "Computer Science"
+start = "2022-08"
+end = "2026-05"          # latest end date is used as the graduation date
+gpa = "3.6"
+
+[[work]]
+company = "Sample Analytics Co"
+title = "Data Intern"
+start = "2025-05"
+end = "2025-08"
+location = "Chicago, IL"
+summary = "Built dashboards and automated weekly reporting."
+
+# Standard answers. Keys are normalized question patterns: lowercase substring of the form label
+# (punctuation ignored, longest match wins), or "re:<regex>" for full control.
+[answers]
+"authorized to work" = "Yes"
+"require sponsorship" = "No"
+"willing to relocate" = "Yes"
+"how did you hear" = "Company website"
+"notice period" = "2 weeks"
+"re:(18|eighteen) years" = "Yes"
+
+# Demographic / EEO questions. Every field defaults to declining; override only if you choose to.
+[demographics]
+gender = "Decline to self-identify"
+race_ethnicity = "Decline to self-identify"
+veteran_status = "Decline to self-identify"
+disability_status = "Decline to self-identify"
+
+[salary]
+expected = 80000
+text = "Open to discussion based on the full scope of the role."
+currency = "USD"

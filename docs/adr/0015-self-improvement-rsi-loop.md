@@ -25,10 +25,10 @@ gate for anything that changes behaviour in code.
    false; written to `data_dir/improve/overlay.json`, recorded in `applied.jsonl` with before/after values and
    the cluster count before, later compared with post-change counts in `improvement_report`); T2 code (always a
    PR via request_feature). Any request touching CAPTCHA, stop phrases, dry_run, credentials is risk `high`.
-4. **RSI analyzer** reads `runs.jsonl` and `audit.jsonl` in `data_dir` (schema in `improve/analyze.py`),
-   clusters by platform, field label, normalized error text, gate reason and LLM tier, ranks by count x weight,
-   and `improvement_report()` returns the compact list. The store/audit emitters write these events; until they
-   land the analyzer simply sees none.
+4. **RSI analyzer** reads the store's `applications.db` events table (read-only), control's
+   `control_audit.jsonl` (violations become gate reasons) and an optional `runs.jsonl` (field labels, stage
+   timings, LLM tiers, unresolved questions). It clusters by platform, field label, normalized error text,
+   gate reason and LLM tier, ranks by count x weight, and `improvement_report()` returns the compact list.
 5. **Playbook memory**: `data_dir/playbooks/<platform>.json` (+ `.md`), read via `PlaybookStore.lessons()`
    by adapters/the browser driver; updated by the analyzer.
 

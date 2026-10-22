@@ -62,9 +62,10 @@ async def plan_application(ref_or_url: str) -> str:
 
 @mcp.tool()
 async def submit_application(ref_or_url: str, answers: dict[str, Any] | None = None,
-                             dry_run: bool | None = None) -> str:
-    """Submit using the best available path (platform API, else browser driver). Honors global dry_run."""
-    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run))
+                             dry_run: bool | None = None, token: str | None = None) -> str:
+    """Submit using the best available path (platform API, else browser driver). Honors global dry_run.
+    `token` is the approval token from plan_application (required for real submits unless auto_approve)."""
+    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, token=token))
 
 
 @mcp.tool()
@@ -96,6 +97,11 @@ async def improvement_report(limit: int = 10) -> str:
 async def health() -> str:
     """Report enabled platforms, LLM providers and which local models are reachable."""
     return _out(await svc().health())
+
+
+from .control.tools import register as _register_control
+
+_register_control(mcp, lambda: svc().settings)
 
 
 def main() -> None:

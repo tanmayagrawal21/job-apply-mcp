@@ -119,7 +119,7 @@ async def test_aider_uses_router_tier(tmp_path):
 
     r.run = spy
     await ImproveService(s, r, repo=REPO).request_feature("add adapter for foo")
-    assert "ollama_chat/qwen2.5:7b" in seen["argv"] and seen["env"] == {"OLLAMA_API_BASE": "http://h:1"}
+    assert "ollama_chat/qwen3:4b" in seen["argv"] and seen["env"] == {"OLLAMA_API_BASE": "http://h:1"}
 
 
 def write_events(data: Path, events):
@@ -161,7 +161,7 @@ async def test_auto_apply_low_risk_records_before_after(tmp_path):
     rep = await svc.improvement_report()
     assert set(rep["auto_applied"]) == {"pattern-are-you-over-18", "router-timeout-medium"}
     ov = json.loads((svc.root / "overlay.json").read_text())
-    assert ov["config"]["llm.tiers.medium.max_tokens"] == 576 and ov["profile_patterns"] == ["are you over 18"]
+    assert ov["config"]["llm.tiers.medium.max_tokens"] == 768 and ov["profile_patterns"] == ["are you over 18"]
     rec = [json.loads(x) for x in (svc.root / "applied.jsonl").read_text().splitlines()]
     assert rec[0]["before"] is not None and rec[0]["metrics_before"]["count"] > 0
     rep2 = await svc.improvement_report()
@@ -176,3 +176,25 @@ def test_playbook_scrubs_personal_data(tmp_path):
     t = pb.lessons("ashby")[0]
     assert "@" not in t and "555" not in t and "http" not in t
     assert (tmp_path / "ashby.md").is_file()
+
+
+async def test_real_sources_store_and_control_audit(tmp_path):
+    import sqlite3
+
+    from job_apply_mcp.core.models import SubmitResult
+    from job_apply_mcp.store.sqlite import SqliteStore
+
+    s = mk(tmp_path)
+    data = Path(s.paths.data_dir)
+    st = SqliteStore(data)
+    for i in range(4):
+        await st.record(SubmitResult(ref=f"ashby:acme:{i}", status="error", detail=f"selector {i} timed out"),
+                        company="Acme", title="Eng")
+    st.close()
+    assert sqlite3  # store file exists on disk
+    now = time.time()
+    rows = [{"ts": now, "a": "submit", "d": "block", "ref": "x", "plat": "lever",
+             "v": [{"c": "stop_phrase", "m": "attestation found"}], "w": []} for _ in range(6)]
+    (data / "control_audit.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    ids = [p.id for p in an.analyze(an.read_events(data), min_count=3)]
+    assert any(i.startswith("err-ashby") for i in ids) and any(i.startswith("gate-lever") for i in ids)

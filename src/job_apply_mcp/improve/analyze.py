@@ -1,11 +1,9 @@
 """Run-outcome learning (RSI loop). Reads run events, clusters failures and ranks proposals.
 
-Evidence files under <data_dir> (JSON lines; unknown/missing keys tolerated so the store, control audit
-log and timing emitters can evolve independently):
-  runs.jsonl   {ts, ref, platform, stage, status, error?, field_label?, duration_ms?, tier?}
-  audit.jsonl  {ts, ref?, platform?, event, gate_reason?, field_label?, detail?}
-Event shape rules: status in {error, needs_human, unresolved, timeout, ok}; `event`=="unresolved_field"
-counts as an unanswered question.
+Evidence sources under <data_dir>: the store's applications.db `events` table (read-only), control's
+control_audit.jsonl, and an optional runs.jsonl for richer events the other two do not carry
+({ts, ref, platform, stage, status, error?, field_label?, duration_ms?, tier?}; event=="unresolved_field"
+counts as an unanswered question).
 """
 from __future__ import annotations
 
@@ -54,20 +52,73 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:48]
 
 
-def read_events(data_dir: Path, window_days: int = 30, now: float | None = None) -> list[dict]:
-    cutoff = (now or time.time()) - window_days * 86400
-    out: list[dict] = []
-    for name in ("runs.jsonl", "audit.jsonl"):
-        p = Path(data_dir) / name
-        if not p.is_file():
-            continue
-        for line in p.read_text().splitlines():
+_OK_STATUS = {"submitted", "dry_run", "duplicate"}
+
+
+def _iso_epoch(v) -> float:
+    from datetime import datetime
+
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(str(v)).timestamp()
+        except ValueError:
+            return 0.0
+
+
+def _jsonl(path: Path):
+    if path.is_file():
+        for line in path.read_text(errors="replace").splitlines():
             try:
                 e = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(e, dict) and float(e.get("ts", cutoff + 1)) >= cutoff:
-                out.append(e)
+            if isinstance(e, dict):
+                yield e
+
+
+def _store_events(db: Path, cutoff: float) -> list[dict]:
+    """Store `events(ref, ts ISO, kind=status, detail)` -> normalized events. Opened read-only."""
+    import sqlite3
+
+    if not db.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = con.execute("SELECT ref, ts, kind, detail FROM events").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return []
+    out = []
+    for ref, ts, kind, detail in rows:
+        t = _iso_epoch(ts)
+        if t >= cutoff:
+            out.append({"ts": t, "ref": ref, "platform": str(ref).split(":")[0], "stage": "submit",
+                        "status": "ok" if kind in _OK_STATUS else kind, "error": detail or ""})
+    return out
+
+
+def _audit_events(path: Path, cutoff: float) -> list[dict]:
+    """control_audit.jsonl rows {ts,a,d,ref,plat,v:[{c,m,h?}],w:[...]} -> one gate event per violation."""
+    out = []
+    for r in _jsonl(path):
+        if _iso_epoch(r.get("ts", 0)) < cutoff or r.get("d") == "pass" and not r.get("w"):
+            continue
+        for v in (r.get("v") or []) + (r.get("w") or []):
+            out.append({"ts": r["ts"], "ref": r.get("ref", ""), "platform": r.get("plat") or "generic",
+                        "stage": r.get("a", "gate"), "status": "gate",
+                        "gate_reason": f"{v.get('c', '?')}: {v.get('m', '')}"})
+    return out
+
+
+def read_events(data_dir: Path, window_days: int = 30, now: float | None = None) -> list[dict]:
+    """Evidence = store SQLite (applications.db events) + control_audit.jsonl (+ optional runs.jsonl)."""
+    data_dir = Path(data_dir)
+    cutoff = (now or time.time()) - window_days * 86400
+    out = _store_events(data_dir / "applications.db", cutoff)
+    out += _audit_events(data_dir / "control_audit.jsonl", cutoff)
+    out += [e for e in _jsonl(data_dir / "runs.jsonl") if float(e.get("ts", cutoff + 1)) >= cutoff]
     return out
 
 
