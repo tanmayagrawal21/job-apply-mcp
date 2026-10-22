@@ -4,3 +4,7 @@
 # Scanner self-test fixtures and this file's own comments.
 ^\.privacy-allow:
 ^tests/test_privacy_scan\.py:
+# Fictional mail fixtures: From: lines use public ATS no-reply senders; recipient is avery.tester@example.test.
+^tests/fixtures/mail/[a-z_]+\.eml:From: 
+# Placeholder addresses (ada@x.com) in a pure-function test.
+^tests/test_apply_browser_pure\.py:.*\b[A-Za-z]+@x\.com

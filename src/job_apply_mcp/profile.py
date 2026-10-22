@@ -24,6 +24,8 @@ class Contact(BaseModel):
     region: str = ""
     country: str = ""
     postal_code: str = ""
+    lat: float | None = None       # optional coordinates of the configured location (derived geo fields)
+    lon: float | None = None
 
     @property
     def full_name(self) -> str:
@@ -73,6 +75,9 @@ class Profile(BaseModel):
     answers: dict[str, str] = Field(default_factory=dict)
     demographics: Demographics = Field(default_factory=Demographics)
     salary: SalaryRules = Field(default_factory=SalaryRules)
+    # Groups of interchangeable phrases for [answers] pattern matching (ADR-0011 Amendment 2). Extends the defaults.
+    answer_synonyms: list[list[str]] = Field(default_factory=list)
+    answer_synonyms_mode: str = "extend"   # "extend" adds to the defaults; "replace" uses only answer_synonyms ([] = off)
 
     def graduation(self) -> str | None:
         """Latest education end date (YYYY-MM), for PolicyCfg.graduation."""
@@ -81,6 +86,8 @@ class Profile(BaseModel):
 
     def answer_for(self, question: str) -> str | None:
         q = normalize_question(question)
+        groups = [[normalize_question(x) for x in g] for g in (self.answer_synonyms if self.answer_synonyms_mode == "replace"
+                                              else (*DEFAULT_ANSWER_SYNONYMS, *self.answer_synonyms))]
         best: tuple[int, str] | None = None
         for pat, val in self.answers.items():
             if pat.startswith("re:"):
@@ -88,7 +95,7 @@ class Profile(BaseModel):
                     best = (len(pat), val)
                 continue
             p = normalize_question(pat)
-            if p and p in q and (best is None or len(p) > best[0]):
+            if p and (p in q or _synonym_hit(q, p, groups)) and (best is None or len(p) > best[0]):
                 best = (len(p), val)
         return best[1] if best else None
 
@@ -110,6 +117,26 @@ class Profile(BaseModel):
 
 def normalize_question(s: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split())
+
+
+DEFAULT_ANSWER_SYNONYMS: list[list[str]] = [
+    ["in office", "on-site", "onsite", "on site", "in person office", "in-person office", "in person work",
+     "in-person work", "office culture", "in the office", "days in office", "days in person"],
+    ["remote", "work from home", "wfh", "fully distributed"],
+]
+
+
+_NON_ARRANGEMENT = re.compile(r"\b(interview\w*|onboarding|events?|meetings?|training|conference|orientation)\b")
+
+
+def _synonym_hit(q: str, p: str, groups: list[list[str]]) -> bool:
+    """True when `p` belongs to a synonym group and another member of that group appears in the question."""
+    if _NON_ARRANGEMENT.search(q):  # interviews/onboarding/events are not a work arrangement
+        return False
+    for g in groups:
+        if p in g and any(m and re.search(rf"\b{re.escape(m)}\b", q) for m in g):
+            return True
+    return False
 
 
 def load_profile(path: str | Path) -> Profile:

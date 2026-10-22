@@ -85,6 +85,7 @@ class ApplicationPlan(BaseModel):
     gate: GateResult
     answers: list[Answer] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)  # field keys that still need a human or the client LLM
+    audit: dict[str, Any] = Field(default_factory=dict)  # deterministic-rule computations (e.g. salary)
 
 
 class SubmitResult(BaseModel):

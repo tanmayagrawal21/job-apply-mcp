@@ -207,6 +207,25 @@ def employer_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     return None
 
 
+_PHD_TITLE = re.compile(
+    r"\bph\.?\s?d\.?\s*[-,]?\s*(?:graduates?|students?|candidates?|interns?|only|required|new grad\w*)"
+    r"|\bnew\s+ph\.?\s?d\b|\brecent\s+ph\.?\s?d\b|\bph\.?\s?d\.?\s+(?:research|scientist|fellow)", re.IGNORECASE)
+
+
+def title_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
+    """Titles aimed at PhD graduates/students (unless cfg.has_phd) plus user `exclude_title_patterns`."""
+    if not cfg.has_phd and _PHD_TITLE.search(ctx.title):
+        return Decision.skip, "title targets PhD graduates/students"
+    for pat in cfg.exclude_title_patterns:
+        try:
+            hit = re.search(pat, ctx.title, re.IGNORECASE)
+        except re.error:
+            hit = pat.lower() in ctx.title.lower()
+        if hit:
+            return Decision.skip, f"excluded title ({pat})"
+    return None
+
+
 def stop_phrase_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     hay = f"{ctx.text} {ctx.form_text}".lower()
     for ph in cfg.stop_phrases:
@@ -218,6 +237,7 @@ def stop_phrase_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
 # Default order: cheap hard filters first, human hand-off last (a skip should win over a human prompt).
 GATES: dict[str, Gate] = {
     "employer": employer_gate,
+    "title": title_gate,
     "years": years_gate,
     "graduation": graduation_gate,
     "sponsorship": sponsorship_gate,

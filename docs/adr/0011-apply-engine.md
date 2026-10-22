@@ -43,3 +43,44 @@ Tool output stays small (answers keyed by field, tasks only for what is truly un
 ## Verify / revert
 `uv run pytest tests/test_apply_engine.py tests/test_apply_mapper.py tests/test_apply_wiring.py`.
 Revert: drop `apply/` engine files and the three `Services` methods return to `NotImplementedError`.
+
+## Amendment 1: dogfood invariants (mapper, engine, gates)
+A real planning run produced wrong answers. These invariants now hold and are covered by `tests/test_apply_dogfood.py`:
+1. **Option matching is negation-aware and thresholded.** Options are tokenized; negators (not/no/never/unable/
+   cannot/n't/without) set polarity, and a chosen option must share the answer's polarity (Yes never lands on
+   "I am not able to relocate"). Fuzzy matches need content-word overlap, `apply.option_min_score`, and no tie.
+   Below threshold -> unresolved, never a guess.
+2. **Demographic/pronoun/EEO fields** come only from `profile.demographics`, matched exactly/near-exactly (token sets),
+   else the decline option, else unresolved.
+3. **"How did you hear"** uses `apply.referral_preference` (default Job board, Other job board, Other, LinkedIn);
+   Referral/Employee options are chosen only if the profile value itself says referred.
+4. **No fabricated values.** URLs, emails, phones, usernames and links come only from the profile; such questions are
+   never sent to the LLM, and `looks_fabricated()` rejects placeholder-ish LLM output (example.com, user@..., 555-01xx).
+5. **Derived geo fields** (`latitude`/`longitude`) are filled from optional `contact.lat`/`contact.lon`, else omitted;
+   never client tasks and never block submit.
+6. **Dates/terms** (graduation) are derived deterministically from profile education `end`; the LLM never sees them.
+7. **Attestations, certifications and AI-use questions** are never LLM-answered; without an explicit profile
+   `[answers]` pattern they become `needs_human` client tasks (batch status `needs_human`).
+8. **LLM short answers are grounded**: experience/skill yes-no claims need the topic in profile facts; numbers, links
+   not in the facts are rejected -> unresolved.
+9. **Title gate** (`title`): skips "PhD Graduate", "New PhD", "PhD student/candidate" titles unless `policy.has_phd`,
+   plus user `policy.exclude_title_patterns` (regexes). The `phd_only` text flag was widened the same way.
+
+Verify: `uv run pytest tests/test_apply_dogfood.py`. Revert: revert the amendment commit; behavior returns to ADR-0011 base.
+
+## Amendment 2: dogfood round 2 (option intent, synonyms, deterministic salary)
+1. **Option intent layer** (`mapper.option_intent`). Yes/No profile answers over multi-option selects classify each
+   option as affirmative (willingness words: willing/open/able/relocating/yes...), negative (negators) or neutral
+   ("I am local to the area"). Yes -> the most specific affirmative (most willingness words); a tie, or only
+   neutral/negative options -> unresolved. No -> the single negative option (lead "No" preferred), else unresolved.
+2. **Answer-pattern synonyms** (`profile.DEFAULT_ANSWER_SYNONYMS`, extendable with `answer_synonyms` in the profile).
+   A `[answers]` pattern that belongs to a synonym group matches a question containing any member ("in office" ~
+   "in person" ~ "on-site" ~ "office culture").
+3. **Deterministic salary** (`apply/salary.py`, `PolicyCfg.base_salary|default_ask|salary_round_to|
+   salary_multi_level_ratio|salary_lower_middle|col_multipliers`). floor = base (or `salary_floor`) x COL multiplier of
+   the posting location. With a posted range: ask = min(max(anchor, floor), top) where anchor is the midpoint, or the
+   lower-middle when top/bottom exceeds the ratio; no range: max(floor, default_ask). Rounded to a clean number, never
+   above the posted top. Number fields get `115000`, text `$115,000`, selects the option whose range contains the ask.
+   "Current salary"/history fields are never auto-answered. The computation is recorded in `ApplicationPlan.audit`
+   (and `compact()["audit"]`); answers carry source `rule:salary`. Nothing computable -> previous behavior.
+Verify: `uv run pytest tests/test_apply_dogfood2.py`. Revert: revert the amendment commit.

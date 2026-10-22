@@ -121,6 +121,12 @@ class PolicyCfg(BaseModel):
     max_years_required: int | None = None
     salary_floor: int | None = None              # annual, in the candidate's home market
     col_multipliers: dict[str, float] = Field(default_factory=dict)  # city substring -> multiplier
+    # Deterministic salary rule (ADR-0011 Amendment 2). base_salary defaults to salary_floor.
+    base_salary: int | None = None
+    default_ask: int | None = None               # used when the posting shows no range: ask = max(floor, default_ask)
+    salary_round_to: int = 1000                  # clean-number rounding step
+    salary_multi_level_ratio: float = 1.4        # top/bottom above this => range spans levels
+    salary_lower_middle: float = 0.33            # anchor position inside a multi-level range (0.5 = midpoint)
     requires_sponsorship: bool | None = None
     graduation: str | None = None                # e.g. "2026-05"
     exclude_employer_patterns: list[str] = Field(default_factory=list)
@@ -135,6 +141,8 @@ class PolicyCfg(BaseModel):
     has_clearance: bool = False
     graduation_flex_months: int = 0              # tolerance around a posting's graduation window
     hours_per_year: int = 2080                   # hourly -> annual conversion
+    exclude_title_patterns: list[str] = Field(default_factory=list)  # regexes on the title (e.g. "research")
+    has_phd: bool = False                        # False: skip titles aimed at PhD graduates/students (ADR-0011)
 
 
 BUILTIN_CONTROLS = ["mode", "quota", "attestation", "hard_stop", "single_submit", "prose_lint",
@@ -233,6 +241,9 @@ class ApplyCfg(BaseModel):
     context_chars: int = 900            # cap on the posting summary inside client_tasks
     plan_workers: int = 4               # concurrent planners; separate from browser_workers (pipelining)
     write_optional: bool = False        # also write optional long free-text fields (default: skip them)
+    option_min_score: float = 0.78      # fuzzy option snap threshold; below it the field stays unresolved
+    referral_preference: list[str] = Field(default_factory=lambda: [
+        "Job board", "Other job board", "Other", "LinkedIn"])  # "how did you hear"; never Referral/Employee
 
 
 class BrowserCfg(BaseModel):
@@ -302,6 +313,47 @@ class PlatformsCfg(BaseModel):
     max_description_chars: int = 6000       # get_job trims descriptions to this
 
 
+class TuneCfg(BaseModel):
+    """Local style tuning (ADR-0017). Everything runs on the user's machine; data and adapters live under
+    `<paths.data_dir>/tuning/` (outside the repo). Needs the optional extra: `pip install job-apply-mcp[tune]`."""
+    backend: str = "mlx"                          # Trainer backend id (tuning.trainer.trainers registry)
+    base_model: str = "mlx-community/Qwen3-4B-4bit"   # fits 16 GB; swap for a 4-bit Gemma/Qwen up to ~12B
+    kinds: list[str] = Field(default_factory=lambda: ["cover_letter", "answer"])   # provenance kinds trained on
+    facts_kind: str = "profile_fact"              # kind whose texts are compacted into the instruction
+    facts_chars: int = 600
+    context_chars: int = 800
+    min_words: int = 20                           # length filters on the user's output text
+    max_words: int = 700
+    eval_fraction: float = 0.2
+    paragraph_split: bool = False                 # tiny corpora: one example per paragraph (weak, leaks style)
+    seed: int = 7
+    # training budget (small enough for a 16 GB laptop)
+    iters: int = 200
+    batch_size: int = 1
+    num_layers: int = 8
+    learning_rate: float = 1e-5
+    max_seq_length: int = 1536
+    grad_checkpoint: bool = True
+    time_budget_s: int = 1500                     # hard wall-clock cap; the last checkpoint is kept
+    save_every: int = 50
+    # when to run
+    new_data_threshold: int = 10                  # new user texts since the last run that trigger "new_data"
+    auto_run: bool = False                        # tune_status() may start a due run in the background
+    allow_on_battery: bool = False
+    allow_with_heavy_model: bool = False          # another model (e.g. in Ollama) resident in memory
+    heavy_model_gb: float = 4.0                   # resident models smaller than this do not block training
+    # eval gate
+    min_eval_examples: int = 2
+    max_gen_tokens: int = 400
+    gate_min_nll_gain: float = 0.0                # relative improvement in held-out loss required (0.02 = 2%)
+    gate_max_lint_regress: float = 0.0            # allowed increase in lint violations per 100 words
+    gate_max_length_regress: float = 0.05         # allowed increase in mean |len ratio - 1|
+    use_judge: bool = False                       # optional review-tier judge (see tuning.evalgate.set_judge)
+    keep_runs: int = 3                            # adapters kept on disk besides promoted/previous
+    ollama_base: str | None = None                # Ollama tag matching the adapter's base, for export
+    export_create: bool = False                   # also run `ollama create` after writing the Modelfile
+
+
 class Settings(BaseModel):
     improve: ImproveCfg = Field(default_factory=ImproveCfg)
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
@@ -314,6 +366,7 @@ class Settings(BaseModel):
     writing: WritingCfg = Field(default_factory=WritingCfg)
     platforms: PlatformsCfg = Field(default_factory=PlatformsCfg)
     control: ControlCfg = Field(default_factory=ControlCfg)
+    tune: TuneCfg = Field(default_factory=TuneCfg)
     ingest: IngestCfg = Field(default_factory=IngestCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
