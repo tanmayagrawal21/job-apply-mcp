@@ -726,9 +726,10 @@ class ApplyEngine:
             if drv is None:
                 continue
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
+            edu = {f"education:{i}": r for i, r in enumerate(self.profile.p.education_rows()[:1])}
             async with self._browser_sem:
                 ctx.meta["dispatched"] = True
-                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo}, files, dry_run=dry)
+                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu}, files, dry_run=dry)
             if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
                 return last
         return last or SubmitResult(ref=ctx.form.ref, status="needs_human",
