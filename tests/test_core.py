@@ -34,7 +34,7 @@ async def test_host_limiter_spacing():
     for _ in range(3):
         async with await lim("https://example.com/a"):
             pass
-    assert time.monotonic() - t0 >= 0.1
+    assert time.monotonic() - t0 >= 0.08  # slack for coarse Windows timers
 
 
 def test_registry_duplicate_and_unknown():
@@ -49,9 +49,9 @@ def test_registry_duplicate_and_unknown():
 
 def test_config_precedence(tmp_path, monkeypatch):
     user = tmp_path / "user.toml"
-    user.write_text('dry_run = false\n[concurrency]\nper_host = 2\n')
+    user.write_text('response_budget_chars = 1234\n[concurrency]\nper_host = 2\n')
     (tmp_path / "job-apply-mcp.toml").write_text('[concurrency]\nper_host = 3\n')
     monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(user))
     monkeypatch.setenv("JOB_APPLY__CONCURRENCY__GLOBAL_LIMIT", "7")
     s = load_settings(tmp_path)
-    assert s.dry_run is False and s.concurrency.per_host == 3 and s.concurrency.global_limit == 7
+    assert s.response_budget_chars == 1234 and s.concurrency.per_host == 3 and s.concurrency.global_limit == 7

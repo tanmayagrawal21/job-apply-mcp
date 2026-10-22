@@ -1,6 +1,6 @@
 # ADR-0011: Apply engine, approval tokens, client_tasks, pipelined batch
 
-Status: accepted · Date: 2026-10-22
+Status: accepted · Date: 2026-10-22 · Decision 3 (approval token) amended by ADR-0021: approvals are now server-held ids
 
 ## Context
 Applying has to be fast (many jobs, slow browsers, slow local LLMs), safe (no unreviewed submissions, no

@@ -2,7 +2,7 @@
 
 Precedence, lowest to highest:
   1. built-in defaults (this file)
-  2. user file   ~/.config/job-apply-mcp/config.toml   (or $JOB_APPLY_MCP_CONFIG)
+  2. user file   <config dir>/config.toml (see paths.py; or $JOB_APPLY_MCP_CONFIG)
   3. project file ./job-apply-mcp.toml
   4. environment variables  JOB_APPLY__SECTION__KEY=value   (double underscore = nesting)
   5. per-call tool arguments (where a tool exposes them)
@@ -12,12 +12,17 @@ never from the project file, so a repo checkout cannot leak them.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from . import paths
+
+log = logging.getLogger(__name__)
 
 
 class ConcurrencyCfg(BaseModel):
@@ -113,7 +118,7 @@ class LLMCfg(BaseModel):
         "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
         "anthropic": {"api_key_env": "ANTHROPIC_API_KEY"},
-        "hf_local": {"device": "mps"},
+        "hf_local": {"device": "auto"},
     })
 
 
@@ -193,8 +198,8 @@ class IngestCfg(BaseModel):
 
 
 class PathsCfg(BaseModel):
-    data_dir: str = "~/.local/share/job-apply-mcp"
-    profile: str = "~/.config/job-apply-mcp/profile.toml"
+    data_dir: str = Field(default_factory=paths.default_data_dir_str)
+    profile: str = Field(default_factory=lambda: paths.default_config_dir_str() + "/profile.toml")
     resume: str | None = None
 
 
@@ -234,7 +239,13 @@ class ProvenanceCfg(BaseModel):
 
 
 class ApplyCfg(BaseModel):
-    auto_approve: bool = False          # True skips the hash-bound approval token (ADR-0011)
+    @property
+    def auto_approve_active(self) -> bool:
+        return self.auto_approve and self.approval_mode == "agent"
+
+    approval_mode: Literal["agent", "human"] = "human"  # human: a human channel must approve (ADR-0021)
+    approval_ttl_s: int = 1800          # lifetime of a server-held approval record
+    auto_approve: bool = False          # USER CONFIG FILE ONLY (env/project file ignored); needs approval_mode="agent"
     short_text_max: int = 200           # unresolved fields up to this length go to the local LLM
     llm_min_confidence: float = 0.6     # below this an LLM answer is treated as unresolved
     plan_ttl_s: int = 1800              # how long a plan (and its token) stays valid
@@ -249,7 +260,7 @@ class ApplyCfg(BaseModel):
 class BrowserCfg(BaseModel):
     driver: str = "playwright"
     fallback_driver: str | None = "browser_use"   # used for sites the primary driver does not know
-    user_data_dir: str = "~/.local/share/job-apply-mcp/browser-profile"
+    user_data_dir: str = Field(default_factory=lambda: paths.default_data_dir_str() + "/browser-profile")
     headless: bool = False
     keep_pages_open: bool = False       # debugging: leave the job's tab open
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
@@ -355,7 +366,35 @@ class TuneCfg(BaseModel):
     export_create: bool = False                   # also run `ollama create` after writing the Modelfile
 
 
+class SearchCfg(BaseModel):
+    """Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on."""
+    match: str = "any"                   # "title": every query term must be in the title; "any": rank title+description
+    rank: bool = True                    # False = legacy newest-first order, no score/why
+    skills: list[str] = Field(default_factory=list)   # extra skills on top of the profile's
+    seniority: str | None = None         # target level: "entry" | "mid" | "senior" | None (no preference)
+    location_order: list[str] = Field(default_factory=list)  # preferred location substrings, best first
+    rank_candidates: int = 40            # description-fetch + full scoring for the top N by the cheap pre-score
+    description_concurrency: int = 6     # bounded parallel description fetches (also capped by the host limiter)
+    min_score: float = 0.0               # drop rows scoring below this (0-100); 0 keeps everything with a query hit
+    weights: dict[str, float] = Field(default_factory=lambda: {
+        "query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency": 1.0})
+    recency_half_life_days: float = 14.0
+    max_why: int = 3
+    embeddings: bool = False             # optional semantic rerank through a local Ollama embedding model
+    embed_model: str = "nomic-embed-text"
+    embed_url: str = "http://127.0.0.1:11434"
+    embed_weight: float = 3.0
+
+
+class DedupeCfg(BaseModel):
+    """Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical apply URL, with
+    company+title only when neither is known. title: legacy company+fuzzy-title matching."""
+    mode: str = "id_first"
+
+
 class Settings(BaseModel):
+    search: SearchCfg = Field(default_factory=SearchCfg)
+    dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
     improve: ImproveCfg = Field(default_factory=ImproveCfg)
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
@@ -406,11 +445,75 @@ def _coerce(v: str) -> Any:
     return v
 
 
+# Security-relevant settings: (section, key) -> predicate. A project file or
+# environment variable may only set the safe value; relaxing needs the user-level config file (ADR-0021).
+# Predicates are "this value RELAXES the setting"; invalid values pass through so validation reports them.
+_RELAXES: dict[tuple[str | None, str], Any] = {
+    ("apply", "auto_approve"): lambda v: v is True,
+    ("apply", "approval_mode"): lambda v: v == "agent",
+    (None, "dry_run"): lambda v: v is False,
+    ("control", "apply_enabled"): lambda v: v is True,
+    ("control", "dev_mode"): lambda v: v is False,
+}
+
+
+def _restrict(d: dict, source: str) -> dict:
+    """Drop values that would relax a security setting; log each. Stricter values pass."""
+    out = dict(d)
+    for (sect, key), relaxes in _RELAXES.items():
+        tgt = out.get(sect) if sect else out
+        if isinstance(tgt, dict) and key in tgt and relaxes(tgt[key]):
+            log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
+                        f"{sect}." if sect else "", key, tgt[key], source)
+            if sect:
+                out[sect] = {k: v for k, v in tgt.items() if k != key}
+            else:
+                out = {k: v for k, v in out.items() if k != key}
+    return out
+
+
+def _user_file_trusted(user: Path) -> tuple[bool, str]:
+    """Only the platform-default user config, owned by this user and not group/world-writable, may relax
+    security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
+    default = paths.config_dir() / "config.toml"
+    try:
+        if user.resolve() != default.resolve():
+            return False, "not the platform-default user config path"
+        if os.name != "nt":
+            st = user.stat()
+            if st.st_uid != os.getuid():
+                return False, "not owned by the current user"
+            if st.st_mode & 0o022:
+                return False, "group/world-writable"
+    except OSError as e:
+        return False, str(e)
+    return True, ""
+
+
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
-    user = Path(os.environ.get("JOB_APPLY_MCP_CONFIG", "~/.config/job-apply-mcp/config.toml")).expanduser()
-    for p in (user, (project_dir or Path.cwd()) / "job-apply-mcp.toml"):
-        if p.is_file():
-            data = _deep_merge(data, tomllib.loads(p.read_text()))
-    data = _deep_merge(data, _env_overrides())
-    return Settings.model_validate(data)
+    udata: dict = {}
+    user = paths.config_file()
+    if user.is_file():
+        udata = tomllib.loads(user.read_text(encoding="utf-8"))
+        trusted, why = _user_file_trusted(user)
+        if not trusted:
+            udata = _restrict(udata, f"{user} ({why}; can only make settings stricter)")
+        data = _deep_merge(data, udata)
+    proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
+    if proj.is_file() and proj.resolve() != user.resolve():
+        data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj)))
+    data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)"))
+    s = Settings.model_validate(data)
+    for (sect, key), relaxes in _RELAXES.items():  # log which explicitly-set relaxations came from the user file
+        v = (udata.get(sect, {}) if sect else udata).get(key, None) if udata else None
+        if v is not None and relaxes(v):
+            log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
+                        f"{sect}." if sect else "", key, v, user)
+    if s.apply.auto_approve:
+        if s.apply.approval_mode == "human":
+            log.warning("apply.auto_approve=true is IGNORED because apply.approval_mode='human'")
+        else:
+            log.warning("!!! apply.auto_approve=true: real submissions need NO approval id (agent mode). "
+                        "Set it back to false unless you accept unattended submissions !!!")
+    return s

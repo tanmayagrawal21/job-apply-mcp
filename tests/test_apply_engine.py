@@ -15,7 +15,7 @@ from apply_fakes import (
     settings,
 )
 
-from job_apply_mcp.apply.engine import ApplyEngine, canonical_digest
+from job_apply_mcp.apply.engine import ApplyEngine
 from job_apply_mcp.core.models import ApplicationForm, Decision, FieldKind
 
 GOOD = "\n\n".join(["Acme Robotics builds software for warehouse fleets. I built a fleet scheduler in Python." * 2] * 4)
@@ -41,7 +41,7 @@ async def test_plan_batches_short_fields_in_one_call_and_tasks_for_prose():
     assert ans["q_gender"] == "Decline To Self Identify" and ans["resume"] == "/tmp/resume.pdf"
     assert [c for c, _ in r.calls].count("short") == 1                           # ONE batched call
     assert out.plan.unresolved == ["q_why"] and out.client_tasks[0]["key"] == "q_why"
-    assert "Acme Robotics" in out.client_tasks[0]["context"]["role"] and out.token
+    assert "Acme Robotics" in out.client_tasks[0]["context"]["role"] and out.approval_id
     assert set(out.timings) >= {"fetch", "gate", "map", "llm"}
 
 
@@ -82,7 +82,7 @@ async def test_no_router_degrades_to_client_tasks():
 async def test_gates_stop_plan(decision, why):
     e, _ad = engine(gates=FakeGates(decision, [why]))
     out = await e.plan(POSTING.ref)
-    assert out.plan.gate.decision == decision and not out.token and not out.plan.answers
+    assert out.plan.gate.decision == decision and not out.approval_id and not out.plan.answers
 
 
 async def test_duplicate_and_stop_phrase_fields():
@@ -108,12 +108,12 @@ async def test_token_required_for_real_submit_and_binds_answers():
     e, ad = engine(router=_full_router(), writing__max_rounds=1, drivers={"playwright": drv})
     out, extra = await _planned(e)
     r = await e.submit(POSTING.ref, extra, None, dry_run=False)
-    assert r.status == "error" and "token" in r.detail and not ad.submits
-    r = await e.submit(POSTING.ref, {**extra, "first_name": "Mallory"}, out.token, dry_run=False)
+    assert r.status == "error" and "approval_id" in r.detail and not ad.submits
+    r = await e.submit(POSTING.ref, {**extra, "first_name": "Mallory"}, out.approval_id, dry_run=False)
     assert r.status == "error" and "differs" in r.detail
     r = await e.submit(POSTING.ref, extra, "0" * 64, dry_run=False)
     assert r.status == "error"
-    r = await e.submit(POSTING.ref, extra, out.token, dry_run=False)
+    r = await e.submit(POSTING.ref, extra, out.approval_id, dry_run=False)
     assert r.status == "submitted" and r.via == "api"
     sent, files, dry = ad.submits[0]
     assert sent["q_why"] == extra["q_why"] and sent["first_name"] == "Ada" and files == {"resume": "/tmp/resume.pdf"}
@@ -121,16 +121,14 @@ async def test_token_required_for_real_submit_and_binds_answers():
     assert ad.fetches == 1                       # submit reused the cached plan context (no refetch)
 
 
-async def test_stateless_full_answer_token_accepted_and_auto_approve():
-    e, _ = engine(router=_full_router(), writing__max_rounds=1)
-    out, extra = await _planned(e)
-    full = {**{a.key: a.value for a in out.plan.answers}, **extra}
-    e2, _ = engine(router=_full_router())          # fresh engine: no cached plan
-    r = await e2.submit(POSTING.ref, full, canonical_digest(POSTING.ref, full), dry_run=False)
-    assert r.status == "submitted"
+async def test_auto_approve_agent_mode_only():
     e3, ad3 = engine(router=_full_router(), apply__auto_approve=True, writing__max_rounds=1)
-    r = await e3.submit(POSTING.ref, extra, None, dry_run=False)
+    r = await e3.submit(POSTING.ref, {"q_why": "t"}, None, dry_run=False)
     assert r.status == "submitted" and ad3.submits
+    e4, ad4 = engine(router=_full_router(), apply__auto_approve=True, apply__approval_mode="human",
+                     writing__max_rounds=1)
+    r = await e4.submit(POSTING.ref, {"q_why": "t"}, None, dry_run=False)
+    assert r.status == "error" and not ad4.submits               # auto_approve ignored in human mode
 
 
 async def test_dry_run_needs_no_token_and_is_not_recorded():
@@ -213,6 +211,6 @@ async def test_batch_pipeline_overlaps_planning_with_browser_and_gates_approval(
     assert took < 4 * (0.05 + 0.15)             # serial would be 0.8s; planning overlaps submission
     e2, _ = engine(adapter=ad, router=_full_router(), writing__max_rounds=1)
     rows = await e2.apply_batch(refs[:1], dry_run=False)
-    assert rows[0]["status"] == "awaiting_approval" and rows[0]["token"]
+    assert rows[0]["status"] == "awaiting_approval" and rows[0]["approval_id"]
     rows = await e2.apply_batch(refs[:1], dry_run=True)
     assert rows[0]["status"] == "dry_run"

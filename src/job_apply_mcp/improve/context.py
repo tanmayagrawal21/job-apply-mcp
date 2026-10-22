@@ -12,7 +12,7 @@ _SKIP = {"__init__.py", "__pycache__"}
 
 def _doc1(path: Path) -> str:
     try:
-        doc = ast.get_docstring(ast.parse(path.read_text()))
+        doc = ast.get_docstring(ast.parse(path.read_text(encoding="utf-8")))
     except (SyntaxError, OSError):
         return ""
     return (doc or "").strip().splitlines()[0][:100] if doc else ""
@@ -32,7 +32,7 @@ def protocols(repo: Path, pkg: str = "src/job_apply_mcp") -> list[str]:
     f = repo / pkg / "core" / "interfaces.py"
     if not f.is_file():
         return []
-    tree = ast.parse(f.read_text())
+    tree = ast.parse(f.read_text(encoding="utf-8"))
     out = []
     for n in tree.body:
         if isinstance(n, ast.ClassDef):
@@ -50,7 +50,7 @@ def relevant_files(repo: Path, description: str, limit: int = 6) -> list[str]:
     scored = []
     for p in (repo / "src").rglob("*.py"):
         try:
-            body = p.read_text().lower()
+            body = p.read_text(encoding="utf-8").lower()
         except OSError:
             continue
         s = sum(3 for t in toks if t in p.as_posix().lower()) + sum(1 for t in toks if t in body)
@@ -68,7 +68,7 @@ def sibling_template(repo: Path, kind: str, pkg: str = "src/job_apply_mcp", max_
             return None
         cands = [repo / pkg / fallback]
     p = cands[0]
-    lines = p.read_text().splitlines()[:max_lines]
+    lines = p.read_text(encoding="utf-8").splitlines()[:max_lines]
     return {"path": str(p.relative_to(repo)), "head": "\n".join(lines)}
 
 
@@ -76,7 +76,7 @@ def related_adrs(repo: Path, description: str, limit: int = 3) -> list[str]:
     toks = _tokens(description)
     scored = []
     for p in sorted((repo / "docs" / "adr").glob("*.md")):
-        text = p.read_text()
+        text = p.read_text(encoding="utf-8")
         title = text.splitlines()[0].lstrip("# ").strip() if text else p.stem
         s = sum(1 for t in toks if t in text.lower()) + 5 * sum(1 for t in toks if t in title.lower())
         scored.append((s, f"{p.name}: {title}"))

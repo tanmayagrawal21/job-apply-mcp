@@ -1,0 +1,66 @@
+# ADR-0021: Approval and submission safety (amends ADR-0011)
+
+Status: accepted · Date: 2026-10-22 · Amends: ADR-0011 decision 3 (approval token), ADR-0009/0014 dry_run semantics
+
+## Context
+External review found three holes. (1) The ADR-0011 token was `sha256(ref + answers)`, which any client can compute,
+so "approval" proved nothing. (2) A per-call `dry_run=false` could override a global `dry_run=true`, and `auto_approve`
+could be set from env or a project file in a cloned repo. (3) A crash or timeout between the click and the stored
+result could lead to a second, duplicate application on retry.
+
+## Decision
+1. **Server-held approvals** (`apply/approvals.py`). `plan_application` returns an opaque `approval_id`
+   (`secrets.token_urlsafe(24)`) stored in `<data_dir>/approvals.db` with ref, destination URL, hash of the final
+   answers, hash of file contents, created/expiry (`apply.approval_ttl_s`). `submit_application(approval_id=...)`
+   requires it, and the answers must hash-match. Client-written text for unresolved keys rebinds the record (state
+   back to `pending`, human approval cleared); an approved answer can never be overridden; without a cached plan the
+   supplied answers must hash-match exactly. The self-computed sha256 path and the `token` argument are removed.
+2. **`apply.approval_mode`**: `agent` (the caller may submit with the server-issued id) or `human` (default). In `human`
+   mode the record must be marked approved by a separate channel: MCP elicitation (`ctx.elicit` confirm dialog showing
+   company, title and an answers summary), or when the client lacks elicitation, the CLI `job-apply-mcp approve <id>`
+   / `deny <id>` / `pending`. Until then submit returns `needs_human` with the command. Every issue / rebind / approve /
+   deny / submit attempt / state change is written to `approval_audit` with the actor (`agent`, `human:elicit`,
+   `human:cli`, `auto_approve`).
+3. **Overrides can only tighten.** A per-call `dry_run=false` while global `dry_run=true` is refused (error, also in
+   `apply_batch`). `apply.auto_approve` is read only from the user config file (project file and env values are stripped
+   with a warning), logs a loud warning on startup, and is ignored when `approval_mode="human"`.
+4. **Submission state machine** (table `submissions`, same db): `planned -> approved -> submitting -> submitted | failed |
+   unknown | handoff`. `submitting` is committed BEFORE the browser/API call. Exceptions, cancellation and `error` results
+   become `unknown`; `needs_human` -> `handoff`; `roadblock` -> `failed`. A ref in `submitting`, `unknown` or `submitted`
+   is never auto-resubmitted (also across restarts); the tool returns state, detail and the evidence directory. Only
+   `resolve_submission(ref, outcome)` (tool, or `job-apply-mcp resolve <ref> <outcome>`) moves `submitting`/`unknown` to
+   `submitted|failed|handoff`; `submitted` also records the application for dedupe. Each ref has a stable idempotency
+   key (`sha256(ref, url)`), stored and audited.
+
+## Consequences
+Default installs now require a human for every real submit (set `approval_mode = "agent"` for the old flow). The new
+tables live in their own sqlite file so the `Store` protocol and `applications.db` schema are untouched. Answer text is
+stored only as hashes plus a truncated summary for the approver. `apply_batch` returns `approval_id` in
+`awaiting_approval` rows. A crash after the click requires one manual `resolve_submission`; that is deliberate.
+
+## Verify / revert
+`uv run pytest tests/test_approvals.py tests/test_apply_engine.py` (includes a test that a client-computed sha256 token
+is rejected). Revert: revert the PR; ADR-0011 behavior returns (and with it the forgeable token, so do not).
+
+## Amendment 1 (adversarial review)
+1. **Relax only from the user config.** `apply.approval_mode`, `apply.auto_approve`, global `dry_run=false`,
+   `control.apply_enabled=true` and `control.dev_mode=false` are dropped (with a warning naming the source) when they come
+   from a project `job-apply-mcp.toml` or `JOB_APPLY__*` env; stricter values from those sources are honored. Relaxed
+   values from the user file are logged at startup.
+2. **CLI is human-only.** `approve`/`deny`/`resolve` refuse unless stdin and stdout are TTYs, print the full summary and
+   need a typed confirmation (company name / outcome); there is no `--yes`. `pending` is read-only.
+3. **`resolve_submission` tool** exists only when `approval_mode="agent"`; it requires the ref's evidence folder path and
+   is audit-logged (refusals too). In human mode resolving is CLI-only.
+4. A legacy `token=` argument to `submit_application` returns an explicit migration error.
+5. Adapter/driver `error` and exceptions map to `unknown` only after the adapter/driver call was dispatched; before that
+   they map to `failed` (retryable after review). Tested both ways.
+
+## Amendment 2: trust model for relaxing settings
+The relaxable settings (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`,
+`control.dev_mode=false`) are honored only from the **platform-default user config**
+(`~/.config/job-apply-mcp/config.toml`, `$XDG_CONFIG_HOME`, `%APPDATA%`) and only when that file is owned by the current
+user and not group/world-writable (POSIX). A file chosen through `JOB_APPLY_MCP_CONFIG`, a project file or `JOB_APPLY__*`
+env can only make settings stricter; a relax attempt is dropped with a warning naming the source and reason.
+Rationale: an agent that can set env vars or write files near the server must not be able to grant itself approval
+rights. Residual risk: an agent running as the same OS user with write access to the default config can still edit it;
+protect that file (`chmod 600`) and do not give agents shell access to it. Tests: `tests/test_approvals.py`.

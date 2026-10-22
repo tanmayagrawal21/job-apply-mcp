@@ -63,7 +63,7 @@ api_key_env = "OPENAI_API_KEY"    # the key itself is read from the environment,
 [llm.providers.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
 [llm.providers.hf_local]
-device = "mps"
+device = "auto"                   # auto | cpu | cuda | mps
 
 [ingest]                          # duplicate prevention from your own confirmation emails (ADR-0016)
 source = "client"                 # client (agent passes summaries; no credentials) | mbox | imap

@@ -49,8 +49,8 @@ async def test_services_wiring_with_injected_engine():
                      resolve_adapter=lambda r: FakeAdapter(), driver_factory=lambda n: FakeDriver(), control=_Allow())
     svc = Services(settings(), engine=e)
     plan = await svc.plan(POSTING.ref)
-    assert plan["gate"] == "submit" and plan["token"] and "client_tasks" in plan
-    res = await svc.submit(POSTING.ref, {"q_why": "t", "q_source": "Other", "q_tool": "make"}, False, token=plan["token"])
+    assert plan["gate"] == "submit" and plan["approval_id"] and "client_tasks" in plan
+    res = await svc.submit(POSTING.ref, {"q_why": "t", "q_source": "Other", "q_tool": "make"}, False, approval_id=plan["approval_id"])
     assert res["status"] == "submitted"
     batch = await svc.apply_batch([POSTING.ref], True, None)
     assert batch["results"][0]["ref"] == POSTING.ref

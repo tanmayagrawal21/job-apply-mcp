@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
 
 from .config import load_settings
 from .core import output as _output
@@ -68,12 +69,51 @@ async def plan_application(ref_or_url: str) -> str:
     return _out(await svc().plan(ref_or_url))
 
 
+class _Confirm(BaseModel):
+    approve: bool = Field(description="Submit this application?")
+
+
+def _elicit_approver(ctx: Context):
+    """Human approval over MCP elicitation, if the client supports it (returns None when it does not)."""
+    async def ask(summary: dict[str, Any]) -> bool | None:
+        msg = (f"Submit application to {summary.get('company')} - {summary.get('title')}?\n"
+               + "\n".join(f"{k}: {v}" for k, v in summary.get("answers", {}).items()))
+        try:
+            res = await ctx.elicit(message=msg[:3000], schema=_Confirm)
+        except Exception:  # noqa: BLE001 - client without elicitation support
+            return None
+        if res.action == "accept":
+            return bool(res.data.approve)
+        return False
+    return ask
+
+
 @mcp.tool()
-async def submit_application(ref_or_url: str, answers: dict[str, Any] | None = None,
-                             dry_run: bool | None = None, token: str | None = None) -> str:
-    """Submit using the best available path (platform API, else browser driver). Honors global dry_run.
-    `token` is the approval token from plan_application (required for real submits unless auto_approve)."""
-    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, token=token))
+async def submit_application(ctx: Context, ref_or_url: str, answers: dict[str, Any] | None = None,
+                             dry_run: bool | None = None, approval_id: str | None = None,
+                             token: str | None = None) -> str:
+    """Submit using the best available path (platform API, else browser driver). Honors global dry_run; a per-call
+    dry_run can only make it safer. `approval_id` is the server-issued id from plan_application. With
+    approval_mode=human a person must approve (dialog, or `job-apply-mcp approve <id>`)."""
+    if token is not None:
+        return _out({"status": "error", "detail": "token is no longer accepted; use approval_id from plan_application"})
+    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, approval_id=approval_id,
+                                   approver=_elicit_approver(ctx)))
+
+
+def _agent_mode() -> bool:
+    try:
+        return load_settings().apply.approval_mode == "agent"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+if _agent_mode():   # in approval_mode="human" resolving is CLI-only: the tool is not even exposed
+    @mcp.tool()
+    async def resolve_submission(ref: str, outcome: str = "", note: str = "", evidence: str = "") -> str:
+        """Inspect (no outcome) or resolve a submission stuck in submitting/unknown. outcome: submitted|failed|
+        handoff. Requires `evidence` = the evidence folder path reported for the ref. Audit-logged."""
+        return _out(await svc().resolve_submission(ref, outcome, note, "agent", evidence))
 
 
 @mcp.tool()
@@ -141,6 +181,7 @@ _register_ingest(mcp, svc)
 
 
 def main() -> None:
+    """Stdio server (kept for 0.1 client configs). The full CLI lives in cli.py."""
     mcp.run()
 
 

@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest a platform, control, client guide or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes: {label: What problem are you trying to solve?}
+    validations: {required: true}
+  - type: textarea
+    id: idea
+    attributes: {label: Proposed solution or alternatives}

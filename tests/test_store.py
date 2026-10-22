@@ -106,3 +106,34 @@ async def test_services_list_applications(tmp_path):
     out = await svc.list_applications(status="", limit=10, cursor=0)
     assert out["total"] == 1 and out["rows"][0]["co"] == "Acme"
     svc.store.close()
+
+
+# --- identity-first dedupe (ADR-0010 amendment) ---
+from job_apply_mcp.store.sqlite import canonical_url
+
+
+def test_canonical_url_strips_tracking():
+    a = canonical_url("https://WWW.Jobs.example.com/acme/123/?utm_source=x&gh_src=y&gh_jid=9#apply")
+    assert a == canonical_url("https://jobs.example.com/acme/123?gh_jid=9&ref=abc") == "jobs.example.com/acme/123?gh_jid=9"
+    assert canonical_url("https://jobs.example.com/acme/123?gh_jid=10") != a
+    assert canonical_url("not a url") is None
+
+
+async def test_distinct_requisitions_same_title_not_merged(store):
+    await store.record(res("greenhouse:acme:1"), company="Acme", title="Software Engineer",
+                       url="https://jobs.example.com/acme/1?utm_source=a")
+    assert await store.seen_why("Acme", "Software Engineer", ref="greenhouse:acme:2",
+                                url="https://jobs.example.com/acme/2") is None
+    assert (await store.seen_why("Acme", "Software Engineer", ref="greenhouse:acme:1")) == "req_id:greenhouse:acme:1"
+    # same job re-listed under a different ref but the same canonical URL
+    assert (await store.seen_why("Acme", "SWE", ref="lever:acme:zzz",
+                                 url="https://jobs.example.com/acme/1?ref=feed")).startswith("url:")
+
+
+async def test_title_fallback_modes(store):
+    await store.record(res("mail:abc"), company="Acme", title="Data Analyst")   # no stable id
+    assert await store.seen_why("Acme", "Data Analyst", ref="greenhouse:acme:5") == "title"
+    assert await store.seen_why("Acme", "Data Analyst") == "title"              # nothing known: fallback
+    await store.record(res("greenhouse:acme:1"), company="Beta", title="Data Analyst")
+    assert await store.seen("Beta", "Data Analyst", ref="greenhouse:beta:2", mode="title") is True
+    assert await store.seen("Beta", "Data Analyst", ref="greenhouse:beta:2") is False
