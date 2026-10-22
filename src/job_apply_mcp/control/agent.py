@@ -152,7 +152,7 @@ class ControlAgent:
         try:
             self.audit_path.parent.mkdir(parents=True, exist_ok=True)
             self._rotate()
-            with self.audit_path.open("a") as f:
+            with self.audit_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
         except OSError:
             pass   # auditing must never turn a safe decision into a crash

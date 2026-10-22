@@ -257,25 +257,52 @@ def evidence_path(data_dir: str | Path, ref: str) -> str | None:
     return str(d) if d.exists() else None
 
 
-def cli(argv: list[str], data_dir: str | Path, ttl_s: int = 1800) -> int:
-    """`job-apply-mcp approve <id> | deny <id> | pending | resolve <ref> <submitted|failed|handoff> [note]`."""
+def _require_tty(stdin: Any, stdout: Any) -> bool:
+    return bool(getattr(stdin, "isatty", lambda: False)() and getattr(stdout, "isatty", lambda: False)())
+
+
+def cli(argv: list[str], data_dir: str | Path, ttl_s: int = 1800, *, stdin: Any = None, stdout: Any = None,
+        input_fn: Any = input) -> int:
+    """HUMAN-ONLY: `approve <id> | deny <id> | pending | resolve <ref> <submitted|failed|handoff> [note]`.
+    approve/deny/resolve need an interactive terminal on stdin AND stdout, print the full summary, and ask for a
+    typed confirmation (no --yes). Run them yourself; an agent must never run them."""
+    import sys
+    stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     book = ApprovalBook(data_dir, ttl_s=ttl_s)
     cmd, rest = argv[0], argv[1:]
     if cmd == "pending":
         for a in book.pending():
             print(f"{a.approval_id}  {a.summary['company']} | {a.summary['title']}  ({a.summary['n_answers']} answers)")
         return 0
+    if cmd in ("approve", "deny", "resolve") and not _require_tty(stdin, stdout):
+        print(f"refused: `{cmd}` is human-only and needs an interactive terminal (stdin and stdout must be a TTY)")
+        return 3
     if cmd in ("approve", "deny") and len(rest) == 1:
         a = book.get(rest[0])
-        if cmd == "approve" and a:
-            print(json.dumps(a.summary, indent=2))
+        if a is None:
+            print(f"{cmd}: unknown approval_id")
+            return 1
+        print(json.dumps({"ref": a.ref, "url": a.url, "status": a.status, **a.summary}, indent=2))
+        if cmd == "approve":
+            ans = input_fn(f"Type the company name ({a.summary['company']}) to approve submitting: ").strip()
+            if ans.lower() != str(a.summary["company"]).lower() or not ans:
+                print("approve: confirmation did not match; nothing changed")
+                return 1
+        elif input_fn("Deny this submission? [y/N] ").strip().lower() != "y":
+            print("deny: cancelled")
+            return 1
         ok, msg = (book.approve if cmd == "approve" else book.deny)(rest[0], "human:cli")
         print(f"{cmd}: {msg}")
         return 0 if ok else 1
     if cmd == "resolve" and len(rest) >= 2:
+        cur = book.state(rest[0])
+        print(json.dumps(cur, indent=2, default=str))
+        if input_fn(f"Type the outcome ({rest[1]}) to confirm you verified it on the employer site: ").strip() != rest[1]:
+            print("resolve: confirmation did not match; nothing changed")
+            return 1
         ok, msg = book.resolve(rest[0], rest[1], " ".join(rest[2:]), "human:cli")
         print(msg)
         return 0 if ok else 1
     print("usage: job-apply-mcp approve <approval_id> | deny <approval_id> | pending | "
-          "resolve <ref> <submitted|failed|handoff> [note]")
+          "resolve <ref> <submitted|failed|handoff> [note]   (human-only; interactive terminal)")
     return 2

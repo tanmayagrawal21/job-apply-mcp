@@ -138,24 +138,6 @@ async def test_per_call_dry_run_false_refused_when_global_dry():
     assert (await e2.submit(POSTING.ref, EXTRA, None, dry_run=True)).status == "dry_run"
 
 
-def test_auto_approve_only_from_user_config(tmp_path, monkeypatch, caplog):
-    user = tmp_path / "user.toml"
-    user.write_text('[apply]\napproval_mode = "agent"\nauto_approve = true\n')
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(user))
-    with caplog.at_level("WARNING"):
-        s = load_settings(proj)
-    assert s.apply.auto_approve and s.apply.auto_approve_active and "auto_approve=true" in caplog.text
-    user.write_text('[apply]\napprovalmode = 1\n')
-    (proj / "job-apply-mcp.toml").write_text("[apply]\nauto_approve = true\n")
-    monkeypatch.setenv("JOB_APPLY__APPLY__AUTO_APPROVE", "true")
-    assert load_settings(proj).apply.auto_approve is False                 # project file + env ignored
-    user.write_text('[apply]\nauto_approve = true\n')                      # default human mode -> ignored
-    s = load_settings(tmp_path / "none")
-    assert s.apply.auto_approve and not s.apply.auto_approve_active
-
-
 def test_defaults_are_safe():
     s = Settings()
     assert s.dry_run and s.apply.approval_mode == "human" and not s.apply.auto_approve
@@ -205,11 +187,11 @@ async def test_resolve_submission_moves_on_and_records():
     res = await e.resolve_submission(POSTING.ref, "submitted", "confirmed by email", actor="human")
     assert res["state"] == "submitted"
     assert e.store.records and e.store.records[0][0].status == "submitted"
-    assert "error" in await e.resolve_submission(POSTING.ref, "failed")      # only submitting/unknown resolvable
+    assert "error" in await e.resolve_submission(POSTING.ref, "failed", actor="human")      # only submitting/unknown resolvable
     e2, _ = make()
     await e2.plan(POSTING.ref)
     e2.approvals.set_state(POSTING.ref, "submitting")
-    assert (await e2.resolve_submission(POSTING.ref, "failed", "never sent"))["state"] == "failed"
+    assert (await e2.resolve_submission(POSTING.ref, "failed", "never sent", actor="human"))["state"] == "failed"
     out2 = await e2.plan(POSTING.ref)                                        # failed -> may be retried
     assert (await e2.submit(POSTING.ref, EXTRA, out2.approval_id, dry_run=False)).status == "submitted"
 
@@ -233,17 +215,125 @@ async def test_needs_human_result_becomes_handoff():
     assert e.approvals.state(POSTING.ref)["state"] == "handoff"
 
 
-def test_cli_approve_deny_resolve(tmp_path, capsys):
+class _Tty:
+    def __init__(self, tty):
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+def _run(argv, tmp_path, answers=(), tty=True):
+    it = iter(answers)
+    return cli(argv, tmp_path, stdin=_Tty(tty), stdout=_Tty(tty), input_fn=lambda prompt: next(it))
+
+
+def test_cli_refuses_without_tty_and_needs_typed_confirmation(tmp_path, capsys):
     book = ApprovalBook(tmp_path)
     aid = book.issue("r1", "u", "Acme", "Eng", {"a": "1"})
-    assert cli(["pending"], tmp_path) == 0 and aid in capsys.readouterr().out
-    assert cli(["approve", aid], tmp_path) == 0
+    assert _run(["pending"], tmp_path, tty=False) == 0 and aid in capsys.readouterr().out
+    for cmd in (["approve", aid], ["deny", aid], ["resolve", "r1", "failed"]):
+        assert _run(cmd, tmp_path, tty=False) == 3
+    assert "refused" in capsys.readouterr().out and ApprovalBook(tmp_path).get(aid).status == "pending"
+    assert _run(["approve", aid], tmp_path, ["wrong"]) == 1 and ApprovalBook(tmp_path).get(aid).status == "pending"
+    assert _run(["approve", aid], tmp_path, ["acme"]) == 0                # full summary printed, typed company
+    assert '"company": "Acme"' in capsys.readouterr().out
     assert ApprovalBook(tmp_path).get(aid).approved_by == "human:cli"
-    assert cli(["approve", "nope"], tmp_path) == 1
-    assert cli(["deny", aid], tmp_path) == 0 and ApprovalBook(tmp_path).get(aid).status == "denied"
+    assert _run(["approve", "nope"], tmp_path) == 1
+    assert _run(["deny", aid], tmp_path, ["y"]) == 0 and ApprovalBook(tmp_path).get(aid).status == "denied"
     book.set_state("r1", "unknown")
-    assert cli(["resolve", "r1", "failed", "checked"], tmp_path) == 0
-    assert cli([ "bogus"], tmp_path) == 2
+    assert _run(["resolve", "r1", "failed", "checked"], tmp_path, ["nope"]) == 1
+    assert _run(["resolve", "r1", "failed", "checked"], tmp_path, ["failed"]) == 0
+    assert _run(["bogus"], tmp_path) == 2
+
+
+def test_cli_dispatch_via_main_entry(tmp_path, monkeypatch):
+    from job_apply_mcp import cli as entry
+    monkeypatch.setenv("JOB_APPLY__PATHS__DATA_DIR", str(tmp_path))
+    with pytest.raises(SystemExit) as ei:
+        entry.main(["approve", "x"])        # pytest stdin is not a TTY
+    assert ei.value.code == 3
+
+
+async def test_agent_resolve_needs_agent_mode_and_evidence(tmp_path):
+    e, _ = make(apply__approval_mode="human")
+    await e.plan(POSTING.ref)
+    e.approvals.set_state(POSTING.ref, "unknown")
+    r = await e.resolve_submission(POSTING.ref, "failed", "x")                  # agent in human mode
+    assert "human-only" in r["error"] and e.approvals.state(POSTING.ref)["state"] == "unknown"
+    e2, _ = make(apply__approval_mode="agent", paths__data_dir=str(tmp_path))
+    await e2.plan(POSTING.ref)
+    e2.approvals.set_state(POSTING.ref, "unknown")
+    assert "evidence" in (await e2.resolve_submission(POSTING.ref, "failed", "x"))["error"]
+    ev = tmp_path / "evidence" / hashlib.sha256(POSTING.ref.encode()).hexdigest()[:12]
+    ev.mkdir(parents=True)
+    assert "error" in await e2.resolve_submission(POSTING.ref, "failed", "x", evidence="/tmp/elsewhere")
+    r = await e2.resolve_submission(POSTING.ref, "failed", "x", evidence=str(ev))
+    assert r["state"] == "failed"
+    assert any(x["event"] == "resolved" and x["actor"] == "agent" for x in e2.approvals.audit_rows(POSTING.ref))
+
+
+def test_resolve_tool_absent_in_human_mode_and_legacy_token_errors(monkeypatch):
+    import asyncio
+
+    from job_apply_mcp import server
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert "resolve_submission" not in names                        # default mode is human
+    out = json.loads(asyncio.run(server.submit_application(None, "greenhouse:acme:1", token="abc")))
+    assert out["status"] == "error" and "no longer accepted" in out["detail"] and "approval_id" in out["detail"]
+
+
+def _cfg(tmp_path, monkeypatch, user="", proj="", env=None):
+    u = tmp_path / "user.toml"
+    u.write_text(user)
+    pd = tmp_path / "proj"
+    pd.mkdir(exist_ok=True)
+    (pd / "job-apply-mcp.toml").write_text(proj)
+    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(u))
+    for k, v in (env or {}).items():
+        monkeypatch.setenv(k, v)
+    return load_settings(pd)
+
+
+def test_security_settings_relax_only_from_user_config(tmp_path, monkeypatch, caplog):
+    relax = ('dry_run = false\n[apply]\napproval_mode = "agent"\nauto_approve = true\n'
+             '[control]\napply_enabled = true\ndev_mode = false\n')
+    strict_user = 'dry_run = true\n[control]\napply_enabled = false\ndev_mode = true\n[apply]\napproval_mode="human"\n'
+    with caplog.at_level("WARNING"):
+        s = _cfg(tmp_path, monkeypatch, user=strict_user, proj=relax)
+    assert s.dry_run and s.apply.approval_mode == "human" and not s.apply.auto_approve
+    assert not s.control.apply_enabled and s.control.dev_mode
+    assert "job-apply-mcp.toml" in caplog.text and "IGNORED" in caplog.text
+    env = {"JOB_APPLY__DRY_RUN": "false", "JOB_APPLY__APPLY__APPROVAL_MODE": "agent",
+           "JOB_APPLY__CONTROL__DEV_MODE": "false", "JOB_APPLY__CONTROL__APPLY_ENABLED": "true"}
+    s = _cfg(tmp_path, monkeypatch, user=strict_user, env=env)
+    assert s.dry_run and s.apply.approval_mode == "human" and s.control.dev_mode and not s.control.apply_enabled
+    s = _cfg(tmp_path, monkeypatch, user=relax)                      # user file may relax (and it is logged)
+    assert not s.dry_run and s.apply.approval_mode == "agent" and s.apply.auto_approve
+    s = _cfg(tmp_path, monkeypatch, user=relax, proj='dry_run = true\n[apply]\napproval_mode = "human"\n')
+    assert s.dry_run and s.apply.approval_mode == "human"            # project/env may tighten
+
+
+async def test_adapter_error_before_dispatch_is_failed_after_dispatch_unknown():
+    class ErrAdapter(FakeAdapter):
+        async def submit(self, form, answers, files, *, dry_run=True):
+            self.submits.append(1)
+            from job_apply_mcp.core.models import SubmitResult
+            return SubmitResult(ref=form.ref, status="error", via="api", detail="HTTP 500")
+    e, ad = make(adapter=ErrAdapter())
+    out = await e.plan(POSTING.ref)
+    r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert r.status == "error" and ad.submits and e.approvals.state(POSTING.ref)["state"] == "unknown"
+    # no driver and no api path: nothing was dispatched, so an error is retryable (failed), not unknown
+    e2, _ = make()
+    out = await e2.plan(POSTING.ref)
+
+    async def pre(ctx, eff, dry):
+        from job_apply_mcp.core.models import SubmitResult
+        return SubmitResult(ref=ctx.form.ref, status="error", detail="could not start")
+    e2._dispatch = pre
+    r = await e2.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert e2.approvals.state(POSTING.ref)["state"] == "failed"
 
 
 async def test_server_elicit_approver_handles_unsupported_client():

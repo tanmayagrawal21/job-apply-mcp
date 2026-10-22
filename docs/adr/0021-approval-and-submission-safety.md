@@ -41,3 +41,16 @@ stored only as hashes plus a truncated summary for the approver. `apply_batch` r
 ## Verify / revert
 `uv run pytest tests/test_approvals.py tests/test_apply_engine.py` (includes a test that a client-computed sha256 token
 is rejected). Revert: revert the PR; ADR-0011 behavior returns (and with it the forgeable token, so do not).
+
+## Amendment 1 (adversarial review)
+1. **Relax only from the user config.** `apply.approval_mode`, `apply.auto_approve`, global `dry_run=false`,
+   `control.apply_enabled=true` and `control.dev_mode=false` are dropped (with a warning naming the source) when they come
+   from a project `job-apply-mcp.toml` or `JOB_APPLY__*` env; stricter values from those sources are honored. Relaxed
+   values from the user file are logged at startup.
+2. **CLI is human-only.** `approve`/`deny`/`resolve` refuse unless stdin and stdout are TTYs, print the full summary and
+   need a typed confirmation (company name / outcome); there is no `--yes`. `pending` is read-only.
+3. **`resolve_submission` tool** exists only when `approval_mode="agent"`; it requires the ref's evidence folder path and
+   is audit-logged (refusals too). In human mode resolving is CLI-only.
+4. A legacy `token=` argument to `submit_application` returns an explicit migration error.
+5. Adapter/driver `error` and exceptions map to `unknown` only after the adapter/driver call was dispatched; before that
+   they map to `failed` (retryable after review). Tested both ways.

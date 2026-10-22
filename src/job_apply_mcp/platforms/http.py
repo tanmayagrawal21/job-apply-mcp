@@ -156,7 +156,7 @@ class HttpClient:
             return None
         self._prune_once()
         try:
-            return json.loads(self._path(key).read_text())
+            return json.loads(self._path(key).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
 
@@ -166,7 +166,7 @@ class HttpClient:
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             tmp = self._path(key).with_suffix(f".{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(entry))
+            tmp.write_text(json.dumps(entry), encoding="utf-8")
             tmp.replace(self._path(key))
         except OSError:
             pass  # cache is best-effort
@@ -179,7 +179,7 @@ class HttpClient:
         try:
             for p in self.cache_dir.glob("*.json"):
                 try:
-                    if json.loads(p.read_text()).get("at", 0) < cutoff:
+                    if json.loads(p.read_text(encoding="utf-8")).get("at", 0) < cutoff:
                         p.unlink()
                 except (OSError, ValueError):
                     p.unlink(missing_ok=True)

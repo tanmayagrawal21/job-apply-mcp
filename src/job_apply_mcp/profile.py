@@ -143,4 +143,4 @@ def load_profile(path: str | Path) -> Profile:
     p = Path(path).expanduser()
     if not p.is_file():
         raise FileNotFoundError(f"profile not found: {p} (copy examples/profile.example.toml)")
-    return Profile.model_validate(tomllib.loads(p.read_text()))
+    return Profile.model_validate(tomllib.loads(p.read_text(encoding="utf-8")))

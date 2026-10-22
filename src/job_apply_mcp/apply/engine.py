@@ -594,8 +594,18 @@ class ApplyEngine:
             return SubmitResult(ref=ref, status="error", detail=f"{type(e).__name__}: {e}"[:200])
 
     async def resolve_submission(self, ref: str, outcome: str = "", note: str = "",
-                                 actor: str = "agent") -> dict[str, Any]:
-        """Inspect (no outcome) or resolve a ref stuck in submitting/unknown. Never auto-called."""
+                                 actor: str = "agent", evidence: str = "") -> dict[str, Any]:
+        """Inspect (no outcome) or resolve a ref stuck in submitting/unknown. Never auto-called.
+        The agent path exists only in approval_mode="agent" and must cite the ref's evidence folder."""
+        if outcome and actor == "agent":
+            ev = evidence_path(self.s.paths.data_dir, ref)
+            if self.s.apply.approval_mode != "agent":
+                self.approvals.audit("resolve_refused", ref=ref, actor="agent", detail="human mode")
+                return {"ref": ref, "error": "resolve_submission is human-only (CLI) in approval_mode=human"}
+            if not ev or evidence != ev:
+                self.approvals.audit("resolve_refused", ref=ref, actor="agent", detail=f"bad evidence {evidence!r}")
+                return {"ref": ref, "error": "evidence must be the ref's evidence folder", "evidence": ev}
+            note = f"{note} [evidence={evidence}]"
         if outcome:
             ok, msg = self.approvals.resolve(ref, outcome, note, actor)
             cur = self.approvals.state(ref)

@@ -220,8 +220,9 @@ class Services:
                "state": st["state"] if st else None, "t": self.engine.timings.get(ref_or_url)}
         return {k: v for k, v in row.items() if v}
 
-    async def resolve_submission(self, ref: str, outcome: str, note: str, actor: str) -> dict[str, Any]:
-        return await self.engine.resolve_submission(ref, outcome, note, actor)
+    async def resolve_submission(self, ref: str, outcome: str, note: str, actor: str,
+                                  evidence: str = "") -> dict[str, Any]:
+        return await self.engine.resolve_submission(ref, outcome, note, actor, evidence)
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
         return {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}

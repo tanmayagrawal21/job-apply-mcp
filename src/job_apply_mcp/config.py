@@ -2,7 +2,7 @@
 
 Precedence, lowest to highest:
   1. built-in defaults (this file)
-  2. user file   ~/.config/job-apply-mcp/config.toml   (or $JOB_APPLY_MCP_CONFIG)
+  2. user file   <config dir>/config.toml (see paths.py; or $JOB_APPLY_MCP_CONFIG)
   3. project file ./job-apply-mcp.toml
   4. environment variables  JOB_APPLY__SECTION__KEY=value   (double underscore = nesting)
   5. per-call tool arguments (where a tool exposes them)
@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from . import paths
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +118,7 @@ class LLMCfg(BaseModel):
         "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
         "anthropic": {"api_key_env": "ANTHROPIC_API_KEY"},
-        "hf_local": {"device": "mps"},
+        "hf_local": {"device": "auto"},
     })
 
 
@@ -196,8 +198,8 @@ class IngestCfg(BaseModel):
 
 
 class PathsCfg(BaseModel):
-    data_dir: str = "~/.local/share/job-apply-mcp"
-    profile: str = "~/.config/job-apply-mcp/profile.toml"
+    data_dir: str = Field(default_factory=paths.default_data_dir_str)
+    profile: str = Field(default_factory=lambda: paths.default_config_dir_str() + "/profile.toml")
     resume: str | None = None
 
 
@@ -258,7 +260,7 @@ class ApplyCfg(BaseModel):
 class BrowserCfg(BaseModel):
     driver: str = "playwright"
     fallback_driver: str | None = "browser_use"   # used for sites the primary driver does not know
-    user_data_dir: str = "~/.local/share/job-apply-mcp/browser-profile"
+    user_data_dir: str = Field(default_factory=lambda: paths.default_data_dir_str() + "/browser-profile")
     headless: bool = False
     keep_pages_open: bool = False       # debugging: leave the job's tab open
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
@@ -415,24 +417,47 @@ def _coerce(v: str) -> Any:
     return v
 
 
-def _strip_auto_approve(d: dict, source: str) -> dict:
-    """auto_approve is honored only from the user config file (ADR-0021)."""
-    if isinstance(d.get("apply"), dict) and "auto_approve" in d["apply"]:
-        d["apply"] = {k: v for k, v in d["apply"].items() if k != "auto_approve"}
-        log.warning("apply.auto_approve ignored from %s: it can only be set in the user config file", source)
-    return d
+# Security-relevant settings: (section, key) -> predicate "value is the SAFE (strict) one". A project file or
+# environment variable may only set the safe value; relaxing needs the user-level config file (ADR-0021).
+_SAFE: dict[tuple[str | None, str], Any] = {
+    ("apply", "auto_approve"): lambda v: v is False,
+    ("apply", "approval_mode"): lambda v: v == "human",
+    (None, "dry_run"): lambda v: v is True,
+    ("control", "apply_enabled"): lambda v: v is False,
+    ("control", "dev_mode"): lambda v: v is True,
+}
+
+
+def _restrict(d: dict, source: str) -> dict:
+    """Drop values that would relax a security setting; log each. Stricter values pass."""
+    out = dict(d)
+    for (sect, key), safe in _SAFE.items():
+        tgt = out.get(sect) if sect else out
+        if isinstance(tgt, dict) and key in tgt and not safe(tgt[key]):
+            log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
+                        f"{sect}." if sect else "", key, tgt[key], source)
+            if sect:
+                out[sect] = {k: v for k, v in tgt.items() if k != key}
+            else:
+                out = {k: v for k, v in out.items() if k != key}
+    return out
 
 
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
-    user = Path(os.environ.get("JOB_APPLY_MCP_CONFIG", "~/.config/job-apply-mcp/config.toml")).expanduser()
+    user = paths.config_file()
     if user.is_file():
-        data = _deep_merge(data, tomllib.loads(user.read_text()))
+        data = _deep_merge(data, tomllib.loads(user.read_text(encoding="utf-8")))
     proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
-    if proj.is_file() and proj != user:
-        data = _deep_merge(data, _strip_auto_approve(tomllib.loads(proj.read_text()), str(proj)))
-    data = _deep_merge(data, _strip_auto_approve(_env_overrides(), "environment"))
+    if proj.is_file() and proj.resolve() != user.resolve():
+        data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj)))
+    data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)"))
     s = Settings.model_validate(data)
+    for (sect, key), safe in _SAFE.items():       # log where each relaxed value came from
+        v = getattr(getattr(s, sect) if sect else s, key)
+        if not safe(v):
+            log.warning("security setting %s%s=%r is relaxed (set in user config %s)",
+                        f"{sect}." if sect else "", key, v, user)
     if s.apply.auto_approve:
         if s.apply.approval_mode == "human":
             log.warning("apply.auto_approve=true is IGNORED because apply.approval_mode='human'")
