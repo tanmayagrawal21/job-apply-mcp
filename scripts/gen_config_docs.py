@@ -119,6 +119,17 @@ def render() -> str:
             lines += [doc.split("\n\n")[0].replace("\n", " "), ""]
         if rows:
             lines += ["| Key | Type | Default | Notes |", "|---|---|---|---|", *[r.replace("\n", " ") for r in rows], ""]
+    lines += ["## Profile `[preferences]` (profile.toml)", "",
+              "Yes/no facts in your profile, not in config.toml. Unset (`None`) leaves the matching question unresolved.", "",
+              "| Key | Type | Default | Notes |", "|---|---|---|---|",
+              "| `willing_to_relocate` | `bool \\| None` | `none` |  |",
+              "| `needs_relocation_support` | `bool \\| None` | `none` |  |",
+              "| `open_to_hybrid` | `bool \\| None` | `none` |  |",
+              "| `open_to_onsite` | `bool \\| None` | `none` |  |",
+              ("| `acknowledge_privacy_notices` | `bool \\| None` | `none` | `true` lets the mapper tick/choose the "
+               "acknowledgement on applicant privacy notices only (ADR-0034). Never attestations (`policy.stop_phrases`), "
+               "truthfulness, AI-use, background/drug-check, arbitration, terms-of-employment or marketing/talent-community "
+               "opt-ins. `none`/`false`: such questions stay unresolved. |"), ""]
     return "\n".join(lines).rstrip() + "\n"
 
 

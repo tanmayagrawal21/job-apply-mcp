@@ -241,7 +241,8 @@ class ApplyEngine:
         with self._stage(ref, "map"):  # deterministic first
             mapped = map_fields(rest, self.profile, referral_preference=self.s.apply.referral_preference,
                                 min_score=self.s.apply.option_min_score,
-                                company=ctx.posting.company, top_languages=self.s.apply.top_languages)
+                                company=ctx.posting.company, top_languages=self.s.apply.top_languages,
+                                stop_phrases=self.s.policy.stop_phrases)
         answers = sal_answers + list(mapped.answers)
         short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in mapped.unresolved if f not in short]
