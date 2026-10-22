@@ -347,3 +347,97 @@ async def test_visible_challenge_after_click_is_roadblock_tab_left_open(drv, res
                                     dry_run=False)
     assert res.status == "roadblock" and "do NOT retry" in res.detail, res.detail
     assert srv.posts == 0 and len(drv._ctx.pages) > n0 - 1 and any(p.url.startswith("http://127") for p in drv._ctx.pages)
+
+
+# ---- fail-closed classification (ADR-0036 review round)
+
+async def _state(drv, html):
+    page = await (await drv._context()).new_page()
+    try:
+        await page.set_content(html)
+        return await drv._captcha_state(page)
+    finally:
+        await page.close()
+
+
+def _unsafe(st):
+    return bool(st["unsafe"]) or bool(st["visible"])
+
+
+async def test_classifier_error_fails_closed(drv, resume, monkeypatch):
+    from job_apply_mcp.apply import browser_playwright as bp
+    monkeypatch.setattr(bp, "_CAPTCHA_JS", "() => { throw new Error('boom'); }")
+    st = await _state(drv, "<html><body>x</body></html>")
+    assert st["unsafe"] == ["classifier-error"]
+    drv.b.captcha_handoff, drv.b.captcha_policy = True, "attempt"
+    srv = Srv(page(extra=PASSIVE), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:err"}), ANS, resume,
+                                    dry_run=False)
+    assert res.status in ("handoff", "needs_human") and srv.posts == 0
+
+
+@pytest.mark.parametrize("snippet", [
+    "<iframe src='about:blank#arkoselabs.com/fc/gt2'></iframe>",
+    "<iframe src='about:blank#funcaptcha'></iframe>",
+    "<iframe src='about:blank#geetest'></iframe>",
+    "<iframe src='about:blank#some-bot-check'></iframe>",
+    "<iframe src='about:blank#verify-you'></iframe>",
+    "<div class='geetest_holder'></div>",
+    "<div class='arkose-enforcement'></div>",
+    "<script src='/assets/datadome.js'></script>",
+    "<script src='/assets/px-client.js'></script>",
+    "<script src='/kasada/ips.js'></script>",
+    "<script src='/awswaf/captcha.js'></script>"])
+async def test_unknown_vendors_are_unsafe_even_next_to_a_passive_badge(drv, snippet):
+    badge = "<div class='grecaptcha-badge'></div>"
+    st = await _state(drv, f"<html><body>{badge}{snippet}</body></html>")
+    assert st["unsafe"], st
+
+
+async def test_shadow_root_and_nested_iframe_are_inspected(drv):
+    shadow = ("<div id=h></div><script>const r=document.getElementById('h').attachShadow({mode:'open'});"
+              "r.innerHTML=\"<iframe src='about:blank#funcaptcha' style='width:300px;height:100px'></iframe>\";</script>")
+    assert (await _state(drv, f"<html><body>{shadow}</body></html>"))["unsafe"]
+    shadow_rc = ("<div id=h></div><script>const r=document.getElementById('h').attachShadow({mode:'open'});"
+                 "r.innerHTML=\"<iframe src='about:blank#recaptcha/api2/anchor' style='width:300px;height:80px'>"
+                 "</iframe>\";</script>")
+    assert (await _state(drv, f"<html><body>{shadow_rc}</body></html>"))["visible"] == ["recaptcha"]
+    nested = ("<iframe srcdoc=\"<iframe src='about:blank#geetest'></iframe>\" style='width:300px;height:100px'>"
+              "</iframe>")
+    st = None
+    for _ in range(20):                                    # child frame loads asynchronously
+        st = await _state(drv, f"<html><body>{nested}</body></html>")
+        if st["unsafe"]:
+            break
+    assert st["unsafe"], st
+
+
+async def test_visibility_must_be_positive(drv):
+    zero = "<iframe src='about:blank#recaptcha/api2/anchor' style='width:0;height:0'></iframe>"
+    off = "<iframe src='about:blank#recaptcha/api2/anchor' style='position:fixed;left:-9999px;width:300px;height:80px'></iframe>"
+    hidden_hc = "<iframe src='about:blank#hcaptcha/checkbox' style='width:0;height:0'></iframe>"
+    undeclared_hc = "<div class='h-captcha'></div><script src='/hcaptcha/api.js'></script>"
+    ts = "<div class='cf-turnstile'></div><script src='/turnstile/api.js'></script>"
+    for h in (zero, off, hidden_hc, undeclared_hc, ts):
+        assert _unsafe(await _state(drv, f"<html><body>{h}</body></html>")), h
+    # known-passive types are accepted
+    ok = [PASSIVE_HTML_BADGE, "<script src='/recaptcha/api.js?render=KEY'></script>",
+          "<div class='h-captcha' data-size='invisible'></div>",
+          "<div class='cf-turnstile' data-appearance='interaction-only'></div>"]
+    for h in ok:
+        st = await _state(drv, f"<html><body>{h}</body></html>")
+        assert not _unsafe(st) and st["widgets"], (h, st)
+
+
+PASSIVE_HTML_BADGE = ("<div class='grecaptcha-badge'><iframe src='about:blank#recaptcha/api2/anchor?size=invisible' "
+                      "style='width:0;height:0'></iframe></div>")
+
+
+async def test_attempt_click_without_confirmation_is_roadblock_never_handoff(drv, resume):
+    drv.b.captcha_handoff, drv.b.captcha_policy = True, "attempt"
+    drv.b.confirmation_wait_s = 2
+    srv = Srv(page(extra=PASSIVE), "{}")                   # ambiguous response, form stays: no confirmation
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:nc"}), ANS, resume,
+                                    dry_run=False)
+    assert srv.posts == 1
+    assert res.status == "roadblock" and "do NOT retry" in res.detail, (res.status, res.detail)

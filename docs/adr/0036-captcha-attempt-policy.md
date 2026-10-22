@@ -23,6 +23,16 @@ visible challenges to be touched.
   trusted, user-owned default config file. Project files, `JOB_APPLY__*` env and `JOB_APPLY_MCP_CONFIG`-selected files
   are ignored for it (logged) and the value stays `handoff`.
 
+## Fail-closed classification (review amendment)
+Only a positive allowlist counts as passive: reCAPTCHA badge / invisible iframe / script-only with no checkbox
+container, and hCaptcha / Turnstile explicitly declared invisible / interaction-only with no shown frame. Everything
+else means HANDOFF: any classifier error, unknown vendors (Arkose/FunCaptcha, GeeTest, DataDome, PerimeterX/HUMAN,
+Kasada, AWS WAF, or any iframe src matching captcha|challenge|verify|bot), widgets that are unrendered, zero-size,
+off-screen or otherwise inconclusive, frames that cannot be inspected. Open shadow roots and non-vendor child frames
+are inspected (vendor frames are never evaluated). Known gap: closed shadow roots cannot be inspected. Ashby with no
+detected widget also hands off under `attempt`. After an attempt click, "no confirmation" returns `roadblock`
+(engine `unknown`), never `needs_human`/`handoff`, which could be re-planned and re-entered.
+
 ## ABSOLUTE limits (apply to every setting, now and later)
 No solving or solver services. No interacting with challenge frames. No stealth or fingerprint plugins. No
 webdriver or user-agent spoofing. No automation-flag removal. No token injection. No retries to improve a score.
