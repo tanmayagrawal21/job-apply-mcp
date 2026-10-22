@@ -1,3 +1,5 @@
+import os
+
 import httpx
 import pytest
 import respx
@@ -58,11 +60,19 @@ async def test_retries_stale_if_error_and_no_retry_for_forms(tmp_path):
 
 
 @respx.mock
-async def test_errors_hide_query_string_and_404_not_cached(http):
-    respx.get("https://x.test/k").respond(404)
-    with pytest.raises(HttpError) as ei:
-        await http.get_json("https://x.test/k", params={"key": "SECRET"})
-    assert "SECRET" not in str(ei.value) and ei.value.status == 404
+async def test_errors_hide_query_string_and_404_is_negatively_cached(tmp_path):
+    now = [1000.0]
+    c = HttpClient(cache_dir=tmp_path, ttl_s=60, backoff_s=0, clock=lambda: now[0])
+    r = respx.get("https://x.test/k").respond(404)
+    for _ in range(2):   # ADR-0043: a dead board costs one request per TTL, not one per search
+        with pytest.raises(HttpError) as ei:
+            await c.get_json("https://x.test/k", params={"key": "SECRET"})
+        assert "SECRET" not in str(ei.value) and ei.value.status == 404
+    assert r.call_count == 1
+    now[0] += 120
+    r.respond(json={"back": True})   # the board came back: the stale negative entry is refetched, never served
+    assert await c.get_json("https://x.test/k", params={"key": "SECRET"}) == {"back": True} and r.call_count == 2
+    await c.aclose()
 
 
 @respx.mock
@@ -76,6 +86,7 @@ async def test_limiter_is_used_and_prune(tmp_path):
 
     now = [10 * 86400.0]
     (tmp_path / "old.json").write_text('{"at": 0, "body": "1"}')
+    os.utime(tmp_path / "old.json", (0, 0))   # pruning reads the file mtime, never the body (ADR-0043)
     c = HttpClient(cache_dir=tmp_path, limiter=L(per_host=1), prune_days=7, clock=lambda: now[0])
     respx.get("https://x.test/z").respond(json=1)
     await c.get_json("https://x.test/z")

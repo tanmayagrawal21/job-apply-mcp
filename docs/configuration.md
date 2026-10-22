@@ -31,6 +31,7 @@ Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless
 | `location_order` | `list[str]` | `[]` | preferred location substrings, best first |
 | `rank_candidates` | `int` | `40` | description-fetch + full scoring for the top N by the cheap pre-score |
 | `description_concurrency` | `int` | `6` | bounded parallel description fetches (also capped by the host limiter) |
+| `board_timeout_s` | `float` | `60.0` | one board's fetch+parse budget; a slower board is reported in errors (ADR-0043) |
 | `min_score` | `float` | `0.0` | drop rows scoring below this (0-100); 0 keeps everything with a query hit |
 | `weights` | `dict[str, float]` | `{"query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency"...` |  |
 | `recency_half_life_days` | `float` | `14.0` |  |
@@ -83,7 +84,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `global_limit` | `int` | `32` | max concurrent outbound tasks (board fan-out) |
+| `global_limit` | `int` | `48` | max concurrent outbound tasks (board fan-out); >= the per-host caps summed |
 | `per_host` | `int` | `4` | max concurrent requests per host |
 | `min_interval_s` | `float` | `0.25` | polite spacing per host |
 | `hosts` | `dict[str, HostLimitCfg]` | `{"boards-api.greenhouse.io": {"per_host": 16, "min_interval_s": 0.02}, "api.ashbyhq.com...` | per-host overrides of the two knobs above |
@@ -247,6 +248,7 @@ Platform adapter knobs (ADR-0007). API keys are never here: they come from the e
 |---|---|---|---|
 | `cache_ttl_s` | `int` | `900` | on-disk HTTP cache freshness; stale entries are revalidated by ETag |
 | `cache_prune_days` | `int` | `7` | cache files untouched for this long are deleted at startup |
+| `memo_boards` | `int` | `4096` | boards whose finished postings stay in memory between searches (ADR-0043) |
 | `timeout_s` | `float` | `20.0` |  |
 | `retries` | `int` | `2` | idempotent requests only; form submissions are never retried |
 | `backoff_s` | `float` | `0.5` |  |

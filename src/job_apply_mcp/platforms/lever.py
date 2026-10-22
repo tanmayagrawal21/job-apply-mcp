@@ -53,15 +53,25 @@ class LeverAdapter(BaseAdapter):
             ref=self.ref(board, d["id"]), company=board, title=d.get("text", ""),
                  location=cat.get("location") or "", url=d.get("hostedUrl") or f"https://jobs.lever.co/{board}/{d['id']}",
                  apply_url=d.get("applyUrl") or f"https://jobs.lever.co/{board}/{d['id']}/apply",
-                 posted_at=iso_date(d.get("createdAt")))
+                 posted_at=self._posted(d))
+
+    @staticmethod
+    def _posted(d: dict) -> str | None:
+        return iso_date(d.get("createdAt"))
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:
-        data = await self._get(f"{API}/{board}", {"mode": "json"})
-        for d in data if isinstance(data, list) else []:
-            p = self._to_posting(board, d, with_description=with_description)
-            if not_before(p.posted_at, since):
-                yield p
+        def derive(data: Any) -> list[Posting]:
+            return [self._to_posting(board, d, with_description=with_description)
+                    for d in (data if isinstance(data, list) else []) if not_before(self._posted(d), since)]
+
+        try:   # finished postings are memoized per response digest (ADR-0043)
+            postings = await self.http.get_derived(f"{API}/{board}", derive, params={"mode": "json"},
+                                                   tag=f"{self.name}:{with_description}:{since}")
+        except HttpError as e:
+            raise AdapterError("posting not found (closed or moved)" if e.status == 404 else str(e)) from e
+        for p in postings:
+            yield p
 
     async def get_posting(self, url_or_ref: str, *, with_description: bool = False) -> Posting:
         board, pid = self._need_job(url_or_ref)
