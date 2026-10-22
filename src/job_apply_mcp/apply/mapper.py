@@ -591,18 +591,28 @@ def auth_core(label: str, job_in_us: bool = False) -> str | None:
     return q if auth_place_ok(q) else None
 
 
-# ADR-0040 (review): deny-by-default US posting location. A "City, ST" code counts on its own only when it is not also
-# an ISO-3166 country code; an ambiguous code (CA, IN, DE, LA, ...) needs a known US city in front of it.
-_US_STATE_CODES_UNAMBIGUOUS = frozenset(["ak", "ct", "fl", "hi", "ia", "ks", "mi", "nv", "nh", "nj", "nm", "ny", "nd",
-                                         "oh", "ok", "or", "ri", "tx", "ut", "vt", "wa", "wv", "wi", "wy", "dc"])
-# also ISO-3166 alpha-2 country codes: AL AR AZ CA CO DE GA ID IL IN KY LA MA MD ME MN MO MS MT NC NE PA SC SD TN VA
+# ADR-0040 (review): deny-by-default US posting location. A "City, ST" code counts on its own only when it collides with
+# no ISO-3166 country code and no common subdivision code elsewhere; an ambiguous code needs a city from a small explicit
+# US city table. Collisions: ISO countries (AL AR AZ CA CO DE GA ID IL IN KY LA MA MD ME MN MO MS MT NC NE PA SC SD TN
+# VA), Australia (WA), India (CT, OR, UT, plus AR GA MN TN), Italian provinces (CT, MI, OR, RI, VT, plus AL CO ME MO PA),
+# Brazil (AL MA MS MT PA SC). Canadian province codes (AB BC MB NB NL NS NT NU ON PE QC SK YT) share no US code.
+_US_STATE_CODES_UNAMBIGUOUS = frozenset(["ak", "fl", "hi", "ia", "ks", "nv", "nh", "nj", "nm", "ny", "nd", "oh", "ok",
+                                         "tx", "wv", "wi", "wy", "dc"])
 _US_CITY_STATE = frozenset([("san francisco", "ca"), ("los angeles", "ca"), ("san diego", "ca"), ("san jose", "ca"),
                             ("palo alto", "ca"), ("mountain view", "ca"), ("sunnyvale", "ca"), ("long beach", "ca"),
-                            ("chicago", "il"), ("boston", "ma"), ("cambridge", "ma"), ("atlanta", "ga"),
-                            ("denver", "co"), ("boulder", "co"), ("philadelphia", "pa"), ("pittsburgh", "pa"),
-                            ("baltimore", "md"), ("indianapolis", "in"), ("new orleans", "la"), ("minneapolis", "mn"),
-                            ("arlington", "va"), ("phoenix", "az"), ("nashville", "tn"), ("charlotte", "nc"),
-                            ("raleigh", "nc"), ("louisville", "ky"), ("st louis", "mo"), ("boise", "id")])
+                            ("chicago", "il"), ("boston", "ma"), ("atlanta", "ga"), ("denver", "co"),
+                            ("boulder", "co"), ("philadelphia", "pa"), ("pittsburgh", "pa"), ("baltimore", "md"),
+                            ("indianapolis", "in"), ("new orleans", "la"), ("minneapolis", "mn"), ("arlington", "va"),
+                            ("phoenix", "az"), ("nashville", "tn"), ("charlotte", "nc"), ("raleigh", "nc"),
+                            ("louisville", "ky"), ("st louis", "mo"), ("boise", "id"), ("seattle", "wa"),
+                            ("redmond", "wa"), ("bellevue", "wa"), ("spokane", "wa"), ("tacoma", "wa"),
+                            ("hartford", "ct"), ("stamford", "ct"), ("new haven", "ct"), ("detroit", "mi"),
+                            ("ann arbor", "mi"), ("grand rapids", "mi"), ("portland", "or"), ("eugene", "or"),
+                            ("salt lake city", "ut"), ("provo", "ut"), ("lehi", "ut"), ("burlington", "vt"),
+                            ("providence", "ri")])
+# well-known non-US cities that share a name with US places: only an explicit US marker makes them US
+_SHARED_CITY_NAMES = frozenset(["perth", "melbourne", "sydney", "london", "paris", "birmingham", "cambridge",
+                                "hamilton", "victoria", "vancouver", "kingston"])
 # full state names; "georgia" is also a country, so it is left out
 _US_STATE_NAMES = re.compile(
     r"\b(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|hawaii|idaho|illinois|"
@@ -623,6 +633,8 @@ def _part_is_us(part: str) -> bool:
     if not m:
         return False
     city, code = normalize(m.group(1)), m.group(2).lower()
+    if city in _SHARED_CITY_NAMES:
+        return False
     return code in _US_STATE_CODES_UNAMBIGUOUS or (city, code) in _US_CITY_STATE
 
 

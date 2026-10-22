@@ -307,10 +307,13 @@ def test_examples_and_notes_that_could_be_another_place_stay_unresolved():
 def test_job_country_phrases_resolve_only_for_a_us_only_posting():
     assert auth(AUTH_JOB_COUNTRY, job_in_us=True) == "Yes"
     assert auth(SPONS_THIS_COUNTRY, job_in_us=True) == "No"
-    for loc in ["New York, NY (HQ)", "Springfield, OH or Remote - US", "Paris, TX", "Vancouver, WA",
-                "San Francisco, CA", "Springfield, IL, USA", "US Remote", "Austin, Texas", "Remote - US"]:
+    for loc in ["New York, NY (HQ)", "Springfield, OH or Remote - US", "Paris, TX, USA", "Vancouver, WA, USA",
+                "San Francisco, CA", "Springfield, IL, USA", "US Remote", "Austin, Texas", "Remote - US",
+                "Seattle, WA", "Melbourne, FL, United States", "Cambridge, MA, US", "Houston, TX"]:
         assert location_is_us(loc), loc
     for loc in ["Toronto, CA", "Bengaluru, IN", "Berlin, DE", "Lagos, LA", "Vancouver, BC", "London, ON", "Remote",
+                "Perth, WA", "Perth, WA, Australia", "Melbourne, VIC", "Melbourne, FL", "Cambridge, UK", "Cambridge, MA",
+                "Paris, TX", "Vancouver, WA", "Milano, MI", "Spokane Valley, WA", "Adelaide, SA",
                 "Remote - Canada", "", "London, UK", "New York, NY; Toronto, ON", "Springfield, IL",
                 "Springfield, OH / Berlin, Germany", "Tbilisi, Georgia", "Sao Paulo, Latin America"]:
         assert not location_is_us(loc), loc

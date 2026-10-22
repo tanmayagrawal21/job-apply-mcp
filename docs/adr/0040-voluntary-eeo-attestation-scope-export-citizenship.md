@@ -63,8 +63,10 @@ A QA round (issues #47, #48, #51) found:
   "the country where the job is located", "this country" and "this location" as the US. The rest of ADR-0038's
   allow-list is unchanged. `location_is_us` is deny-by-default: every part of the posting location must say US/USA/
   United States, name a full US state (not "Georgia"), or be "City, ST" with a state code that is not also an
-  ISO-3166 country code; an ambiguous code (CA, IN, DE, LA, ...) counts only with a city from a small explicit US
-  city table. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
+  ISO-3166 country code or another country's subdivision code (Australia WA, India, Italian provinces, Brazil); an
+  ambiguous code (CA, IN, DE, LA, WA, MI, ...) counts only with a city from a small explicit US city table, and
+  well-known shared city names (Perth, Melbourne, Sydney, London, Paris, Birmingham, Cambridge, Hamilton, Victoria,
+  Vancouver, Kingston) need an explicit US marker. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an
