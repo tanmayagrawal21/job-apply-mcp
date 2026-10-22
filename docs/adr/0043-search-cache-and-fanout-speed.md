@@ -59,14 +59,18 @@ showed:
 ## Results (real MCP stdio, 1,887 boards, `since_days=21`)
 | run | before | after |
 |---|---|---|
-| cold (empty cache) | 333 s | 106 s |
-| warm, same server, inside TTL | 208 s | 1.5 s |
+| cold (empty cache) | 333 s | 149-154 s |
+| first warm repeat, same server (re-fetches Lever boards that timed out on the cold run) | 208 s | 14-28 s |
+| later warm repeats, same server, inside TTL | 208 s | 1.5 s |
 | warm, new server process (disk cache only) | n/a | 66 s |
+
+An earlier head with Lever `per_host=16` measured 106 s cold. That change was reverted in review (see 6).
 
 ## Consequences
 - The warm path is effectively free. A new process still parses the disk cache once: about 27 s of JSON decode and
   about 38 s of derive.
-- The cold path is now bound by Lever bandwidth (three boards take 55-92 s each) and by about 40 s of parse CPU.
+- The cold path is now bound by Lever bandwidth at 8 connections (three boards take 55-92 s each, and some hit the
+  60 s board timeout) and by about 40-60 s of parse CPU.
 - Possible follow-ups:
   - Parse in a process pool, off the event loop.
   - Page very large Lever boards in parallel.
