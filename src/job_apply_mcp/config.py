@@ -307,6 +307,7 @@ class BrowserCfg(BaseModel):
     evidence_text_chars: int = 20000    # cap on saved visible page text
     evidence_body_chars: int = 500      # cap on each saved submit-response body
     captcha_handoff: bool = True        # captcha-protected pages (always Ashby): never click submit; human does (ADR-0012). Tests only: False
+    captcha_policy: Literal["handoff", "attempt"] = "handoff"  # attempt: click Submit once if only an invisible widget (no visible challenge); trusted user config only (ADR-0036)
     presubmit_validation: bool = True   # read back fields + check visible validation errors before the submit click
     agent_max_steps: int = 40
     agent_tier: str = "medium"          # llm tier whose model drives the generic agent
@@ -529,6 +530,7 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("apply", "auto_approve"): lambda v: v is True,
     ("apply", "approval_mode"): lambda v: v == "agent",
     (None, "dry_run"): lambda v: v is False,
+    ("browser", "captcha_policy"): lambda v: v == "attempt",      # ADR-0036
     ("control", "apply_enabled"): lambda v: v is True,
     ("control", "dev_mode"): lambda v: v is False,
     ("grants", "max_duration_s"): lambda v: isinstance(v, (int, float)) and v > GRANT_MAX_DURATION_S,
