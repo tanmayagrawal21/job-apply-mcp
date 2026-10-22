@@ -5,7 +5,8 @@ compute one. Each record binds ref + destination URL + a hash of the final answe
 invalidates the record (it falls back to `pending`). In `approval_mode="human"` the record must additionally be
 marked by a human channel (MCP elicitation or the `job-apply-mcp approve <id>` CLI) before submit proceeds.
 
-Submission state per ref: planned -> approved -> submitting -> submitted | failed | unknown | handoff.
+Submission state per ref: planned -> approved -> submitting -> submitted | failed | unknown | handoff, plus the
+terminal `confirmed` (ADR-0025: set only by confirmation-email reconciliation, never by a click).
 `submitting` is persisted BEFORE the click. A ref left in submitting/unknown is never auto-resubmitted; only
 `resolve_submission` moves it on.
 """
@@ -21,8 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-STATES = ("planned", "approved", "submitting", "submitted", "failed", "unknown", "handoff")
-BLOCKING = ("submitting", "unknown", "submitted")        # begin_submit refuses these
+STATES = ("planned", "approved", "submitting", "submitted", "failed", "unknown", "handoff", "confirmed")
+BLOCKING = ("submitting", "unknown", "submitted", "confirmed")        # begin_submit refuses these
+RECONCILABLE = ("submitting", "unknown", "submitted", "handoff")      # ADR-0025: confirmation checks are scheduled
+DEFAULT_RECONCILE_DELAYS_MIN = (2, 10, 60)
 RESOLVABLE = ("submitting", "unknown")
 OUTCOMES = ("submitted", "failed", "handoff")
 
@@ -35,6 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_appr_ref ON approvals(ref);
 CREATE TABLE IF NOT EXISTS submissions(
   ref TEXT PRIMARY KEY, state TEXT NOT NULL, idem_key TEXT NOT NULL, approval_id TEXT, company TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '', detail TEXT, evidence TEXT, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS reconcile(
+  ref TEXT NOT NULL, idx INTEGER NOT NULL, t0 REAL NOT NULL, due REAL NOT NULL, done REAL, PRIMARY KEY(ref, idx));
 CREATE TABLE IF NOT EXISTS approval_audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, ref TEXT, approval_id TEXT, event TEXT NOT NULL,
   actor TEXT, detail TEXT);
@@ -83,7 +88,9 @@ class Approval:
 
 
 class ApprovalBook:
-    def __init__(self, data_dir: str | Path = ":memory:", *, ttl_s: int = 1800, clock=time.time):
+    def __init__(self, data_dir: str | Path = ":memory:", *, ttl_s: int = 1800, clock=time.time,
+                 reconcile_delays_min: tuple[float, ...] | list[float] = DEFAULT_RECONCILE_DELAYS_MIN):
+        self.reconcile_delays_min = tuple(reconcile_delays_min)
         if str(data_dir) == ":memory:":
             target = ":memory:"
         else:
@@ -212,6 +219,8 @@ class ApprovalBook:
             cur = self.state(ref)
             if cur and only_from is not None and cur["state"] not in only_from:
                 return False
+            if cur and cur["state"] == "confirmed" and state != "confirmed":
+                return False                      # terminal: nothing moves a confirmed submission
             if cur is None:
                 self._db.execute("INSERT INTO submissions VALUES(?,?,?,?,?,?,?,?,?)",
                                  (ref, state, idempotency_key(ref, url), approval_id, company, title, detail,
@@ -222,8 +231,55 @@ class ApprovalBook:
                     " title=COALESCE(NULLIF(?,''),title), detail=COALESCE(?,detail), evidence=COALESCE(?,evidence), updated=? "
                     "WHERE ref=?", (state, approval_id, company, title, detail, evidence, self._clock(), ref))
             self._db.commit()
+            if state in RECONCILABLE:
+                self.schedule_reconcile(ref)
         self.audit(f"state:{state}", ref=ref, approval_id=approval_id, detail=detail or "")
         return True
+
+    # ------------------------------------------------------------------ reconciliation schedule (ADR-0025)
+    def schedule_reconcile(self, ref: str) -> None:
+        """Idempotent: the first call per ref fixes t0 and the check times (t0 + each configured delay)."""
+        now = self._clock()
+        with self._lock:
+            for i, m in enumerate(self.reconcile_delays_min):
+                self._db.execute("INSERT OR IGNORE INTO reconcile(ref,idx,t0,due,done) VALUES(?,?,?,?,NULL)",
+                                 (ref, i, now, now + float(m) * 60))
+            self._db.commit()
+
+    def open_reconciliations(self) -> list[dict[str, Any]]:
+        """Submissions awaiting confirmation: reconcilable state, schedule present. Includes exhausted ones
+        (all checks done) so the caller can report them. Fields: ref, state, company, title, t0, due, pending."""
+        q = ("SELECT s.ref, s.state, s.company, s.title, MIN(r.t0) AS t0, "
+             "MIN(CASE WHEN r.done IS NULL THEN r.due END) AS due, "
+             "SUM(CASE WHEN r.done IS NULL THEN 1 ELSE 0 END) AS pending "
+             "FROM submissions s JOIN reconcile r ON r.ref=s.ref "
+             f"WHERE s.state IN ({','.join('?' * len(RECONCILABLE))}) GROUP BY s.ref ORDER BY t0")
+        with self._lock:
+            return [dict(r) for r in self._db.execute(q, RECONCILABLE).fetchall()]
+
+    def mark_checked(self, refs: list[str]) -> None:
+        """A check actually ran: every window that is due for these refs is done."""
+        now = self._clock()
+        for ref in refs:
+            self._x("UPDATE reconcile SET done=? WHERE ref=? AND done IS NULL AND due<=?", (now, ref, now))
+
+    def confirm(self, ref: str, evidence: str) -> bool:
+        """-> `confirmed` from a reconcilable state only. `evidence` is the email subject/date (never a body)."""
+        cur = self.state(ref)
+        if cur is None or cur["state"] not in RECONCILABLE:
+            return False
+        ok = self.set_state(ref, "confirmed", detail=evidence[:300], only_from=RECONCILABLE)
+        if ok:
+            self._x("UPDATE reconcile SET done=? WHERE ref=? AND done IS NULL", (self._clock(), ref))
+            self.audit("confirmed", ref=ref, actor="reconcile", detail=evidence)
+        return ok
+
+    def annotate(self, ref: str, note: str) -> None:
+        """Detail text only; the state never changes."""
+        with self._lock:
+            self._db.execute("UPDATE submissions SET detail=? WHERE ref=?", (note[:300], ref))
+            self._db.commit()
+        self.audit("annotated", ref=ref, actor="reconcile", detail=note)
 
     def begin_submit(self, ref: str, approval_id: str | None) -> tuple[bool, str]:
         """Atomically move to `submitting` (persisted BEFORE the click) and consume the approval."""
