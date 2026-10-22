@@ -578,7 +578,38 @@ class PlaywrightDriver(VerificationMixin):
         except Exception:
             return False
 
+    @staticmethod
+    async def _is_choice_input(loc) -> bool:
+        try:
+            return bool(await loc.evaluate("e => e.tagName === 'INPUT' && (e.type === 'radio' || e.type === 'checkbox')"))
+        except Exception:
+            return False
+
+    async def _choose_input(self, page, f: FormField, value: str) -> bool:
+        """Radio / checkbox group sharing one name (Lever custom questions): click the member whose value or label
+        best matches `value`, then read the state back."""
+        group = page.locator(f'input[name="{f.key}"]')
+        vals = await group.evaluate_all("els => els.map(e => e.value)")
+        labels = await group.evaluate_all("els => els.map(e => (e.closest('label') || {}).innerText || e.value)")
+        pick = best_option(value, [v for v in vals if v]) or best_option(value, [t.strip() for t in labels if t])
+        if pick is None:
+            return False
+        idx = next((i for i, (v, t) in enumerate(zip(vals, labels)) if pick in (v, t.strip())), None)
+        if idx is None:
+            return False
+        box = group.nth(idx)
+        if not await box.is_checked():
+            await box.click()                       # real click: programmatic check does not register
+        return bool(await box.is_checked())
+
+    @staticmethod
+    async def _checked_values(page, key: str) -> list[str]:
+        return list(await page.locator(f'input[name="{key}"]').evaluate_all(
+            "els => els.filter(e => e.checked).map(e => e.value)"))
+
     async def _choose(self, page, f: FormField, loc, value: str) -> bool:
+        if await self._is_choice_input(loc):
+            return await self._choose_input(page, f, value)
         tag = (await loc.evaluate("e => e.tagName")).upper()
         if tag == "SELECT":
             for kw in ({"label": value}, {"value": value}):
@@ -1043,6 +1074,13 @@ class PlaywrightDriver(VerificationMixin):
                 continue
             if f.kind in (FieldKind.select, FieldKind.multiselect) or f.options:
                 loc = await self._locate(page, f)
+                if loc is not None and await self._is_choice_input(loc):
+                    got = [normalize(x) for x in await self._checked_values(page, f.key)]
+                    want = [normalize(str((best_option(o, f.options) if f.options else None) or o))
+                            for o in (v if isinstance(v, list) else [v])]
+                    if not got or any(w not in got for w in want):
+                        bad.append(f.key)
+                    continue
                 try:
                     if loc is not None and (await loc.evaluate("e => e.tagName")).upper() == "SELECT":
                         got = await loc.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].text : ''")

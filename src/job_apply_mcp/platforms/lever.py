@@ -10,6 +10,7 @@ from ..core.models import ApplicationForm, FieldKind, Posting, SubmitResult
 from ..core.registry import platforms
 from .base import AdapterError, BaseAdapter, iso_date, not_before
 from .http import HttpError
+from .lever_cards import parse_cards
 from .textflags import html_to_text
 
 API = "https://api.lever.co/v0/postings"
@@ -82,8 +83,19 @@ class LeverAdapter(BaseAdapter):
                                  ("urls[LinkedIn]", "LinkedIn", F.text, False), ("urls[GitHub]", "GitHub", F.text, False),
                                  ("comments", "Additional information", F.textarea, False),
                                  ("resume", "Resume", F.file, True))
+        html = await self._apply_page(board, pid)
+        if html:                       # optional standard inputs this posting's page does not render are dropped
+            fields = [f for f in fields if f.required or f'name="{f.key}"' in html]
+        fields += [f for f in parse_cards(html) if f.key not in {x.key for x in fields}]
         return ApplicationForm(ref=self.ref(board, pid), fields=fields,
                                submit_via=["api", "browser"] if self.api_key(board) else ["browser"])
+
+    async def _apply_page(self, board: str, pid: str) -> str:
+        """The hosted apply page's HTML (custom-question cards, ADR-0031). Any failure just means no extra fields."""
+        try:
+            return await self.http.get_text(f"https://jobs.lever.co/{board}/{pid}/apply")
+        except Exception:  # noqa: BLE001 - HTTP/transport errors must never break get_form
+            return ""
 
     async def submit(self, form: ApplicationForm, answers: dict[str, Any], files: dict[str, str],
                      *, dry_run: bool = True) -> SubmitResult:
