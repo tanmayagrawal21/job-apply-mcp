@@ -18,7 +18,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from . import paths
 
@@ -180,6 +180,8 @@ class ControlCfg(BaseModel):
     review_enabled: bool = False        # optional model-based review (router task_class "review")
     review_actions: list[str] = Field(default_factory=lambda: ["write_prose", "send_message"])
     review_fail: str = "warn"           # what to do when the reviewer errors: warn | needs_human
+    # Set by load_settings only (never from config): True when rules_file came from the trusted user config.
+    _rules_trusted: bool = PrivateAttr(default=False)
 
 
 class ImapCfg(BaseModel):
@@ -604,10 +606,12 @@ def _user_file_trusted(user: Path) -> tuple[bool, str]:
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
     udata: dict = {}
+    trusted_user = False
     user = paths.config_file()
     if user.is_file():
         udata = tomllib.loads(user.read_text(encoding="utf-8"))
         trusted, why = _user_file_trusted(user)
+        trusted_user = trusted
         if not trusted:
             udata = _restrict(udata, f"{user} ({why}; can only make settings stricter)")
         data = _deep_merge(data, udata)
@@ -621,6 +625,9 @@ def load_settings(project_dir: Path | None = None) -> Settings:
         if v is not None and relaxes(v):
             log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
                         f"{sect}." if sect else "", key, v, user)
+    urf = udata.get("control", {}).get("rules_file") if isinstance(udata.get("control"), dict) else None
+    if urf and trusted_user and urf == s.control.rules_file:
+        s.control._rules_trusted = True
     uq = _quota_params(udata)
     for k, cap in LEGACY_QUOTA_KEYS.items():
         if k in uq and _loosens_cap(CAP_DEFAULTS[cap])(uq[k]):

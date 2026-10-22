@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -74,6 +75,9 @@ class ControlReport:
         return d
 
 
+log = logging.getLogger(__name__)
+
+
 class ControlAgent:
     def __init__(self, settings: Settings, *, reviewer: Reviewer | None = None,
                  clock: Callable[[], float] = time.time) -> None:
@@ -102,6 +106,8 @@ class ControlAgent:
             self.rules = load_rules(self.cfg.rules_file)
         params_all: dict[str, dict[str, Any]] = {k: dict(v) for k, v in self.cfg.params.items()}
         for k, v in self.rules.params.items():
+            if k == "quota" and not self.cfg._rules_trusted:
+                v = self._tighten_only_quota(v, params_all.get("quota", {}))
             params_all.setdefault(k, {}).update(v)
         params_all.setdefault("mode", {}).update(self.rules.mode)
         built: list[Control] = []
@@ -116,6 +122,27 @@ class ControlAgent:
                 raise ControlConfigError(f"rule id '{c.id}' clashes with a built-in control")
         self.controls = built + self.rules.controls
         self._params = params_all
+
+    def _tighten_only_quota(self, new: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        """A rules_file not chosen by the trusted user config may only lower caps (ADR-0035)."""
+        try:
+            base = effective_limits(current, self.settings)
+        except ControlConfigError:
+            return new
+        scope_of = {"per_day": "day", "per_platform_per_day": "platform", "per_run": "run"}
+        out = dict(new)
+        for key, scope in scope_of.items():
+            if key not in new:
+                continue
+            v, cap = new[key], base[scope]
+            loosens = isinstance(v, (int, float)) and not isinstance(v, bool) and cap is not None and (v == 0 or v > cap)
+            if v is None and cap is not None:
+                loosens = True
+            if loosens:
+                log.warning("rules_file quota %s=%r IGNORED: a cap can only be loosened by a rules file named in "
+                            "the trusted user config", key, v)
+                del out[key]
+        return out
 
     def _replay(self) -> None:
         if not self.audit_path.is_file():

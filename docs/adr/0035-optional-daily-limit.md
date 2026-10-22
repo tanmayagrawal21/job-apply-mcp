@@ -26,7 +26,7 @@ the cap.
   removes a safety cap.
 
 ## Consequences
-Dry runs never count, as before. A `rules_file` chosen by project config can still carry `[params.quota]`
+The rules file's `[mode]` section is unchanged (out of scope).
 (pre-existing gap shared with `[mode]`); not addressed here.
 
 ## Verify / revert
