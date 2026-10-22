@@ -357,7 +357,35 @@ class TuneCfg(BaseModel):
     export_create: bool = False                   # also run `ollama create` after writing the Modelfile
 
 
+class SearchCfg(BaseModel):
+    """Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on."""
+    match: str = "any"                   # "title": every query term must be in the title; "any": rank title+description
+    rank: bool = True                    # False = legacy newest-first order, no score/why
+    skills: list[str] = Field(default_factory=list)   # extra skills on top of the profile's
+    seniority: str | None = None         # target level: "entry" | "mid" | "senior" | None (no preference)
+    location_order: list[str] = Field(default_factory=list)  # preferred location substrings, best first
+    rank_candidates: int = 40            # description-fetch + full scoring for the top N by the cheap pre-score
+    description_concurrency: int = 6     # bounded parallel description fetches (also capped by the host limiter)
+    min_score: float = 0.0               # drop rows scoring below this (0-100); 0 keeps everything with a query hit
+    weights: dict[str, float] = Field(default_factory=lambda: {
+        "query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency": 1.0})
+    recency_half_life_days: float = 14.0
+    max_why: int = 3
+    embeddings: bool = False             # optional semantic rerank through a local Ollama embedding model
+    embed_model: str = "nomic-embed-text"
+    embed_url: str = "http://127.0.0.1:11434"
+    embed_weight: float = 3.0
+
+
+class DedupeCfg(BaseModel):
+    """Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical apply URL, with
+    company+title only when neither is known. title: legacy company+fuzzy-title matching."""
+    mode: str = "id_first"
+
+
 class Settings(BaseModel):
+    search: SearchCfg = Field(default_factory=SearchCfg)
+    dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
     improve: ImproveCfg = Field(default_factory=ImproveCfg)
     concurrency: ConcurrencyCfg = Field(default_factory=ConcurrencyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)

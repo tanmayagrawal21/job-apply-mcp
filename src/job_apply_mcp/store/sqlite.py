@@ -20,6 +20,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from ..core.models import SubmitResult
 
@@ -46,7 +47,9 @@ CREATE TABLE IF NOT EXISTS applications(
   status TEXT NOT NULL,
   via TEXT,
   confirmation TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  req_id TEXT,
+  url_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_app_company ON applications(company_key);
 CREATE INDEX IF NOT EXISTS idx_app_status ON applications(status, created_at);
@@ -91,12 +94,41 @@ def titles_similar(a: str, b: str, threshold: float = 0.75) -> bool:
     return len(ta & tb) / len(ta | tb) >= threshold
 
 
+_TRACKING = {"gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "ref", "referrer", "referer", "source", "src",
+             "trk", "trkinfo", "lever-source", "lever-origin", "gh_src", "icid", "cid", "campaign", "from",
+             "vs", "sid", "_hsenc", "_hsmi", "li_fat_id", "refid", "trackingid", "jobboard", "mkt_tok"}
+_TRACKING_PREFIX = ("utm_", "ga_", "pk_", "mtm_")
+
+
+def canonical_url(url: str | None) -> str | None:
+    """Stable identity for an application URL: lowercase host (no www), no fragment or trailing slash, tracking
+    params dropped, remaining params sorted. Job-identifying params (gh_jid, jid, id, ...) are kept."""
+    if not url or not url.strip().lower().startswith(("http://", "https://")):
+        return None
+    u = urlsplit(url.strip())
+    host = (u.hostname or "").lower().removeprefix("www.")
+    if not host:
+        return None
+    q = sorted((k.lower(), v) for k, v in parse_qsl(u.query, keep_blank_values=False)
+               if k.lower() not in _TRACKING and not k.lower().startswith(_TRACKING_PREFIX))
+    path = re.sub(r"/+", "/", u.path).rstrip("/")
+    return f"{host}{path}" + (f"?{urlencode(q)}" if q else "")
+
+
+def identity_key(ref: str | None) -> str | None:
+    """'<platform>:<board>:<job_id>' refs are platform requisition ids; anything else has no stable id."""
+    if not ref or ref.lower().startswith(("http:", "https:")) or len(ref.split(":", 2)) < 3:
+        return None
+    return ref.strip().lower()
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 class SqliteStore:
-    def __init__(self, data_dir: str | Path, *, dedupe_days: int = 180, filename: str = "applications.db"):
+    def __init__(self, data_dir: str | Path, *, dedupe_days: int = 180, dedupe_mode: str = "id_first",
+                 filename: str = "applications.db"):
         if str(data_dir) == ":memory:":
             self.path, target = Path(":memory:"), ":memory:"
         else:
@@ -104,7 +136,7 @@ class SqliteStore:
             d.mkdir(parents=True, exist_ok=True)
             self.path = d / filename
             target = str(self.path)
-        self.dedupe_days = dedupe_days
+        self.dedupe_days, self.dedupe_mode = dedupe_days, dedupe_mode
         self._db = sqlite3.connect(target, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._tlock = threading.Lock()
@@ -113,7 +145,20 @@ class SqliteStore:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=NORMAL")
             self._db.executescript(_SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """Add the nullable identity columns to databases created before ADR-0010's amendment; idempotent."""
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(applications)")}
+        for c in ("req_id", "url_key"):
+            if c not in cols:
+                self._db.execute(f"ALTER TABLE applications ADD COLUMN {c} TEXT")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_app_req ON applications(req_id)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_app_url ON applications(url_key)")
+        for r in self._db.execute("SELECT ref FROM applications WHERE req_id IS NULL").fetchall():
+            if k := identity_key(r["ref"]):
+                self._db.execute("UPDATE applications SET req_id=? WHERE ref=?", (k, r["ref"]))
 
     # -- plumbing -----------------------------------------------------------------------------
     def _run(self, fn, *args):
@@ -138,40 +183,59 @@ class SqliteStore:
         return self._locks.setdefault(company_key(company), asyncio.Lock())
 
     # -- Store protocol -----------------------------------------------------------------------
-    async def seen(self, company: str, title: str, *, within_days: int | None = None) -> bool:
-        days = self.dedupe_days if within_days is None else within_days
-        return await self._a(self._seen, company, title, days)
+    async def seen(self, company: str, title: str, *, within_days: int | None = None, ref: str | None = None,
+                   url: str | None = None, mode: str | None = None) -> bool:
+        return await self.seen_why(company, title, within_days=within_days, ref=ref, url=url, mode=mode) is not None
 
-    def _seen(self, company: str, title: str, days: int) -> bool:
+    async def seen_why(self, company: str, title: str, *, within_days: int | None = None, ref: str | None = None,
+                       url: str | None = None, mode: str | None = None) -> str | None:
+        """Matched reason ('req_id:<id>', 'url:<canonical>', 'title') or None. In id_first mode a known requisition
+        id / canonical URL is authoritative; company+title is used only when the candidate has neither, or against
+        stored rows that have neither."""
+        days = self.dedupe_days if within_days is None else within_days
+        return await self._a(self._seen, company, title, days, ref, url, mode or self.dedupe_mode)
+
+    def _seen(self, company: str, title: str, days: int, ref: str | None, url: str | None, mode: str) -> str | None:
         if days <= 0:
-            return False
+            return None
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         marks = ",".join("?" * len(SEEN_STATUSES))
-        rows = self._db.execute(
-            f"SELECT title FROM applications WHERE company_key=? AND created_at>=? AND status IN ({marks})",
-            (company_key(company), cutoff, *SEEN_STATUSES)).fetchall()
-        return any(titles_similar(title, r["title"]) for r in rows)
+        base = f"FROM applications WHERE created_at>=? AND status IN ({marks})"
+        args = (cutoff, *SEEN_STATUSES)
+        rid, uk = identity_key(ref), canonical_url(url)
+        title_only = mode == "title" or not (rid or uk)
+        if not title_only:
+            if rid and self._db.execute(f"SELECT 1 {base} AND req_id=?", (*args, rid)).fetchone():
+                return f"req_id:{rid}"
+            if uk and self._db.execute(f"SELECT 1 {base} AND url_key=?", (*args, uk)).fetchone():
+                return f"url:{uk}"
+        extra = "" if title_only else " AND req_id IS NULL AND url_key IS NULL"
+        rows = self._db.execute(f"SELECT title {base} AND company_key=?{extra}",
+                                (*args, company_key(company))).fetchall()
+        return "title" if any(titles_similar(title, r["title"]) for r in rows) else None
 
-    async def record(self, result: SubmitResult, *, company: str, title: str) -> None:
-        await self._a(self._record, result, company, title)
+    async def record(self, result: SubmitResult, *, company: str, title: str, url: str | None = None) -> None:
+        await self._a(self._record, result, company, title, url)
 
-    def _record(self, r: SubmitResult, company: str, title: str) -> None:
+    def _record(self, r: SubmitResult, company: str, title: str, url: str | None = None) -> None:
         now = _now()
+        rid, uk = identity_key(r.ref), canonical_url(url)
         cur = self._db.execute("SELECT status FROM applications WHERE ref=?", (r.ref,)).fetchone()
         if cur is None:
             self._db.execute(
                 "INSERT INTO applications(ref,company,title,company_key,title_key,status,via,confirmation,"
-                "created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "created_at,req_id,url_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (r.ref, company, title, company_key(company), title_key(title), r.status, r.via,
-                 r.confirmation, now))
+                 r.confirmation, now, rid, uk))
         else:
             # created_at moves only when the status changes, so a dry_run later promoted to
             # 'submitted' starts its dedupe window at the real submission time.
             self._db.execute(
                 "UPDATE applications SET company=?,title=?,company_key=?,title_key=?,status=?,via=?,"
-                "confirmation=?,created_at=CASE WHEN status<>? THEN ? ELSE created_at END WHERE ref=?",
+                "confirmation=?,created_at=CASE WHEN status<>? THEN ? ELSE created_at END,"
+                "req_id=COALESCE(?,req_id),url_key=COALESCE(?,url_key) WHERE ref=?",
                 (company, title, company_key(company), title_key(title), r.status, r.via, r.confirmation,
-                 r.status, now, r.ref))
+                 r.status, now, rid, uk, r.ref))
         self._db.execute("INSERT INTO events(ref,ts,kind,detail) VALUES(?,?,?,?)",
                          (r.ref, now, r.status, r.detail))
 
