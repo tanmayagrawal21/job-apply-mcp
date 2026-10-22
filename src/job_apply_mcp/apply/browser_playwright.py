@@ -27,6 +27,7 @@ from ..config import Settings
 from ..core import registry
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
 from .mapper import best_option, canonical_key, normalize
+from .verification import VerificationMixin
 
 # ------------------------------------------------------------------ pure helpers (unit-tested offline)
 
@@ -217,7 +218,7 @@ _COUNTRY_JS = """() => { const ids = ['country', 'phone-country', 'phone_country
 _SUBMIT_NAME = re.compile(r"^\s*(submit( application)?|send application|apply( now)?)\s*$", re.IGNORECASE)
 
 
-class PlaywrightDriver:
+class PlaywrightDriver(VerificationMixin):
     name = "playwright"
 
     def __init__(self, settings: Settings):
@@ -282,8 +283,9 @@ class PlaywrightDriver:
         except Exception as e:
             return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
         finally:
-            self._net.pop(id(page), None)
-            self._tasks.pop(id(page), None)
+            if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
+                self._net.pop(id(page), None)
+                self._tasks.pop(id(page), None)
             if not self.b.keep_pages_open and id(page) not in self._handoff_pages:
                 await page.close()
 
@@ -827,6 +829,10 @@ class PlaywrightDriver:
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} challenge visible")
         await target.scroll_into_view_if_needed()
         await target.click()                                   # the ONE submit click; never repeated
+        return await self._conclude(page, ats, ref)
+
+    async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False) -> SubmitResult:
+        """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026)."""
         deadline = time.monotonic() + self.b.confirmation_wait_s
         text, outcome = "", None
         while True:
@@ -841,8 +847,11 @@ class PlaywrightDriver:
             if outcome:
                 break
             blk = detect_blocker(text)
-            if blk in ("duplicate", "captcha", "verification") or time.monotonic() >= deadline:
+            stop = ("duplicate", "captcha") if after_code else ("duplicate", "captcha", "verification")
+            if blk in stop or time.monotonic() >= deadline:     # after a code the old prompt lingers until the reply
                 break
+        if after_code:
+            await self._redact(page)                           # never screenshot the typed code
         if outcome == "submitted":
             ev = await self._save_evidence(page, ref, "submitted")
             return SubmitResult(ref=ref, status="submitted", via="browser", confirmation=page.url[:200],
@@ -853,6 +862,8 @@ class PlaywrightDriver:
         if blk == "duplicate":
             return SubmitResult(ref=ref, status="duplicate", via="browser",
                                 detail=f"site reports a prior application{ev}")
+        if blk == "verification" and (pending := await self._await_code(page, ats, ref)) is not None:
+            return pending
         if blk in ("captcha", "verification"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
         errs = (await self._validation_errors(page))[:5]

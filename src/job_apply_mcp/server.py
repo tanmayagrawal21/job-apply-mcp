@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .config import load_settings
 from .core import output as _output
+from .grants.otp import assist_code, make_elicitor
 from .services import Services
 
 mcp = FastMCP("job-apply")
@@ -100,6 +101,38 @@ def _elicit_approver(ctx: Context):
     return ask
 
 
+class _Code(BaseModel):
+    code: str = Field(description="The verification code you received by email or SMS")
+
+
+async def _elicit_code(ctx: Context, row: dict[str, Any]) -> dict[str, Any]:
+    """Awaiting a code (ADR-0026). 1) If the user granted `otp_assist` (ADR-0027), a code found in the latest mail
+    from the expected sender is entered ONLY when the human clicks confirm on the masked prefill. 2) Otherwise
+    (no grant, no mail, declined, or no elicitation) the USER types the code: via elicitation or the
+    `provide_verification_code` tool. The code is never logged."""
+    cfg = load_settings()
+    masked = ""
+    domain = cfg.verification.sender_domains.get(str(row.get("ref", "")).split(":")[0])
+    if cfg.verification.assist and domain:
+        res = await assist_code(cfg, sender_domain=domain, elicit=make_elicitor(ctx))
+        if res.status == "confirmed" and res.code:
+            code, res.code = res.code, None
+            return await svc().provide_verification_code(row["pending_id"], code)
+        masked = res.masked
+    try:
+        if not cfg.verification.elicit:
+            return row
+        hint = f" (the latest mail ends {masked}; it was not used)" if masked else ""
+        res2 = await ctx.elicit(message="The site emailed/texted you a verification code to finish this application"
+                                        f"{hint}. Enter it here (it is typed into the page and never stored).",
+                                schema=_Code)
+    except Exception:  # noqa: BLE001 - client without elicitation support
+        return row
+    if res2.action != "accept":
+        return row
+    return await svc().provide_verification_code(row["pending_id"], res2.data.code)
+
+
 @mcp.tool()
 async def submit_application(ctx: Context, ref_or_url: str, answers: dict[str, Any] | None = None,
                              dry_run: bool | None = None, approval_id: str | None = None,
@@ -109,8 +142,20 @@ async def submit_application(ctx: Context, ref_or_url: str, answers: dict[str, A
     approval_mode=human a person must approve (dialog, or `job-apply-mcp approve <id>`)."""
     if token is not None:
         return _out({"status": "error", "detail": "token is no longer accepted; use approval_id from plan_application"})
-    return _out(await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, approval_id=approval_id,
-                                   approver=_elicit_approver(ctx)))
+    row = await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, approval_id=approval_id,
+                             approver=_elicit_approver(ctx))
+    if row.get("status") == "awaiting_code" and row.get("pending_id"):
+        row = await _elicit_code(ctx, row)
+    return _out(row)
+
+
+@mcp.tool()
+async def provide_verification_code(pending_id: str, code: str) -> str:
+    """The user types the code they received (email/SMS) for a submission in status `awaiting_code`. Ask the USER;
+    never try to read their mail or guess. Only the format is checked; the code is typed into the open page, the
+    page's verify button is clicked once, then the normal confirmation check runs. One attempt per code; the
+    application is never resubmitted; after `verification.code_ttl_s` it becomes a `handoff`."""
+    return _out(await svc().provide_verification_code(pending_id, code))
 
 
 def _agent_mode() -> bool:
