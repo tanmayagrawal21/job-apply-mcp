@@ -62,7 +62,7 @@ def test_sponsorship_yes_never_flips(label):
 @pytest.mark.parametrize("label", [
     "Are you able to work in the US without sponsorship?",
     "Are you legally authorized to work in the United States without visa sponsorship?",
-    "Can you work here and not require sponsorship?"])
+    "Can you work in the US and not require sponsorship?"])
 def test_negated_sponsorship_flips_correctly(label):
     assert run(sel(label))[0] == "No"          # requires sponsorship -> cannot work without it
     ok = prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False))
@@ -89,7 +89,10 @@ COUNTRY = ["I am a citizen of this country", "I have permission to work here but
 
 
 def test_country_where_you_live_variant_snaps_to_consistent_option():
-    f = sel("Your authorization to work in the country where you live. Please select", COUNTRY)
+    # ADR-0038: "the country where you live" may not be the US -> unresolved; the US form snaps to an option
+    assert run(sel("Your authorization to work in the country where you live. Please select", COUNTRY))[0] is None
+    assert run(sel("Can you work here and not require sponsorship?"))[0] is None
+    f = sel("Your authorization to work in the United States. Please select", COUNTRY)
     assert run(f)[0] == COUNTRY[1]
     no_spons = prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False))
     assert run(f, no_spons)[0] == COUNTRY[3]

@@ -77,8 +77,9 @@ def test_marketing_optin_stays_no():
 
 def test_policy_stop_phrases_are_respected():
     label = "Privacy notice: I confirm this is entirely my handiwork"
-    assert run(sel(label)) == "I acknowledge"
+    assert run(sel(label)) is None                 # ADR-0038: "entirely handiwork" is substantive -> unresolved
     assert run(sel(label), stop_phrases=["my handiwork"]) is None
+    assert run(sel("Privacy notice"), stop_phrases=["privacy notice"]) is None
 
 
 def test_options_with_excluded_wording_are_refused():

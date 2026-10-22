@@ -100,10 +100,10 @@ _YES = {"yes", "true", "y", "1"}
 _NO = {"no", "false", "n", "0"}
 
 
-def canonical_key(label: str) -> str | None:
+def canonical_key(label: str, skip: tuple[str, ...] = ()) -> str | None:
     n = normalize(label)
     for key, pats in ALIASES:
-        if any(re.search(p, n) for p in pats):
+        if key not in skip and any(re.search(p, n) for p in pats):
             return key
     return None
 
@@ -489,8 +489,55 @@ def _gpa_level(label: str) -> str:
 _CONSENT = re.compile(r"consent|agree|acknowledg|privacy|gdpr|attest|certif|authori[sz]e", re.IGNORECASE)
 
 
+# ---- country of an authorization / sponsorship question (ADR-0038) ---------------------------------
+# The structured [authorization] facts describe the United States only. A question naming another country is answered
+# only from the user's own [answers] pattern that names that country; otherwise it stays unresolved.
+_US_IN_LABEL = re.compile(r"\b(u s a?|usa|united states( of america)?|america|american)\b")
+_COUNTRY_PATTERNS: dict[str, str] = {
+    "united kingdom": r"united kingdom|\buk\b|\bu k\b|great britain|\bbritain\b|\bbritish\b|england|scotland|wales|northern ireland",
+    "canada": r"canada|canadian", "ireland": r"(?<!northern )ireland|\birish\b",
+    "european union": r"european union|\beu\b|\beea\b|\beurope\b|schengen",
+    "germany": r"germany|\bgerman\b", "france": r"france|french", "netherlands": r"netherlands|holland|dutch",
+    "spain": r"\bspain\b", "italy": r"\bitaly\b", "portugal": r"portugal", "poland": r"poland", "sweden": r"sweden",
+    "norway": r"norway", "denmark": r"denmark", "finland": r"finland", "switzerland": r"switzerland|swiss",
+    "austria": r"austria", "belgium": r"belgium", "luxembourg": r"luxembourg", "czechia": r"czech",
+    "romania": r"romania", "ukraine": r"ukraine", "greece": r"greece", "hungary": r"hungary", "estonia": r"estonia",
+    "turkey": r"t(u|ü)rkiye|\bturkey\b", "israel": r"israel", "united arab emirates": r"united arab emirates|\buae\b",
+    "india": r"\bindia\b", "pakistan": r"pakistan", "china": r"\bchina\b|\bprc\b", "hong kong": r"hong kong",
+    "taiwan": r"taiwan", "japan": r"japan", "south korea": r"korea", "singapore": r"singapore",
+    "philippines": r"philippines", "vietnam": r"vietnam", "indonesia": r"indonesia", "malaysia": r"malaysia",
+    "thailand": r"thailand", "australia": r"australia", "new zealand": r"new zealand", "mexico": r"(?<!new )mexico",
+    "brazil": r"brazil", "argentina": r"argentina", "colombia": r"colombia", "chile": r"\bchile\b", "peru": r"\bperu\b",
+    "costa rica": r"costa rica", "south africa": r"south africa", "nigeria": r"nigeria", "kenya": r"kenya",
+    "egypt": r"egypt",
+}
+_COUNTRY_RES = {c: re.compile(p) for c, p in _COUNTRY_PATTERNS.items()}
+
+
+def question_countries(label: str) -> tuple[bool, list[str]]:
+    """(mentions the US, non-US countries named) for an authorization/sponsorship label."""
+    n = normalize(label)
+    return bool(_US_IN_LABEL.search(n)), [c for c, rx in _COUNTRY_RES.items() if rx.search(n)]
+
+
+# Deny-by-default (ADR-0038): US facts answer only a label whose every word is generic authorization/sponsorship
+# wording or names the US. Any other word (a city, region, unlisted country, "here", "the country where ...") -> the
+# question may be about another place, so it stays unresolved.
+_AUTH_VOCAB = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "h", "1b", "h1b", "l", "1", "l1", "e", "3", "e3", "tn", "opt", "cpt", "stem", "ead", "f", "f1", "j", "j1", "o", "o1", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", "us", "u", "s", "usa", "united", "states", "america", "american"])
+
+
+def auth_place_ok(label: str) -> bool:
+    """True when the label names no place, or only the US (US, U.S., USA, United States, America)."""
+    return all(t in _AUTH_VOCAB or t.isdigit() for t in normalize(label).split())
+
+
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any]:
     n = normalize(f.label)
+    if not auth_place_ok(f.label):
+        us, foreign = question_countries(f.label)
+        if len(foreign) == 1 and not us:     # only the user's own [answers] pattern naming that country
+            return True, profile.lookup(f"country_answer:{foreign[0]}:{n}")
+        return True, None
     auth, req = _truth(profile.lookup("work_authorized")), _truth(profile.lookup("requires_sponsorship"))
     cit = _truth(profile.lookup("us_citizen"))
     ma, ms = _AUTH_WORDS.search(n), re.search(r"sponsor|\bvisa\b", n)
@@ -545,7 +592,63 @@ def _years_answer(f: FormField, profile: ProfileLike) -> Any | None:
     return None
 
 
-def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int) -> tuple[bool, Any]:
+# ---- prior-employee scope (ADR-0038) --------------------------------------------------------------
+# Deny-by-default: answered only for a direct-employment question about the posting company itself (or a configured
+# alias, or "this company"/"us"). The company name is replaced by a placeholder and the whole label must then match
+# one of the _DIRECT_EMPLOY forms, with nothing left over except tense/time words. A company whose own name contains
+# a qualifier word ("State Street", "Agency Inc", "Competitor Labs") is never answered: the label is ambiguous.
+_CO = "zzcozz"
+_SELF_REF = re.compile(r"\b(?:this|the) (?:company|organi[sz]ation)\b|(?<=\bfor )us\b|(?<=\bby )us\b|(?<=\bat )us\b|"
+                       r"(?<=\bwith )us\b")
+_TIME = r"(?:(?:ever|previously|formerly|currently|before|once) )*"
+_DIRECT_EMPLOY = re.compile(
+    rf"^(?:have|did|do) you {_TIME}(?:been employed|worked|work|been an? (?:employee|intern)) {_TIME}(?:by|for|at|with) {_CO}"
+    rf"(?: {_TIME}| before| previously| for any (?:length|period) of time)?$|"
+    rf"^(?:are|were) you {_TIME}(?:been )?employed (?:by|at) {_CO}(?: before| previously| for any (?:length|period) of time)?$|"
+    rf"^(?:are|were) you an? (?:current or former|former or current|current|former|previous|past|prior) "
+    rf"(?:employee|intern) (?:of|at) {_CO}$")
+_CO_QUALIFIERS = frozenset(["state", "states", "federal", "government", "agency", "competitor", "competitors",
+                            "affiliate", "affiliates", "parent", "subsidiary", "subsidiaries", "partner", "partners",
+                            "client", "clients", "vendor", "vendors", "public", "national", "department"])
+# military / defence qualifiers: "worked for Army?" must never be read as the posting company "Army Labs"
+_CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|marines?|military|defen[cs]e|coast guard|national guard|"
+                                   r"veterans?)\b")
+_GENERIC_CO_WORDS = frozenset(["the", "global", "united", "american", "national", "general", "first", "international",
+                               "data", "systems", "group", "technologies", "digital", "new", "world", "health"])
+
+
+def _mark_company(words: list[str], name: str) -> tuple[list[str], bool]:
+    from .adapters import _co_key
+    key = _co_key(name)
+    if not key:
+        return words, False
+    for size in range(min(6, len(words)), 0, -1):
+        for i in range(len(words) - size + 1):
+            if _CO not in words[i:i + size] and _co_key(" ".join(words[i:i + size])) == key:
+                return words[:i] + [_CO] + words[i + size:], True
+    lead = [t for t in normalize(name).split() if t not in _GENERIC_CO_WORDS]
+    if lead and len(lead[0]) >= 4 and lead[0] in words:
+        i = words.index(lead[0])
+        return words[:i] + [_CO] + words[i + 1:], True
+    return words, False
+
+
+def about_this_company(label: str, company: str, aliases: Sequence[str] = ()) -> bool:
+    """True only for a direct-employment question about the posting company itself (or a configured alias)."""
+    names = [x for x in (company, *aliases) if normalize(x)]
+    if not names or any(t in _CO_QUALIFIERS for x in names for t in normalize(x).split()) \
+            or any(_CO_QUALIFIER_PHRASES.search(normalize(x)) for x in names):
+        return False
+    words = _SELF_REF.sub(_CO, normalize(label)).split()
+    for name in names:
+        found = True
+        while found:
+            words, found = _mark_company(words, name)
+    return bool(_DIRECT_EMPLOY.match(" ".join(words)))
+
+
+def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
+              company_aliases: Sequence[str] = ()) -> tuple[bool, Any]:
     """(handled, value). handled=False -> continue with the generic profile lookup."""
     n = normalize(f.label)
     if ck == "us_citizen":
@@ -586,8 +689,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             return True, pick_gpa_option(g, f.options)
         return True, re.sub(r"\s*/.*$", "", str(raw).strip())
     if ck == "prior_employee":
-        if not company:
-            return True, None
+        if not company or not about_this_company(f.label, company, company_aliases):   # ADR-0038: government/competitor/other employers
+            return True, profile.lookup(n)                            # only the user's own explicit answer
         return True, "Yes" if profile.lookup("employer:" + normalize(company)) else "No"
     if ck == "marketing_optin":
         if _CONSENT.search(f.label):          # consent/privacy acknowledgements need the owner's decision
@@ -636,12 +739,56 @@ _PRIVACY_EXCLUDE = re.compile(
 _ACK_OPTION = re.compile(r"\b(acknowledg\w*|agree\w*|accept\w*|confirm\w*|yes|understand\w*|read)\b")
 
 
+# A field that is (or mentions) a sensitive or canonical question never takes the acknowledgement path (ADR-0038):
+# "Will you require sponsorship? (See our Applicant Privacy Notice)" is a sponsorship question, not a notice.
+_SENSITIVE_TOPIC = re.compile(
+    r"sponsor|\bvisa\b|citizen|immigra|nationality|permanent resident|green card|right to work|work permit|"
+    r"authori[sz](ed|ation) to work|eligible to work|work authori[sz]ation|"
+    r"gender|\bsex\b|pronoun|ethnic|\brace\b|hispanic|latin[oax]|veteran|military|disab|sexual orientation|"
+    r"transgender|\beeo\b|equal (employment )?opportunity|self[- ]identif|protected|"
+    r"\bage\b|18 years|criminal|convict|salary|compensation|relocat|employed|employee")
+_SENSITIVE_KEYS = SEMANTIC_SENSITIVE | DEMOGRAPHIC_KEYS | {"over_18", "located_in_us", "salary_expectation"}
+
+
+def is_sensitive_question(label: str) -> bool:
+    """True when any sensitive/demographic alias or topic appears anywhere in the label (alias order ignored)."""
+    n = normalize(label)
+    if _SENSITIVE_TOPIC.search(n) or _DEMOGRAPHIC_LABEL.search(label):
+        return True
+    return any(re.search(p, n) for k, pats in ALIASES if k in _SENSITIVE_KEYS for p in pats)
+
+
+# Deny-by-default (ADR-0038): after the privacy phrase and generic acknowledgement words are removed, nothing
+# substantive may remain. "Privacy notice: VEVRAA" leaves "vevraa" -> unresolved.
+_ACK_VOCAB = frozenset(["privacy", "notice", "notices", "policy", "policies", "statement", "disclosure", "acknowledgement", "acknowledgment", "acknowledge", "acknowledged", "acknowledges", "acknowledging", "read", "reviewed", "review", "understand", "understood", "agree", "agreed", "accept", "accepted", "confirm", "confirmed", "applicant", "applicants", "candidate", "candidates", "job", "recruitment", "recruiting", "data", "processing", "protection", "personal", "information", "i", "have", "has", "the", "our", "that", "and", "a", "an", "of", "to", "by", "in", "my", "me", "you", "your", "please", "this", "we", "it", "its", "how", "use", "uses", "used", "s", "am", "do", "submitting", "application", "yes", "y", "ok", "been", "with"])
+
+
+def _only_ack_words(text: str) -> bool:
+    return all(t in _ACK_VOCAB for t in normalize(text).split())
+
+
+_ACK_STRONG = re.compile(r"\b(acknowledg\w*|agree\w*|accept\w*|confirm\w*|understand\w*|read)\b")
+
+
+def is_ack_option(option: str) -> bool:
+    """The option itself must be an acknowledgement ("I acknowledge", "Yes, I have read it", or a bare "Yes"),
+    never a demographic, veteran, authorization or other sensitive choice."""
+    n = normalize(option)
+    if not n or is_sensitive_question(option) or has_negator(option) or any(w in n for w in DECLINE_MARKERS):
+        return False
+    if not _only_ack_words(option):
+        return False
+    return bool(_ACK_STRONG.search(n)) or n in ("yes", "y")
+
+
 def is_privacy_notice(label: str, stop_phrases: Sequence[str] = ()) -> bool:
     """True only for a plain privacy-notice acknowledgement label; any excluded topic or stop phrase -> False."""
     from ..config import PolicyCfg
     default_stop = PolicyCfg.model_fields["stop_phrases"].get_default(call_default_factory=True)
     low = label.lower()
     if _PRIVACY_EXCLUDE.search(low) or any(p.lower() in low for p in (*default_stop, *stop_phrases) if p):
+        return False
+    if canonical_key(label) not in (None, "privacy_ack") or is_sensitive_question(label) or not _only_ack_words(label):
         return False
     return bool(_PRIVACY_LABEL.search(normalize(label)))
 
@@ -655,8 +802,7 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = ()) -> Any | N
     if f.kind in (FieldKind.select, FieldKind.multiselect) or f.options:
         if any(_PRIVACY_EXCLUDE.search(o) for o in f.options):
             return None
-        aff = [o for o in f.options if _ACK_OPTION.search(normalize(o)) and not has_negator(o)
-               and not any(w in normalize(o) for w in DECLINE_MARKERS)]
+        aff = [o for o in f.options if _ACK_OPTION.search(normalize(o)) and is_ack_option(o)]
         if len(aff) != 1:
             return None
         return [aff[0]] if f.kind == FieldKind.multiselect else aff[0]
@@ -665,7 +811,7 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = ()) -> Any | N
 
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
-               stop_phrases: Sequence[str] = ()) -> MapResult:
+               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = ()) -> MapResult:
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
     res = MapResult()
 
@@ -691,12 +837,15 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             else:
                 res.answers.append(Answer(key=f.key, value=str(v), source="derived:geo"))
             continue
-        if _truth(profile.lookup("acknowledge_privacy_notices")) is True:   # opt-in, ADR-0034
+        ck = canonical_key(f.label)
+        if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
+            ck = canonical_key(f.label, skip=("privacy_ack",))
+        # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0038)
+        if ck in (None, "privacy_ack") and _truth(profile.lookup("acknowledge_privacy_notices")) is True:
             pv = privacy_ack_value(f, stop_phrases)
             if pv is not None:
                 res.answers.append(Answer(key=f.key, value=pv, source="rule:privacy_ack"))
                 continue
-        ck = canonical_key(f.label)
         if ck == "graduation" and f.kind not in (FieldKind.boolean,):
             ok(f, derive_graduation(f, profile.lookup("graduation")), "derived:graduation")
             continue
@@ -718,7 +867,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             ok(f, pick_source(profile.lookup("referral_source"), f.options, pref), "rule:referral_source")
             continue
         if ck in _SEMANTIC_KEYS:
-            handled, sv = _semantic(f, ck, profile, company, top_languages)
+            handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases)
             if handled:
                 if sv is None or sv == "":
                     res.unresolved.append(f)

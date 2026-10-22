@@ -242,7 +242,8 @@ class ApplyEngine:
             mapped = map_fields(rest, self.profile, referral_preference=self.s.apply.referral_preference,
                                 min_score=self.s.apply.option_min_score,
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
-                                stop_phrases=self.s.policy.stop_phrases)
+                                stop_phrases=self.s.policy.stop_phrases,
+                                company_aliases=self._company_aliases(ctx.posting.company))
         answers = sal_answers + list(mapped.answers)
         short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in mapped.unresolved if f not in short]
@@ -278,6 +279,15 @@ class ApplyEngine:
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}))
+
+    def _company_aliases(self, company: str) -> list[str]:
+        """dedupe.company_aliases names that are the same employer as the posting company (ADR-0038)."""
+        from .adapters import same_company
+        out: list[str] = []
+        for brand, canon in self.s.dedupe.company_aliases.items():
+            if same_company(brand, company) or same_company(canon, company):
+                out += [x for x in (brand, canon) if not same_company(x, company)]
+        return out
 
     def _skip_cover(self, f: FormField) -> bool:
         """Cover letters only when the form requires one (writing.cover_letter_policy, ADR-0023)."""
