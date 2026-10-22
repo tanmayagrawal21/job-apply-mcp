@@ -126,7 +126,13 @@ def same_value(kind: FieldKind, label: str, want: Any, got: str) -> bool:
     if canonical_key(label) == "phone" or "phone" in normalize(label):
         a, b = re.sub(r"\D", "", str(want)), re.sub(r"\D", "", got)
         return bool(a) and (b.endswith(a[-10:]) or a.endswith(b[-10:])) and bool(b)
+    if re.match(r"\s*(https?://|www\.)", str(want), re.IGNORECASE):    # sites normalise scheme / www / slash
+        return _bare_url(str(want)) == _bare_url(got)
     return normalize(str(want)) == normalize(got)
+
+
+def _bare_url(u: str) -> str:
+    return re.sub(r"^(https?://)?(www\.)?", "", u.strip().lower()).rstrip("/")
 
 
 # ---- evidence + network signal (pure, unit-tested)
@@ -200,6 +206,14 @@ _ERRORS_JS = """() => {
 
 _MENU_OPTS = "[class*=select__menu] [role=option], [role=listbox] [role=option], [role=option], [class*=option]"
 _SELECT_VALUES = "[class*=select__single-value], [class*=select__multi-value__label]"
+_MENU_SCOPED = "[class*=select__menu] [role=option], [role=listbox] [role=option], [role=option]"
+_MARK_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-scope]').forEach(x => x.removeAttribute('data-jam-scope'));
+  let n = e; while (n && !(n.className && String(n.className).includes('select__control'))) n = n.parentElement;
+  if (!n) return false; let c = n.parentElement || n;
+  const sh = n.closest('[class*=select-shell], [class*=select__container]'); if (sh) c = sh;
+  c.setAttribute('data-jam-scope', '1'); return true; }"""
+_COUNTRY_JS = """() => { const ids = ['country', 'phone-country', 'phone_country'];
+  for (const i of ids) { const e = document.getElementById(i); if (e && e.offsetParent !== null) return i; } return ''; }"""
 _SUBMIT_NAME = re.compile(r"^\s*(submit( application)?|send application|apply( now)?)\s*$", re.IGNORECASE)
 
 
@@ -278,7 +292,7 @@ class PlaywrightDriver:
         ref = form.ref
         await page.goto(url, wait_until="domcontentloaded")
         try:
-            await page.wait_for_selector("form input, form textarea, form select, input[type=file]",
+            await page.wait_for_selector("form input, form textarea, form select, input[type=file]", state="attached",
                                          timeout=self.b.timeout_s * 1000)
         except Exception:
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail="form did not render")
@@ -292,6 +306,9 @@ class PlaywrightDriver:
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
         failed: list[str] = []
+        if any(canonical_key(f.label) == "phone" or "phone" in normalize(f.label) for f, _ in texty):
+            if not await self._ensure_phone_country(page):
+                failed.append("phone_country")
         for f, v in texty:
             if not await self._fill(page, ats, f, v):
                 failed.append(f.key)
@@ -306,6 +323,8 @@ class PlaywrightDriver:
                         failed.append(f.key)
         bad = await self._verify(page, texty, ats)
         if bad:                                     # uploads/parsers can wipe fields: one refill pass
+            if "phone_country" in failed and await self._ensure_phone_country(page):
+                failed.remove("phone_country")
             for f, v in texty:
                 if f.key in bad:
                     await self._fill(page, ats, f, v)
@@ -372,7 +391,8 @@ class PlaywrightDriver:
 
     async def _validation_errors(self, page) -> list[str]:
         try:
-            return list(await page.evaluate(_ERRORS_JS))
+            errs = list(await page.evaluate(_ERRORS_JS))
+            return [e for e in errs if not re.search(r"cookie|privacy notice", e, re.IGNORECASE)]  # consent banners
         except Exception:
             return []
 
@@ -444,8 +464,13 @@ class PlaywrightDriver:
         cands.append(page.get_by_label(re.compile(re.escape(label), re.IGNORECASE)))
         for c in cands:
             try:
-                if await c.count():
-                    return c.first
+                n = await c.count()
+                if not n:
+                    continue
+                for i in range(min(n, 6)):          # skip hidden duplicates / templates
+                    if await c.nth(i).is_visible():
+                        return c.nth(i)
+                return c.first
             except Exception:
                 continue
         return None
@@ -464,7 +489,7 @@ class PlaywrightDriver:
                     ok &= await self._choose(page, f, loc, str(v))
                 return ok
             text = str(value)
-            if ats.typing == "keys":
+            if ats.typing == "keys" or f.key.startswith("urls["):
                 await loc.click()
                 await loc.press("ControlOrMeta+a")
                 await loc.press("Backspace")
@@ -486,35 +511,121 @@ class PlaywrightDriver:
                 except Exception:
                     continue
             return False
-        await loc.click()
-        want = value
-        async_lookup = f.kind == FieldKind.location or not f.options
-        if async_lookup:   # geocoded / searchable lists: type then wait for options
-            await loc.press_sequentially(value, delay=15)
-        opts = page.locator(_MENU_OPTS)
+        marked = False
         try:
-            await opts.first.wait_for(state="visible", timeout=3500 if async_lookup else 1500)
+            marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
         except Exception:
-            if not f.options:
-                return False
-            await loc.press_sequentially(value[:6], delay=15)   # filter a long fixed list
-            try:
-                await opts.first.wait_for(state="visible", timeout=1500)
-            except Exception:
+            pass
+        scope = page.locator("[data-jam-scope]") if marked else page
+        opts = scope.locator(_MENU_SCOPED if marked else _MENU_OPTS)
+        async_lookup = f.kind == FieldKind.location or not f.options
+        snapped = best_option(value, f.options) if f.options else None
+        flt = value if async_lookup else (snapped or value)
+        await loc.click()
+        await loc.press_sequentially(flt, delay=15)             # type a filter
+        try:
+            await opts.first.wait_for(state="visible", timeout=3500 if async_lookup else 2000)
+        except Exception:
+            if f.options:                                       # filter matched nothing: widen
+                await loc.press("ControlOrMeta+a")
+                await loc.press("Backspace")
+                try:
+                    await opts.first.wait_for(state="visible", timeout=1500)
+                except Exception:
+                    await self._close_menu(page)
+                    return False
+            else:
+                await self._close_menu(page)
                 return False
         texts = [t.strip() for t in await opts.all_inner_texts()]
-        pick = best_option(want, texts) if texts else None
+        pick = best_option(value, texts) if texts else None
         if pick is None and async_lookup and texts:
             pick = texts[0]
         if pick is None:
-            await page.keyboard.press("Escape")
+            await self._close_menu(page)
             return False
-        await opts.get_by_text(pick, exact=True).first.click()
+        idx = next(i for i, t in enumerate(texts) if t == pick)
+        try:
+            await opts.nth(idx).click(timeout=3000)           # CLICK the option element itself (never Enter)
+        except Exception:
+            await self._close_menu(page)
+            return False
         if f.kind == FieldKind.multiselect:
             await page.keyboard.press("Escape")
-        return True
+        committed = await self._committed(page, scope if marked else None, pick)
+        if not committed:
+            await self._close_menu(page)
+        return committed
+
+    @staticmethod
+    async def _close_menu(page) -> None:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _committed(page, scope, pick: str) -> bool:
+        """The choice is only real once it shows as the select's single-value / multi-value chip."""
+        for _ in range(8):
+            try:
+                root = scope if scope is not None else page
+                got = [normalize(t) for t in await root.locator(_SELECT_VALUES).all_inner_texts()]
+                np = normalize(pick)
+                if any(g and (g == np or g in np or np in g) for g in got):
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)
+        return False
+
+    async def _ensure_phone_country(self, page) -> bool:
+        """Intl-tel widgets reset the number when the country changes: pick United States (+1) BEFORE typing the phone."""
+        try:
+            cid = await page.evaluate(_COUNTRY_JS)
+        except Exception:
+            cid = ""
+        if cid:
+            loc = page.locator(f'[id="{cid}"]').first
+            try:
+                marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
+                if marked:
+                    cur = " ".join(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).all_inner_texts())
+                    if "united states" in cur.lower() or "+1" in cur:
+                        return True
+            except Exception:
+                pass
+            ff = FormField(key=cid, label="Country", kind=FieldKind.select)
+            return await self._choose(page, ff, loc, "United States")
+        flag = page.locator(".iti__selected-country, .iti__selected-flag, .iti__flag-container button").first
+        try:
+            if not await flag.count():
+                return True                     # no country widget on this form
+            title = ((await flag.get_attribute("title")) or "") + (await flag.inner_text())
+            if "united states" in title.lower() or "+1" in title:
+                return True
+            await flag.click()
+            us = page.locator("li.iti__country[data-country-code=us], [role=option]:has-text('United States')").first
+            await us.wait_for(state="visible", timeout=3000)
+            await us.click()
+            title = ((await flag.get_attribute("title")) or "") + (await flag.inner_text())
+            return "united states" in title.lower() or "+1" in title
+        except Exception:
+            await self._close_menu(page)
+            return False
+
+    @staticmethod
+    async def _is_rs(loc) -> bool:
+        try:
+            return bool(loc is not None and await loc.evaluate(
+                "e => e.getAttribute('role') === 'combobox' && !!e.closest('[class*=select__control]')"))
+        except Exception:
+            return False
 
     async def _set_boolean(self, page, f: FormField, loc, want: bool) -> bool:
+        if await self._is_rs(loc):                 # Greenhouse renders Yes/No questions as react-selects
+            ff = FormField(key=f.key, label=f.label, kind=FieldKind.select, options=["Yes", "No"])
+            return await self._choose(page, ff, loc, "Yes" if want else "No")
         if loc is not None:
             try:
                 typ = (await loc.get_attribute("type")) or ""
@@ -558,6 +669,13 @@ class PlaywrightDriver:
 
     async def _bool_state(self, page, f: FormField, loc) -> bool | None:
         """Current Yes/No state of a boolean field (checkbox, radio pair, or aria-pressed buttons); None if unknown."""
+        if await self._is_rs(loc):
+            try:
+                await loc.evaluate(_MARK_SCOPE_JS)
+                v = " ".join(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).all_inner_texts())
+                return {"yes": True, "no": False}.get(normalize(v))
+            except Exception:
+                return None
         try:
             if loc is not None and (await loc.get_attribute("type")) == "checkbox":
                 return await loc.is_checked()
@@ -633,7 +751,7 @@ class PlaywrightDriver:
                     got = normalize(await loc.input_value()) if loc is not None else ""
                 except Exception:
                     got = ""
-                if not got or normalize(str(v)).split(" ")[0] not in (got + " " + shown):
+                if not (got or shown) or normalize(str(v)).split(" ")[0] not in (got + " " + shown):
                     bad.append(f.key)
                 continue
             if f.kind in (FieldKind.select, FieldKind.multiselect) or f.options:
@@ -647,11 +765,18 @@ class PlaywrightDriver:
                 except Exception:
                     bad.append(f.key)
                     continue
+                own = shown
+                try:                                    # read back THIS select's own value, not the whole page's
+                    if loc is not None and await loc.evaluate(_MARK_SCOPE_JS):
+                        own = " | ".join(normalize(t) for t in await page.locator("[data-jam-scope]")
+                                         .locator(_SELECT_VALUES).all_inner_texts())
+                except Exception:
+                    pass
                 for one in (v if isinstance(v, list) else [v]):
-                    want = normalize(str(one))
+                    want = normalize(str((best_option(one, f.options) if f.options else None) or one))
                     if f.kind == FieldKind.location:
                         want = want.split(" ")[0]
-                    if want not in shown:
+                    if want not in own:
                         bad.append(f.key)
                         break
                 continue
