@@ -24,13 +24,20 @@ it could contradict the resume or break the writing rules and still be sent.
    Before the reviewer, every answer is scanned for `policy.stop_phrases` and for attestation, certification, no-AI
    and consent wording ("I certify", "personally completed", "without the use of AI", "true and correct",
    "consent to", "agree to", ...). A hit is `needs_review` without a reviewer call and is never submitted.
-   The scan runs on every client string, including URL slugs and select options. Any invisible character in an
-   answer is itself `needs_review`: the complete Unicode Default_Ignorable_Code_Point set (a range table in
-   `writing/checks.py`, including the soft hyphen, CGJ, ZWSP/ZWJ/ZWNJ, bidi controls, variation selectors, Hangul
-   fillers, Khmer inherent vowels, Mongolian FVS and tags) plus any other Cf character. Otherwise the text is
-   scanned after NFKD, removal of combining marks (Mn/Me), mapping of Cyrillic, Greek and small-capital
-   look-alikes to Latin, and NFKC. It is scanned again with punctuation, slug separators and line breaks
-   collapsed. Text addressed to the reviewer, such as
+   The scan runs on every client string, including URL slugs and select options. It is **deny by default**:
+   first a character allowlist applies. Allowed are printable ASCII, tab/LF/CR, Latin-1 and Latin Extended-A
+   letters (accented names), and the typographic marks ’ ‘ “ ” – — … •. Any other code point is `[charset]`
+   `needs_review`, which covers invisibles, homoglyphs, fullwidth forms, combining marks and the no-break space. An
+   exact option of the field's own fixed set is form text, so it skips the allowlist, but it is still scanned. Only
+   allowlisted text reaches the phrase scan. That scan runs after NFKD, removal of combining marks, casefolding,
+   and mapping of ASCII look-alikes. A standalone `1`, `l`, `|` or `!` before an attest verb becomes `i`. `A.I.`,
+   `A I` or `Al` next to no/use/used/of/without/assisted/generated/written/tools becomes `ai`. It runs again with
+   punctuation collapsed. The patterns cover pronoun and tense variants: I/we/the applicant/the candidate/the
+   undersigned with certify/certified/certifies/attest/affirm/declare/confirm/acknowledge/agree/consent/authorize.
+   They also cover contact consent: "SMS", "texts", "text me", "call or text" and "contact me by phone". These
+   patterns are deliberately broad. A false positive only holds that one answer for review; it never blocks the
+   whole run.
+   Text addressed to the reviewer, such as
    `{"pass": ...`, "Reviewer:" or "ignore previous instructions", is also `needs_review`.
    URLs, numbers and dates count as deterministic only outside prose-question fields.
    The client may not set attestation, AI-use or consent/opt-in fields (selects and booleans included) in agent
