@@ -376,6 +376,8 @@ class Services:
         st = self.engine.approvals.state(ref_or_url)
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
                "state": st["state"] if st else None, "t": self.engine.timings.get(ref_or_url)}
+        if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
+            row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return {k: v for k, v in row.items() if v}
 
     async def resolve_submission(self, ref: str, outcome: str, note: str, actor: str,
