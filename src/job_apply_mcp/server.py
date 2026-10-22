@@ -7,15 +7,25 @@ Token rules every tool follows (ADR-0005):
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .config import load_settings
+from .core import output as _output
 from .services import Services
 
 mcp = FastMCP("job-apply")
+_raw_tool = mcp.tool
+
+
+def _guarded_tool(*a: Any, **k: Any):
+    """Every registered tool gets the error envelope + schema-safe budgeting (ADR-0005 amendment)."""
+    dec = _raw_tool(*a, **k)
+    return lambda fn: dec(_output.guarded(fn, lambda: svc().settings.response_budget_chars))
+
+
+mcp.tool = _guarded_tool  # type: ignore[method-assign]
 _svc: Services | None = None
 
 
@@ -27,9 +37,7 @@ def svc() -> Services:
 
 
 def _out(obj: Any) -> str:
-    s = json.dumps(obj, separators=(",", ":"), default=str)
-    budget = svc().settings.response_budget_chars
-    return s if len(s) <= budget else s[: budget - 40] + f'..."truncated":{len(s)}}}'
+    return _output.out(obj, svc().settings.response_budget_chars)
 
 
 @mcp.tool()
