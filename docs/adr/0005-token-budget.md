@@ -14,4 +14,4 @@ Status: accepted · Date: 2026-10-22
 - Fewer, more capable tools (8 at launch) to keep the client's tool-list prompt small.
 
 ## Verify / revert
-`tests/test_token_budget.py` asserts every tool's default output for fixture data is under budget.
+Planned (lands with the tool-implementation PR): `tests/test_token_budget.py` asserts every tool's default output for fixture data is under budget.

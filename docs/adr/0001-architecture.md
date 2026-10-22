@@ -28,4 +28,4 @@ independently.
 - The generic adapter costs more tokens. The LLM router (ADR-0006) keeps that cost local where possible.
 
 ## Verify / revert
-Verify: `pytest tests/test_interfaces.py`. Revert: `git revert` the squash commit for this ADR's PR.
+Verify: `pytest tests/test_core.py` (registry; per-interface conformance tests land with each component PR). Revert: `git revert` the squash commit for this ADR's PR.
