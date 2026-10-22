@@ -162,12 +162,27 @@ def strict_verdict(v: object) -> bool:
     return v is True or v == "true"
 
 
+def _no_dup_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key in reviewer JSON")
+    return dict(pairs)
+
+
+def loads_strict(raw: str) -> dict[str, Any]:
+    """json.loads that rejects duplicate keys ({"pass": false, "pass": true}) and non-object JSON (ADR-0044)."""
+    d = json.loads(raw, object_pairs_hook=_no_dup_keys)
+    if not isinstance(d, dict):
+        raise TypeError("reviewer JSON is not an object")
+    return d
+
+
 def parse_rubric(raw: str, cfg: WritingCfg) -> tuple[bool, dict[str, int], list[str], str]:
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
         return False, {}, ["rubric reviewer returned no JSON"], ""
     try:
-        d = json.loads(m.group(0))
+        d = loads_strict(m.group(0))
         scores = {k: int(v) for k, v in (d.get("scores") or {}).items()}
     except (ValueError, TypeError):
         return False, {}, ["rubric reviewer returned invalid JSON"], ""

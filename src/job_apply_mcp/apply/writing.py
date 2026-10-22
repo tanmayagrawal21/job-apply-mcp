@@ -5,7 +5,6 @@ Lint runs first so cheap regex checks reject bad drafts before any reviewer toke
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -169,11 +168,12 @@ def _parse_review(raw: str) -> tuple[bool, list[str], str]:
     if not m:
         return False, ["reviewer returned no JSON"], ""
     try:
-        d = json.loads(m.group(0))
-        if not isinstance(d, dict):
-            return False, ["reviewer returned invalid JSON"], ""
-        ok = quality.strict_verdict(d.get("pass"))
-        issues = [str(x) for x in d.get("violations") or []]
+        d = quality.loads_strict(m.group(0))
+        raw_v = d.get("violations", [])
+        if not isinstance(raw_v, list):
+            return False, ["reviewer violations is not a list"], ""
+        issues = [str(x) for x in raw_v]
+        ok = quality.strict_verdict(d.get("pass")) and not issues   # a pass that lists violations is a fail
         if not ok and not issues:
             issues = [f"reviewer verdict not a strict pass: {d.get('pass')!r}"[:120]]
         return ok, issues, str(d.get("corrected") or "")

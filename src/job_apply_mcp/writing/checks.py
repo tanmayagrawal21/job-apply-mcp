@@ -143,3 +143,32 @@ def fact_conflicts(text: str, resume: list[Fact], today: date) -> list[Hit]:
         if ex:
             out.append(("fact", ex.reason + (f"; resume: {ex.correction}" if ex.correction else ""), s))
     return out[:3]
+
+
+# Latin look-alikes from other scripts (Cyrillic, Greek, IPA) that NFKC leaves alone (ADR-0044).
+_CONFUSABLES = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t",
+    "у": "y", "х": "x", "і": "i", "ї": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "һ": "h", "ӏ": "l",
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
+    "І": "I", "Ј": "J", "Ѕ": "S", "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W", "Ү": "Y", "Ӏ": "I",
+    "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P",
+    "Τ": "T", "Υ": "Y", "Χ": "X", "ɑ": "a", "ɡ": "g", "ɩ": "i", "ʟ": "L", "ı": "i",
+})
+_PUNCT = re.compile(r"[\W_]+", re.UNICODE)
+
+
+def format_chars(text: str) -> list[str]:
+    """Unicode format (Cf) characters: zero-width space/joiners, soft hyphen, BOM, bidi controls (ADR-0044)."""
+    import unicodedata
+    return [f"U+{ord(c):04X}" for c in text if unicodedata.category(c) == "Cf"]
+
+
+def scan_forms(text: str) -> list[str]:
+    """Views of `text` for deterministic phrase scans: NFKC with Cf characters removed and confusables mapped to
+    Latin, then the same with every run of punctuation, slug separators and line breaks collapsed to one space."""
+    import unicodedata
+    t = unicodedata.normalize("NFKC", text)
+    t = "".join(c for c in t if unicodedata.category(c) != "Cf").translate(_CONFUSABLES)
+    t = unicodedata.normalize("NFKC", t)
+    return [t, " ".join(_PUNCT.sub(" ", t).split())]

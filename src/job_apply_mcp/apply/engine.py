@@ -34,6 +34,7 @@ from ..core.models import (
     SubmitResult,
 )
 from ..llm.base import LLM_TIMINGS
+from ..writing import checks
 from .approvals import ApprovalBook, evidence_path
 from .mapper import (
     DEMOGRAPHIC_KEYS,
@@ -66,10 +67,23 @@ _ATTEST_LABEL = re.compile(
 _ATTEST_TEXT = re.compile(
     r"\bI\s+(?:hereby\s+|also\s+|further\s+)?(?:certify|attest|declare|affirm|acknowledge|agree|consent|"
     r"authori[sz]e|confirm\s+that)\b|\bhereby\b|\bpersonally\s+(?:completed|wrote|written|prepared)\b|"
-    r"\bwithout\s+(?:the\s+)?(?:use|help|assistance|aid)\s+of\s+(?:any\s+)?(?:ai|artificial intelligence|llms?|"
-    r"chatgpt|generative)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\s+(?:tools?\s+)?(?:was|were)\s+used\b|"
-    r"\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b",
+    r"\b(?:completed|written|prepared)\s+by\s+me\s+personally\b|"
+    r"\bwithout\s+(?:the\s+)?(?:use|help|assistance|aid)\s+of\s+(?:any\s+)?(?:an?\s+)?(?:ai|artificial intelligence|"
+    r"llms?|chatgpt|generative)\b|\b(?:did\s+not|didn\W?t|never)\s+use(?:d)?\s+(?:any\s+|an?\s+)?(?:chatgpt|copilot|"
+    r"ai|artificial intelligence|generative|llms?)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\s+"
+    r"(?:tools?\s+)?(?:was\s+|were\s+)?used\b|\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+"
+    r"(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b|\bpermission\s+to\s+(?:text|call|contact|email|"
+    r"e\W?mail|message|sms)\b|\b(?:sms|text)\s+messages?\b",
     re.IGNORECASE)
+# Text aimed at the reviewer model rather than the employer (ADR-0044).
+_INJECT_TEXT = re.compile(
+    r"[{\[]\s*\"?\s*(?:pass|violations|scores|at_least_as_strong|corrected)\b|(?:^|[\n.!?]\s*)(?:dear\s+)?(?:reviewer|"
+    r"grader|evaluator|assistant|system|note to (?:the\s+)?(?:reviewer|model|ai))\s*[:,]|\bignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
+    r"(?:instructions|rules|text)|\b(?:respond|reply|answer)\s+with\b|\breturn\s+json\b|\bpass\s*[:=]\s*true\b",
+    re.IGNORECASE)
+# Consent / opt-in labels: like attestations, never set by the client in agent mode (ADR-0044).
+_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|marketing|opt[\s-]?in|subscribe|newsletter|"
+                            r"terms (?:and|&) conditions|i agree|i accept", re.IGNORECASE)
 _EXACT_VALUE = re.compile(
     r"(?:https?://|www\.)\S+|[+-]?\d[\d,]*(?:\.\d+)?\s?%?|\d{4}-\d{2}(?:-\d{2})?|\d{1,2}/\d{1,2}/\d{2,4}|"
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?:\d{1,2},?\s+)?\d{4}", re.IGNORECASE)
@@ -695,6 +709,18 @@ class ApplyEngine:
                 if v not in (None, ""):
                     failed.append({"key": k, "needs_review": True, "violations": ["[field] not a field of this form"]})
                 continue
+            if v is None or v is False or v == "":
+                continue                                         # nothing filled / declined
+            if self._needs_human(f) or _CONSENT_LABEL.search(f.label):
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    "[attestation] attestation/consent field: only a profile answer or a human may set it"]}))
+                continue
+            texts = [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)] \
+                if isinstance(v, list | tuple) else []
+            bad = next((b for b in map(self._text_guard, texts) if b), None)
+            if bad:                                              # never reaches the reviewer or the form
+                failed.append(self._task(f, ctx, {"needs_review": True, "draft": str(v)[:2000], "violations": [bad]}))
+                continue
             if f.kind not in _FREE_TEXT_KINDS or self._deterministic(f, v):
                 continue
             if not isinstance(v, str):                           # lists, dicts, ...: never coerced into free text
@@ -702,11 +728,6 @@ class ApplyEngine:
                     f"[type] free-text answer must be a string, got {type(v).__name__}"]}))
                 continue
             if not v.strip():
-                continue
-            hit = self._attestation_hit(v)
-            if hit:                                              # never reaches the reviewer or the form
-                failed.append(self._task(f, ctx, {"needs_review": True, "draft": v, "violations": [
-                    f"[attestation] attestation/consent text in an answer: {hit!r}"]}))
                 continue
             if self._digest(ref, k, v) not in self._reviewed:
                 todo.append((f, v))
@@ -772,6 +793,8 @@ class ApplyEngine:
         t = v.strip()
         if f.options and t in f.options:
             return True
+        if self._is_prose_question(f):
+            return False                                         # a URL or number in a "Why..." box is still prose
         key = canonical_key(f.label)
         if key is not None:
             with contextlib.suppress(Exception):
@@ -780,14 +803,26 @@ class ApplyEngine:
                     return True
         return bool(_EXACT_VALUE.fullmatch(t))
 
-    def _attestation_hit(self, text: str) -> str | None:
-        """Stop phrases and attestation / no-AI / certification / consent wording inside an answer (ADR-0044)."""
-        low = text.lower()
-        for p in self.s.policy.stop_phrases:
-            if p.strip() and re.search(rf"(?<!\w){re.escape(p.lower())}(?!\w)", low):
-                return p
-        m = _ATTEST_TEXT.search(text)
-        return m.group(0) if m else None
+    def _text_guard(self, text: str) -> str | None:
+        """Deterministic checks on every client string before any reviewer call (ADR-0044): Unicode format (Cf)
+        characters, then stop phrases, attestation/no-AI/consent wording and reviewer-addressed text, scanned
+        after NFKC, Cf removal and confusable mapping, and again with punctuation collapsed."""
+        cf = checks.format_chars(text)
+        if cf:
+            return f"[format] invisible format characters {sorted(set(cf))[:4]}"
+        forms = checks.scan_forms(text)
+        for t in forms:
+            low = t.lower()
+            for p in self.s.policy.stop_phrases:
+                if p.strip() and re.search(rf"(?<!\w){re.escape(p.lower())}(?!\w)", low):
+                    return f"[attestation] attestation/consent text in an answer: {p!r}"
+            m = _ATTEST_TEXT.search(t)
+            if m:
+                return f"[attestation] attestation/consent text in an answer: {m.group(0)!r}"
+        m = _INJECT_TEXT.search(forms[0])
+        if m:
+            return f"[injection] text addressed to the reviewer: {m.group(0)!r}"
+        return None
 
     async def submit(self, ref: str, answers: dict[str, Any] | None = None, approval_id: str | None = None,
                      dry_run: bool | None = None, approver: Approver | None = None) -> SubmitResult:
