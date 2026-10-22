@@ -61,7 +61,10 @@ A QA round (issues #47, #48, #51) found:
   including) that lists only US visa types, treats text after the question mark as a note that may contain only
   authorization/visa/export wording and no place, and, when the posting location is US-only (`location_is_us`), reads
   "the country where the job is located", "this country" and "this location" as the US. The rest of ADR-0038's
-  allow-list is unchanged.
+  allow-list is unchanged. `location_is_us` is deny-by-default: every part of the posting location must say US/USA/
+  United States, name a full US state (not "Georgia"), or be "City, ST" with a state code that is not also an
+  ISO-3166 country code; an ambiguous code (CA, IN, DE, LA, ...) counts only with a city from a small explicit US
+  city table. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
 - **Never-LLM questions (#58 and export non-determinism).** `never_llm` (label or options) covers export control,
   ITAR/EAR, "U.S. person", citizenship, nationality, immigration, visa, sponsorship, authorization, clearance and
   criminal history, plus residence, location, relocation, commute, on-site, in-office, hybrid, remote, time zone and

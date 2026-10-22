@@ -307,9 +307,19 @@ def test_examples_and_notes_that_could_be_another_place_stay_unresolved():
 def test_job_country_phrases_resolve_only_for_a_us_only_posting():
     assert auth(AUTH_JOB_COUNTRY, job_in_us=True) == "Yes"
     assert auth(SPONS_THIS_COUNTRY, job_in_us=True) == "No"
-    assert location_is_us("New York, NY (HQ)") and location_is_us("Springfield, IL or Remote - US")
-    for loc in ["London, UK", "Remote", "", "New York, NY; Toronto, ON", "Springfield, IL / Berlin, Germany"]:
+    for loc in ["New York, NY (HQ)", "Springfield, OH or Remote - US", "Paris, TX", "Vancouver, WA",
+                "San Francisco, CA", "Springfield, IL, USA", "US Remote", "Austin, Texas", "Remote - US"]:
+        assert location_is_us(loc), loc
+    for loc in ["Toronto, CA", "Bengaluru, IN", "Berlin, DE", "Lagos, LA", "Vancouver, BC", "London, ON", "Remote",
+                "Remote - Canada", "", "London, UK", "New York, NY; Toronto, ON", "Springfield, IL",
+                "Springfield, OH / Berlin, Germany", "Tbilisi, Georgia", "Sao Paulo, Latin America"]:
         assert not location_is_us(loc), loc
+
+
+def test_this_country_on_non_us_or_unknown_postings_stays_unresolved():
+    for loc in ["Toronto, CA", "Bengaluru, IN", "Berlin, DE", "Lagos, LA", "", "Remote", "New York, NY; London, UK"]:
+        assert auth(AUTH_JOB_COUNTRY, job_in_us=location_is_us(loc)) is None, loc
+        assert auth(SPONS_THIS_COUNTRY, job_in_us=location_is_us(loc)) is None, loc
 
 
 # ---------------------------------------------------------------- #58 residence: deterministic only

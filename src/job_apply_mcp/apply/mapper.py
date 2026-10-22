@@ -592,25 +592,46 @@ def auth_core(label: str, job_in_us: bool = False) -> str | None:
     return q if auth_place_ok(q) else None
 
 
-_US_STATES = frozenset(["al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id", "il", "in", "ia",
-                        "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
-                        "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt",
-                        "va", "wa", "wv", "wi", "wy", "dc"])
+# ADR-0040 (review): deny-by-default US posting location. A "City, ST" code counts on its own only when it is not also
+# an ISO-3166 country code; an ambiguous code (CA, IN, DE, LA, ...) needs a known US city in front of it.
+_US_STATE_CODES_UNAMBIGUOUS = frozenset(["ak", "ct", "fl", "hi", "ia", "ks", "mi", "nv", "nh", "nj", "nm", "ny", "nd",
+                                         "oh", "ok", "or", "ri", "tx", "ut", "vt", "wa", "wv", "wi", "wy", "dc"])
+# also ISO-3166 alpha-2 country codes: AL AR AZ CA CO DE GA ID IL IN KY LA MA MD ME MN MO MS MT NC NE PA SC SD TN VA
+_US_CITY_STATE = frozenset([("san francisco", "ca"), ("los angeles", "ca"), ("san diego", "ca"), ("san jose", "ca"),
+                            ("palo alto", "ca"), ("mountain view", "ca"), ("sunnyvale", "ca"), ("long beach", "ca"),
+                            ("chicago", "il"), ("boston", "ma"), ("cambridge", "ma"), ("atlanta", "ga"),
+                            ("denver", "co"), ("boulder", "co"), ("philadelphia", "pa"), ("pittsburgh", "pa"),
+                            ("baltimore", "md"), ("indianapolis", "in"), ("new orleans", "la"), ("minneapolis", "mn"),
+                            ("arlington", "va"), ("phoenix", "az"), ("nashville", "tn"), ("charlotte", "nc"),
+                            ("raleigh", "nc"), ("louisville", "ky"), ("st louis", "mo"), ("boise", "id")])
+# full state names; "georgia" is also a country, so it is left out
+_US_STATE_NAMES = re.compile(
+    r"\b(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|hawaii|idaho|illinois|"
+    r"indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|"
+    r"montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|"
+    r"oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|"
+    r"washington|west virginia|wisconsin|wyoming)\b")
+_US_EXPLICIT = re.compile(r"\b(?:united states(?: of america)?|usa|u s a?|us)\b")
+
+
+def _part_is_us(part: str) -> bool:
+    if question_countries(part)[1]:
+        return False
+    n = normalize(part)
+    if _US_EXPLICIT.search(n) or _US_STATE_NAMES.search(n):
+        return True
+    m = re.fullmatch(r"\s*([^,]+?)\s*,\s*([A-Za-z]{2})\s*", part)
+    if not m:
+        return False
+    city, code = normalize(m.group(1)), m.group(2).lower()
+    return code in _US_STATE_CODES_UNAMBIGUOUS or (city, code) in _US_CITY_STATE
 
 
 def location_is_us(location: str) -> bool:
-    """True only when every part of a posting location is a US place ("New York, NY", "Remote - US")."""
+    """True only when every part of a posting location is explicitly a US place ("New York, NY", "Remote - US",
+    "Austin, Texas"). No location, "Remote", a non-US country or an ambiguous code alone ("Toronto, CA") -> False."""
     parts = [p for p in re.split(r"[;|]|\s/\s|\bor\b", re.sub(r"\([^)]*\)", " ", location or "")) if p.strip()]
-    if not parts:
-        return False
-    for p in parts:
-        if question_countries(p)[1]:
-            return False
-        state = re.search(r",\s*([A-Za-z]{2})\b", p)
-        n = normalize(p)
-        if not ((state and state.group(1).lower() in _US_STATES) or _US_IN_LABEL.search(n) or "us" in n.split()):
-            return False
-    return True
+    return bool(parts) and all(_part_is_us(p) for p in parts)
 
 
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_in_us: bool = False) -> tuple[bool, Any]:
