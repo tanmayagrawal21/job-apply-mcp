@@ -23,14 +23,24 @@ it could contradict the resume or break the writing rules and still be sent.
    coerced into text. A key that is not a field of the form is rejected.
    Before the reviewer, every answer is scanned for `policy.stop_phrases` and for attestation, certification, no-AI
    and consent wording ("I certify", "personally completed", "without the use of AI", "true and correct",
-   "consent to", "agree to", ...). A hit is `needs_review` without a reviewer call and is never submitted. This happens before the
-   control check and before `_authorize`, so no approval is ever re-bound over unreviewed text. Dry runs are
-   reviewed too, so a dry run does not report success for text a live submit would refuse.
+   "consent to", "agree to", ...). A hit is `needs_review` without a reviewer call and is never submitted.
+   The scan runs on every client string, including URL slugs and select options. It runs after NFKC normalisation,
+   removal of Unicode format (Cf) characters and mapping of Cyrillic/Greek look-alikes to Latin, and again with
+   punctuation, slug separators and line breaks collapsed. Any Cf character (zero-width space or joiner, soft
+   hyphen, BOM, bidi control) left in an answer is itself `needs_review`. Text addressed to the reviewer, such as
+   `{"pass": ...`, "Reviewer:" or "ignore previous instructions", is also `needs_review`.
+   URLs, numbers and dates count as deterministic only outside prose-question fields.
+   The client may not set attestation, AI-use or consent/opt-in fields (selects and booleans included) in agent
+   mode. Only a profile answer or a human may set them; declining (`false` or empty) is allowed.
+   All of this happens before the control check and before `_authorize`, so no approval is ever re-bound over
+   unreviewed text. Dry runs are reviewed too, so a dry run does not report success for text a live submit would
+   refuse.
 3. **Failure.** Any field that fails returns `status: "needs_review"` with `client_tasks`: each has `needs_review:
    true`, the `draft`, the `violations`, the rubric and any scorecard. Nothing is submitted, the submission state stays
    `planned`, no quota is consumed, and an approval-audit row `client_prose_rejected` is written.
 4. **Strict verdicts.** A reviewer passes only with JSON `true` or the exact string `"true"` for `pass` (and for
-   the quality gate's `at_least_as_strong`). `"false"`, `"yes"`, `1`, a missing value or non-object JSON fail. This
+   the quality gate's `at_least_as_strong`). `"false"`, `"yes"`, `1`, a missing value or non-object JSON fail. A `pass` must
+   also come with an empty `violations` list, and reviewer JSON with duplicate keys fails. This
    also tightens the writer path, which shares the parsers.
 5. **Fail closed.** The reviews share one `writing.timeout_s` deadline (ADR-0041); on expiry the in-flight reviewer
    call is cancelled and the field fails with a `[timeout]` violation. No router, an unavailable reviewer, a reviewer
@@ -50,7 +60,7 @@ it could contradict the resume or break the writing rules and still be sent.
 
 - Short answers ("Favorite build tool") now cost a reviewer call each in agent mode. A legitimate answer that uses
   consent wording ("I agree to relocate") is held for review; that is the intended fail-closed trade-off.
-- Not covered: attestation or consent booleans and selects set directly by the client (pre-existing, not prose).
+- Paraphrases the patterns do not list are left to the strict reviewer.
 
 ## Verify
 `uv run pytest -q tests/test_client_prose_review.py tests/test_config_trust.py`: passing prose is reviewed then
