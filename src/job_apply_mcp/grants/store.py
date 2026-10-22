@@ -2,7 +2,7 @@
 
 A grant is {id, scope, os_user, created, expires, max_uses, nonce, used} + HMAC-SHA256 signature. `used` is the
 consumed-use counter: it is bumped and re-signed on every use, so truncating the audit log cannot hand uses back
-(ADR-0037). The effective count is max(signed counter, audit "use" lines). The secret lives in the
+(ADR-0037). The count comes only from that counter; a grant id stored twice is rejected as tampering. The secret lives in the
 OS keychain (optional `keyring` extra) or a 0600 file in the user config dir; never in the repo, project or env.
 Only the CLI (`job-apply-mcp grant`, interactive TTY) creates grants; MCP can only read them.
 """
@@ -232,31 +232,32 @@ class GrantStore:
             raise GrantError(f"grant {g.id}: signature invalid (tampered)")
         return g
 
-    @staticmethod
-    def _audit_uses(entries: list[dict[str, Any]]) -> dict[str, int]:
-        n: dict[str, int] = {}
-        for e in entries:
-            if e["event"] == "use":
-                n[e["grant"]] = n.get(e["grant"], 0) + 1
-        return n
+    def _dup_ids(self, rows: list[dict[str, Any]]) -> set[str]:
+        """Grant ids that appear more than once: a copied row would carry its own counter, so it is tampering."""
+        seen: set[str] = set()
+        dup: set[str] = set()
+        for r in rows:
+            gid = r.get("id")
+            if isinstance(gid, str):
+                (dup if gid in seen else seen).add(gid)
+        return dup
 
     def uses(self, grant_id: str) -> int:
-        """max(signed per-record counter, audit "use" lines): neither a truncated log nor a lost counter resets it."""
-        n = self._audit_uses(self.audit_rows()).get(grant_id, 0)
+        """Consumed uses from the signed per-record counter only (never from the audit log)."""
         for row in self._read_all():
             if row.get("id") == grant_id:
                 with contextlib.suppress(GrantError):
-                    n = max(n, self._verify_row(row).used)
-        return n
+                    return self._verify_row(row).used
+        return 0
 
-    def _bump(self, g: Grant, used: int) -> None:
+    def _bump(self, g: Grant) -> None:
         """Persist used+1 in the signed record (caller holds the lock). Raises if the record vanished."""
         key = self._key()
         assert key is not None
         rows = self._read_all()
         for i, row in enumerate(rows):
             if row.get("id") == g.id and row.get("sig") == g.sig:
-                ng = Grant(**{**json.loads(g.payload()), "used": used + 1})
+                ng = Grant(**{**json.loads(g.payload()), "used": g.used + 1})
                 rows[i] = {**json.loads(ng.payload()), "sig": _sign(key, ng.payload())}
                 self._write_all(rows)
                 return
@@ -266,17 +267,20 @@ class GrantStore:
         """Valid, unexpired, same-user, unexhausted grants with remaining uses (None = unlimited). Read-only."""
         if self._key() is None:
             return []
-        entries, chain_ok = self._audit_lines()
-        n = self._audit_uses(entries)
+        _, chain_ok = self._audit_lines()
+        rows = self._read_all()
+        dup = self._dup_ids(rows)
         now, res = self._clock(), []
-        for row in self._read_all():
+        for row in rows:
+            if row.get("id") in dup:
+                continue
             try:
                 g = self._verify_row(row)
             except GrantError:
                 continue
             if g.expires <= now or g.os_user != self.user:
                 continue
-            left = None if g.max_uses is None else g.max_uses - max(g.used, n.get(g.id, 0))
+            left = None if g.max_uses is None else g.max_uses - g.used
             if left is not None and (left <= 0 or not chain_ok):   # cannot trust use counts: fail closed
                 continue
             res.append((g, left))
@@ -289,11 +293,15 @@ class GrantStore:
         if key is None:
             raise GrantError(f"no active grant for '{scope}'; a human must run `job-apply-mcp grant {scope} --for 1h`")
         with self._lock:
-            entries, chain_ok = self._audit_lines()
-            n = self._audit_uses(entries)
+            _, chain_ok = self._audit_lines()
+            rows = self._read_all()
+            dup = self._dup_ids(rows)
             now = self._clock()
-            for row in self._read_all():
-                if row.get("scope") != scope:
+            for gid in sorted(i for i in dup if any(r.get("id") == i and r.get("scope") == scope for r in rows)):
+                reason = f"grant {gid}: duplicated in the grant store (tampered)"
+                self.audit_safe("tampered", gid, scope, "duplicate grant id")
+            for row in rows:
+                if row.get("scope") != scope or row.get("id") in dup:
                     continue
                 try:
                     g = self._verify_row(row)
@@ -306,11 +314,11 @@ class GrantStore:
                     reason = f"grant {g.id}: expired"
                 elif g.max_uses is not None and not chain_ok:
                     reason = f"grant {g.id}: audit log tampered; cannot verify use count"
-                elif g.max_uses is not None and max(g.used, n.get(g.id, 0)) >= g.max_uses:
+                elif g.max_uses is not None and g.used >= g.max_uses:
                     reason = f"grant {g.id}: max_uses reached"
                 else:
                     if consume:
-                        self._bump(g, max(g.used, n.get(g.id, 0)))   # signed counter first, then the audit line
+                        self._bump(g)                 # signed counter first, then the audit line
                         self.audit("use", g.id, scope, detail)
                     return g
             self.audit_safe("denied", "", scope, reason)
