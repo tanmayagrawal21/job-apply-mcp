@@ -14,6 +14,36 @@ Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to 
 | `dry_run` | `bool` | `true` | safe default: nothing is submitted until the user flips this |
 | `response_budget_chars` | `int` | `4000` | tools truncate/paginate to stay under this |
 
+## `[search]`
+
+Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `match` | `str` | `"any"` | "title": every query term must be in the title; "any": rank title+description |
+| `rank` | `bool` | `true` | False = legacy newest-first order, no score/why |
+| `skills` | `list[str]` | `[]` | extra skills on top of the profile's |
+| `seniority` | `str \| None` | `none` | target level: "entry" \| "mid" \| "senior" \| None (no preference) |
+| `location_order` | `list[str]` | `[]` | preferred location substrings, best first |
+| `rank_candidates` | `int` | `40` | description-fetch + full scoring for the top N by the cheap pre-score |
+| `description_concurrency` | `int` | `6` | bounded parallel description fetches (also capped by the host limiter) |
+| `min_score` | `float` | `0.0` | drop rows scoring below this (0-100); 0 keeps everything with a query hit |
+| `weights` | `dict[str, float]` | `{"query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency"...` |  |
+| `recency_half_life_days` | `float` | `14.0` |  |
+| `max_why` | `int` | `3` |  |
+| `embeddings` | `bool` | `false` | optional semantic rerank through a local Ollama embedding model |
+| `embed_model` | `str` | `"nomic-embed-text"` |  |
+| `embed_url` | `str` | `"http://127.0.0.1:11434"` |  |
+| `embed_weight` | `float` | `3.0` |  |
+
+## `[dedupe]`
+
+Duplicate identity (ADR-0010 amendment). id_first: requisition id / canonical apply URL, with company+title only when neither is known. title: legacy company+fuzzy-title matching.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `mode` | `str` | `"id_first"` |  |
+
 ## `[improve]`
 
 Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and path scope is tunable.

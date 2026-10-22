@@ -6,6 +6,8 @@ message) until its component lands, so the server always starts.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,8 @@ class Services:
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
         self._llm = None
+        self._skills: list[str] | None = None
+        self._desc: dict[str, Posting | None] = {}
 
     @property
     def improve(self):
@@ -59,7 +63,8 @@ class Services:
         if self._store is None:
             from .store.sqlite import SqliteStore
 
-            self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days)
+            self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days,
+                                 dedupe_mode=self.settings.dedupe.mode)
         return self._store
 
     @property
@@ -150,33 +155,111 @@ class Services:
             return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
 
         results = await bounded_gather((one(a, b) for a, b in targets), self.settings.concurrency.global_limit)
+        cfg = self.settings.search
         terms = [t for t in query.lower().split() if t]
         loc = location.lower().strip()
         rows: list[Posting] = []
+        server_side: set[str] = set()   # refs whose platform already applied the query server-side
         dropped = 0
-        for (a, b), res in zip(targets, results):
+        for (a, b), res in zip(targets, results, strict=True):
             if isinstance(res, BaseException):
                 errors.append({"board": f"{a.name}:{b}", "err": str(res)[:120]})
                 continue
             server_q = getattr(a, "name", "") in ("workday", "jobspy")
             for p in res:
-                if terms and not server_q and not all(t in p.title.lower() for t in terms):
+                if terms and not server_q and cfg.match == "title" and not all(t in p.title.lower() for t in terms):
                     continue
                 if loc and a.name != "jobspy" and loc not in p.location.lower():
                     continue
                 if apply_policy and self._policy_drop(p):
                     dropped += 1
                     continue
+                if server_q:
+                    server_side.add(p.ref)
                 rows.append(p)
-        rows.sort(key=lambda p: (p.posted_at or "", p.ref), reverse=True)
+        extra: dict[str, Any] = {}
+        scored: dict[str, tuple[float, list[str]]] = {}
+        if cfg.rank:
+            rows, scored, extra, d2 = await self._rank(rows, query, server_side, apply_policy)
+            dropped += d2
+        else:
+            rows.sort(key=lambda p: (p.posted_at or "", p.ref), reverse=True)
         page = rows[cursor: cursor + limit]
         nxt = cursor + limit if cursor + limit < len(rows) else None
-        out: dict[str, Any] = {"rows": [{**p.compact(), "d": p.posted_at} for p in page], "total": len(rows), "next": nxt}
+        out_rows = []
+        for p in page:
+            r = {**p.compact(), "d": p.posted_at}
+            if p.ref in scored:
+                r["score"], r["why"] = scored[p.ref][0], scored[p.ref][1]
+            out_rows.append(r)
+        out: dict[str, Any] = {"rows": out_rows, "total": len(rows), "next": nxt, **extra}
         if dropped:
             out["filtered"] = dropped
         if errors:
             out["errors"] = errors[:10]
+        budget = self.settings.response_budget_chars   # shrink the page rather than let the server truncate JSON
+        while len(out_rows) > 1 and len(json.dumps(out, separators=(",", ":"), default=str)) > budget:
+            out_rows.pop()
+            out["next"] = cursor + len(out_rows)
         return out
+
+    # ------------------------------------------------------------------ relevance ranking (ADR-0022)
+    def _profile_skills(self) -> list[str]:
+        if self._skills is None:
+            sk = list(self.settings.search.skills)
+            from .profile import load_profile
+
+            with contextlib.suppress(OSError, ValueError):  # no readable profile: use search.skills only
+                sk += load_profile(self.settings.paths.profile).skills
+            self._skills = list(dict.fromkeys(x for x in sk if x.strip()))
+        return self._skills
+
+    async def _fetch_description(self, p: Posting) -> Posting | None:
+        """Description for ranking, cached per ref for the process (HTTP responses are also disk-cached)."""
+        if p.ref in self._desc:
+            return self._desc[p.ref]
+        try:
+            full = await self.adapters[p.platform].get_posting(p.ref, with_description=True)
+        except (AdapterError, ValueError, KeyError):  # one bad posting must not fail the search; it stays ranked on title only
+            full = None
+        self._desc[p.ref] = full
+        return full
+
+    async def _rank(self, rows: list[Posting], query: str, server_side: set[str], apply_policy: bool,
+                    ) -> tuple[list[Posting], dict[str, tuple[float, list[str]]], dict[str, Any], int]:
+        from .search.ranking import embed_rerank, rank_postings
+
+        cfg, skills = self.settings.search, self._profile_skills()
+        pol = self.settings.policy
+        stage1 = rank_postings(rows, query, skills, cfg, pol)
+        head, tail = stage1[: cfg.rank_candidates], stage1[cfg.rank_candidates:]
+        need = [r.posting for r in head if r.posting.description is None and r.posting.platform in self.adapters]
+        fetched = await bounded_gather((self._fetch_description(p) for p in need), cfg.description_concurrency)
+        full = {p.ref: f for p, f in zip(need, fetched, strict=True) if isinstance(f, Posting)}
+        dropped, cands = 0, []
+        for r in head:
+            p = full.get(r.posting.ref)
+            if p is not None:
+                p = p.model_copy(update={"location": p.location or r.posting.location})
+                if apply_policy and self._policy_drop(p):   # description may reveal hard constraints
+                    dropped += 1
+                    continue
+                cands.append(p)
+            else:
+                cands.append(r.posting)
+        ranked = rank_postings(cands, query, skills, cfg, pol)
+        if cfg.embeddings and ranked:
+            ranked = await embed_rerank(ranked, query, ", ".join(skills), cfg)
+        keep = [r for r in ranked if (r.q_hit or r.posting.ref in server_side) and r.score >= cfg.min_score]
+        unscanned = 0
+        for r in tail:   # beyond the description budget: only title-level evidence, so a query miss is dropped
+            if r.q_hit or r.posting.ref in server_side or not query.strip():
+                keep.append(r)
+            else:
+                unscanned += 1
+        scored = {r.posting.ref: (r.score, r.why) for r in keep}
+        extra = {"unscanned": unscanned} if unscanned else {}
+        return [r.posting for r in keep], scored, extra, dropped
 
     async def get_job(self, ref_or_url: str, fields: list[str] | None = None) -> dict[str, Any]:
         """Compact posting; opt in with fields: description, url, apply_url, posted, flags_detail."""
