@@ -26,7 +26,7 @@ function rs(id, opts, o) { o = o || {};
       opts.filter(t => t.toLowerCase().includes(q)).forEach((t, i) => { const d = document.createElement('div');
         d.className = 'select__option' + (i === 0 ? ' select__option--is-focused' : ''); d.setAttribute('role', 'option'); d.textContent = t;
         d.onmouseenter = () => d.classList.add('select__option--is-focused');
-        d.onclick = () => { if (o.multi) { chosen.push(t); } else { chosen = [t]; }
+        d.onclick = () => { if (o.broken) { close(); return; } if (o.multi) { chosen.push(t); } else { chosen = [t]; }
           vc.querySelectorAll('.select__single-value,.select__multi-value').forEach(x => x.remove());
           chosen.forEach(c => { const e = document.createElement('div'); e.className = o.multi ? 'select__multi-value' : 'select__single-value';
             e.innerHTML = o.multi ? '<span class="select__multi-value__label"></span>' : ''; (o.multi ? e.firstChild : e).textContent = c; vc.insertBefore(e, inp); });
@@ -127,7 +127,8 @@ GH_FORM = ApplicationForm(ref="greenhouse:acme:1", fields=[
               options=["Springfield", "Shelbyville", "Capital City"]),
     FormField(key="candidate-location", label="Location (City)", kind=FieldKind.location)])
 GH_ANS = {"first_name": "Alex", "phone": "555-0101", "question_1": "No", "question_2": True,
-          "question_3": ["Springfield", "Capital City"], "candidate-location": "Springfield, Illinois"}
+          "question_3": ["Springfield", "Capital City"], "candidate-location": "Springfield, Illinois",
+          "contact:country": "USA"}
 
 
 async def test_react_select_options_are_committed_and_country_precedes_phone(drv):
@@ -138,6 +139,54 @@ async def test_react_select_options_are_committed_and_country_precedes_phone(drv
     last = json.loads([p for p in posts if p[0] == "/state"][-1][1])
     assert "United States +1" in last["vals"] and last["vals"].count("Yes") == 1 and "No" in last["vals"]
     assert {"Springfield", "Capital City"} <= set(last["vals"]) and last["phone"] == "555-0101"
+
+
+@pytest.mark.parametrize("country,expect", [("Canada", "Canada +1"), ("India", "India +91"), ("", None)])
+async def test_phone_country_comes_from_the_profile(drv, country, expect):
+    srv, posts = _serve(GH_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:1", fields=GH_FORM.fields[:2])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/1", form,
+                                    {"first_name": "Alex", "phone": "555-0101", "contact:country": country}, {},
+                                    dry_run=True)
+    assert res.status == "dry_run", res.detail
+    last = json.loads([p for p in posts if p[0] == "/state"][-1][1])
+    countries = [v for v in last["vals"] if "+" in v]
+    assert countries == ([expect] if expect else [])          # no profile country: the widget is never guessed
+    assert last["phone"] == "555-0101"
+
+
+def test_country_helpers():
+    from job_apply_mcp.apply.browser_playwright import country_option, phone_country_name
+    assert phone_country_name("USA") == phone_country_name("U.S.") == "United States"
+    assert phone_country_name("Canada") == "Canada" and phone_country_name("") == ""
+    opts = ["United States Minor Outlying Islands +1", "United States +1", "India (+91)"]
+    assert country_option("United States", opts) == "United States +1"
+    assert country_option("India", opts) == "India (+91)"
+    assert country_option("Springfield", opts) is None
+
+
+TWO_HTML = """<html><body><form id=f>
+<label for=question_1>First question</label><div id=question_1_wrap></div>
+<label for=question_2>Second question</label><div id=question_2_wrap></div>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('question_1', ['Yes', 'No']); rs('question_2', ['Yes', 'No'], {broken: true});
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+async def test_commit_readback_is_scoped_to_the_field(drv):
+    """question_1 already shows 'Yes'; question_2's option click never commits. Its read-back must not be
+    satisfied by question_1's chip."""
+    srv, _ = _serve(TWO_HTML)
+    ctx = await drv._context()
+    page = await ctx.new_page()
+    await page.goto(f"http://127.0.0.1:{srv.server_port}/")
+    q1 = FormField(key="question_1", label="First question", kind=FieldKind.select, options=["Yes", "No"])
+    q2 = FormField(key="question_2", label="Second question", kind=FieldKind.select, options=["Yes", "No"])
+    assert await drv._choose(page, q1, await drv._locate(page, q1), "Yes")
+    assert not await drv._choose(page, q2, await drv._locate(page, q2), "Yes")
+    assert not await drv._committed(page, None, "Yes")        # no container: never committed
+    await page.close()
 
 
 async def test_lever_urls_typed_for_real(drv):
