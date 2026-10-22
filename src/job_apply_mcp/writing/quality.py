@@ -156,6 +156,12 @@ def rubric_prompt(draft: str, refs: list[str], company: str, title: str, facts: 
             f'"edits":[str],"corrected":str}}. Pass thresholds: {need}.')
 
 
+def strict_verdict(v: object) -> bool:
+    """A reviewer verdict passes only as JSON true or the exact string "true"; anything else, including a missing
+    value, "false", "yes" or 1, fails closed (ADR-0044)."""
+    return v is True or v == "true"
+
+
 def parse_rubric(raw: str, cfg: WritingCfg) -> tuple[bool, dict[str, int], list[str], str]:
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
@@ -167,7 +173,7 @@ def parse_rubric(raw: str, cfg: WritingCfg) -> tuple[bool, dict[str, int], list[
         return False, {}, ["rubric reviewer returned invalid JSON"], ""
     low = [f"{k} {scores.get(k, 0)} < {v}" for k, v in cfg.quality_min_scores.items() if scores.get(k, 0) < v]
     edits = [str(e) for e in d.get("edits", [])]
-    ok = not low and bool(d.get("at_least_as_strong", True))
+    ok = not low and strict_verdict(d.get("at_least_as_strong"))
     why = [f"rubric: {x}" for x in low] + ([] if ok or low else [f"not as strong as reference: {d.get('why', '')}"])
     return ok, scores, why + edits[:4], str(d.get("corrected") or "")
 

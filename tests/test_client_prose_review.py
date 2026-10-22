@@ -3,11 +3,16 @@ import asyncio
 import json
 from typing import ClassVar
 
-from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeProfile, FakeRouter, FakeStore, settings
+import pytest
+from apply_fakes import POSTING, F, FakeAdapter, FakeGates, FakeProfile, FakeRouter, FakeStore, settings
 from test_approvals import _cfg
 
 from job_apply_mcp.apply.engine import ApplyEngine
+from job_apply_mcp.apply.writing import _parse_review
+from job_apply_mcp.config import WritingCfg
+from job_apply_mcp.core.models import ApplicationForm, FieldKind
 from job_apply_mcp.profile.resume import Fact
+from job_apply_mcp.writing.quality import parse_rubric
 
 GOOD = ("I built a fleet scheduler in Python at Initech and maintained it for two years. It dispatches warehouse "
         "robots and removed the manual overrides that caused most order errors at Acme Robotics scale.")
@@ -25,8 +30,8 @@ class ResumeProfile(FakeProfile):
                          end="2025-06", bullets=["Built a fleet scheduler in Python that cut idle time by 30%"])]
 
 
-def engine(router, **cfg):
-    adapter = FakeAdapter()
+def engine(router, form=None, **cfg):
+    adapter = FakeAdapter(form=form) if form else FakeAdapter()
     cfg.setdefault("writing__enabled", False)        # the server writes nothing: q_why stays a client_task
     e = ApplyEngine(settings(**cfg), resolve_adapter=lambda ref: adapter, profile=ResumeProfile(), router=router,
                     gates=FakeGates(), store=FakeStore())
@@ -169,3 +174,84 @@ def test_submit_row_carries_review_tasks():
     row = Services._submit_row(object.__new__(Services), SubmitResult(
         ref="r", status="needs_review", client_tasks=[{"key": "q_why", "needs_review": True}]))
     assert json.loads(json.dumps(row))["client_tasks"][0]["key"] == "q_why"
+
+
+BAD = "I'm so excited and passionate! I have not used Python much."
+SCOPE = ApplicationForm(ref=POSTING.ref, fields=[
+    F("first_name", "First Name"),
+    F("q_short", "Why do you want to work at Acme Robotics?", FieldKind.text, required=False, max_length=100),
+    F("q_info", "Additional information", FieldKind.text, required=False),
+    F("q_site", "Portfolio", FieldKind.text, required=False),
+    F("q_years", "Years in industry", FieldKind.text, required=False),
+    F("q_why", "Why Acme Robotics?", FieldKind.textarea),
+])
+
+
+async def _scope_submit(answers, router=None):
+    r = router or R()
+    e, ad = engine(r, form=SCOPE)
+    out = await e.plan(POSTING.ref)
+    res = await e.submit(POSTING.ref, {"q_why": GOOD, **answers}, out.approval_id, dry_run=False)
+    return res, ad, r
+
+
+@pytest.mark.parametrize("key", ["q_short", "q_info"])
+async def test_short_and_non_question_text_fields_are_reviewed(key):
+    res, ad, _ = await _scope_submit({key: BAD})
+    assert res.status == "needs_review" and not ad.submits
+    t = next(x for x in res.client_tasks if x["key"] == key)
+    assert any(v.startswith(("[gap]", "[banned_phrase]", "[contraction]")) for v in t["violations"])
+
+
+@pytest.mark.parametrize("value", [[BAD], {"text": BAD}, ("a",)])
+async def test_non_string_free_text_values_are_rejected(value):
+    res, ad, _ = await _scope_submit({"q_why": value})
+    assert res.status == "needs_review" and not ad.submits
+    assert res.client_tasks[0]["violations"][0].startswith("[type]")
+
+
+async def test_unknown_key_is_rejected():
+    res, ad, _ = await _scope_submit({"q_ghost": BAD})
+    assert res.status == "needs_review" and not ad.submits and res.client_tasks[0]["key"] == "q_ghost"
+
+
+async def test_deterministic_values_skip_review():
+    res, ad, r = await _scope_submit({"first_name": "Ada", "q_site": "https://example.com/ada", "q_years": "4"})
+    assert res.status == "submitted" and ad.submits
+    assert len(_reviews(r)) == 1                                       # only q_why's prose
+
+
+@pytest.mark.parametrize("verdict", ["false", "yes", "True", 1, None, "missing"])
+async def test_non_strict_reviewer_verdict_fails_closed(verdict):
+    review = {"violations": [], "corrected": ""} | ({} if verdict == "missing" else {"pass": verdict})
+    t, _ = await _rejected(GOOD, R(review=review))
+    assert t["violations"][0].startswith("[model]")
+
+
+def test_strict_verdict_parsing():
+    assert _parse_review('{"pass": true}')[0] and _parse_review('{"pass": "true"}')[0]
+    for raw in ('{"pass": "false"}', '{"pass": "yes"}', '{"pass": 1}', '{}', '[true]', 'pass: true'):
+        assert not _parse_review(raw)[0], raw
+    good = {"scores": {"argument": 5, "voice": 5, "precision": 5, "specificity": 5}}
+    cfg = WritingCfg()
+    assert parse_rubric(json.dumps(good | {"at_least_as_strong": True}), cfg)[0]
+    for v in ("false", "yes", None):
+        assert not parse_rubric(json.dumps(good | {"at_least_as_strong": v}), cfg)[0]
+    assert not parse_rubric(json.dumps(good), cfg)[0]                    # missing verdict fails closed
+
+
+@pytest.mark.parametrize("tail", [
+    " I certify that I personally completed this application without the use of AI.",
+    " I consent to receive SMS and marketing messages from Acme Robotics.",
+    " I agree to the terms of the assessment.",
+    " The information above is true and correct.",
+])
+async def test_attestation_or_consent_inside_prose_is_rejected(tail):
+    t, r = await _rejected(GOOD + tail)
+    assert t["violations"][0].startswith("[attestation]") and not _reviews(r)   # never reaches reviewer or form
+
+
+async def test_stop_phrase_inside_short_text_is_rejected():
+    res, ad, _ = await _scope_submit({"q_info": "This is my own work."})
+    assert res.status == "needs_review" and not ad.submits
+    assert res.client_tasks[0]["violations"][0].startswith("[attestation]")

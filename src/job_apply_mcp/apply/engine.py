@@ -62,6 +62,18 @@ _SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|
 _ATTEST_LABEL = re.compile(
     r"certif|attest|foreign talent|own work|by selecting|i agree|i acknowledge|i declare|under penalty|"
     r"true and (?:correct|accurate)|truthful|export control|conflict of interest", re.IGNORECASE)
+# Attestation, certification, no-AI and consent wording that must never ride along inside an answer (ADR-0044).
+_ATTEST_TEXT = re.compile(
+    r"\bI\s+(?:hereby\s+|also\s+|further\s+)?(?:certify|attest|declare|affirm|acknowledge|agree|consent|"
+    r"authori[sz]e|confirm\s+that)\b|\bhereby\b|\bpersonally\s+(?:completed|wrote|written|prepared)\b|"
+    r"\bwithout\s+(?:the\s+)?(?:use|help|assistance|aid)\s+of\s+(?:any\s+)?(?:ai|artificial intelligence|llms?|"
+    r"chatgpt|generative)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\s+(?:tools?\s+)?(?:was|were)\s+used\b|"
+    r"\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b",
+    re.IGNORECASE)
+_EXACT_VALUE = re.compile(
+    r"(?:https?://|www\.)\S+|[+-]?\d[\d,]*(?:\.\d+)?\s?%?|\d{4}-\d{2}(?:-\d{2})?|\d{1,2}/\d{1,2}/\d{2,4}|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?:\d{1,2},?\s+)?\d{4}", re.IGNORECASE)
+_FREE_TEXT_KINDS = frozenset({FieldKind.text, FieldKind.textarea, FieldKind.unknown})
 _AI_LABEL = re.compile(r"\bai\b|artificial intelligence|\bllms?\b|chatgpt|copilot|generative", re.IGNORECASE)
 _HUMAN_LABEL = re.compile(_ATTEST_LABEL.pattern + "|" + _AI_LABEL.pattern, re.IGNORECASE)
 # "What AI tools are you using?" is a factual prose question (writer + review), not an AI-use attestation (ADR-0033).
@@ -673,11 +685,34 @@ class ApplyEngine:
             return []
         ref = ctx.form.ref
         fields = {f.key: f for f in ctx.form.fields}
-        todo = [(fields[k], v) for k, v in eff.items()
-                if k in fields and isinstance(v, str) and v.strip() and base.get(k) != v
-                and self._is_prose_question(fields[k]) and self._digest(ref, k, v) not in self._reviewed]
+        failed: list[dict[str, Any]] = []
+        todo: list[tuple[FormField, str]] = []
+        for k, v in eff.items():
+            if base.get(k) == v and k in base:
+                continue                                         # server-written or already approved
+            f = fields.get(k)
+            if f is None:                                        # not a form field: never carried to the adapter
+                if v not in (None, ""):
+                    failed.append({"key": k, "needs_review": True, "violations": ["[field] not a field of this form"]})
+                continue
+            if f.kind not in _FREE_TEXT_KINDS or self._deterministic(f, v):
+                continue
+            if not isinstance(v, str):                           # lists, dicts, ...: never coerced into free text
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    f"[type] free-text answer must be a string, got {type(v).__name__}"]}))
+                continue
+            if not v.strip():
+                continue
+            hit = self._attestation_hit(v)
+            if hit:                                              # never reaches the reviewer or the form
+                failed.append(self._task(f, ctx, {"needs_review": True, "draft": v, "violations": [
+                    f"[attestation] attestation/consent text in an answer: {hit!r}"]}))
+                continue
+            if self._digest(ref, k, v) not in self._reviewed:
+                todo.append((f, v))
         if not todo:
-            return []
+            self._audit_rejected(ref, failed)
+            return failed
         w = self.s.writing
         if self._exemplar is None:
             self._exemplar = load_exemplar(w.style_exemplar)
@@ -699,7 +734,6 @@ class ApplyEngine:
 
         with self._llm_timings(ref), self._stage(ref, "review_client"):
             results = await bounded_gather((one(f, v) for f, v in todo), self.s.concurrency.global_limit)
-        failed: list[dict[str, Any]] = []
         for (f, text), res in zip(todo, results, strict=True):
             if isinstance(res, TimeoutError):
                 why, card, rubric = [f"[timeout] review exceeded writing.timeout_s={w.timeout_s:g}s (fail closed)"], {}, ""
@@ -716,10 +750,44 @@ class ApplyEngine:
             if card:
                 extra["scorecard"] = card
             failed.append(self._task(f, ctx, extra))
+        self._audit_rejected(ref, failed)
+        return failed
+
+    def _audit_rejected(self, ref: str, failed: list[dict[str, Any]]) -> None:
         if failed:
             self.approvals.audit("client_prose_rejected", ref=ref, actor="review",
                                  detail=",".join(t["key"] for t in failed)[:200])
-        return failed
+
+    def _deterministic(self, f: FormField, v: Any) -> bool:
+        """Exact values that need no prose review: the profile's own value for a recognised key, a URL, a number,
+        a date, or an option of the field's fixed set (ADR-0044)."""
+        if v is None:
+            return True                                          # nothing is filled
+        if isinstance(v, bool):
+            return bool(f.options) and str(v) in f.options
+        if isinstance(v, int | float):
+            return True
+        if not isinstance(v, str):
+            return False
+        t = v.strip()
+        if f.options and t in f.options:
+            return True
+        key = canonical_key(f.label)
+        if key is not None:
+            with contextlib.suppress(Exception):
+                pv = self.profile.lookup(key)
+                if pv is not None and str(pv).strip() == t:
+                    return True
+        return bool(_EXACT_VALUE.fullmatch(t))
+
+    def _attestation_hit(self, text: str) -> str | None:
+        """Stop phrases and attestation / no-AI / certification / consent wording inside an answer (ADR-0044)."""
+        low = text.lower()
+        for p in self.s.policy.stop_phrases:
+            if p.strip() and re.search(rf"(?<!\w){re.escape(p.lower())}(?!\w)", low):
+                return p
+        m = _ATTEST_TEXT.search(text)
+        return m.group(0) if m else None
 
     async def submit(self, ref: str, answers: dict[str, Any] | None = None, approval_id: str | None = None,
                      dry_run: bool | None = None, approver: Approver | None = None) -> SubmitResult:

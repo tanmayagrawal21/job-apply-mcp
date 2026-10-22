@@ -170,7 +170,13 @@ def _parse_review(raw: str) -> tuple[bool, list[str], str]:
         return False, ["reviewer returned no JSON"], ""
     try:
         d = json.loads(m.group(0))
-        return bool(d.get("pass")), [str(x) for x in d.get("violations", [])], str(d.get("corrected") or "")
+        if not isinstance(d, dict):
+            return False, ["reviewer returned invalid JSON"], ""
+        ok = quality.strict_verdict(d.get("pass"))
+        issues = [str(x) for x in d.get("violations") or []]
+        if not ok and not issues:
+            issues = [f"reviewer verdict not a strict pass: {d.get('pass')!r}"[:120]]
+        return ok, issues, str(d.get("corrected") or "")
     except (ValueError, TypeError):
         return False, ["reviewer returned invalid JSON"], ""
 
