@@ -11,6 +11,7 @@ from ..base import Completion, ProviderError, estimate_tokens
 
 class FakeProvider:
     supports_options = True
+    supports_timeout = True
 
     def __init__(self, name: str = "fake", responses: list[Any] | Callable[..., Any] | None = None,
                  is_up: bool = True, models: list[str] | None = None, latency_s: float = 0.0,
@@ -33,9 +34,9 @@ class FakeProvider:
 
     async def complete_ex(self, prompt: str, *, model: str, system: str | None = None, max_tokens: int = 512,
                           temperature: float = 0.2, json_schema: dict | None = None, think: bool = False,
-                          num_ctx: int | None = None, **_) -> Completion:
+                          num_ctx: int | None = None, timeout_s: float | None = None, **_) -> Completion:
         self.calls.append({"prompt": prompt, "model": model, "system": system, "max_tokens": max_tokens,
-                           "json_schema": json_schema, "think": think, "num_ctx": num_ctx})
+                           "json_schema": json_schema, "think": think, "num_ctx": num_ctx, "timeout_s": timeout_s})
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:

@@ -1,6 +1,7 @@
 """Shared LLM types: completion result, task description, errors, and a tiny JSON-schema validator."""
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 from collections import deque
@@ -55,6 +56,17 @@ class Completion:
     tokens_in: int = 0
     tokens_out: int = 0
     gen_ms: float = 0.0   # provider-reported generation time, when known (for tokens/s)
+
+
+# Per-request LLM timing sink (ADR-0041). A caller (e.g. one plan) sets a dict; the router adds queue-wait and
+# generation milliseconds to it. Child tasks inherit the same dict, so concurrent calls of one plan add up.
+LLM_TIMINGS: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar("llm_timings", default=None)
+
+
+def add_timing(name: str, ms: float) -> None:
+    sink = LLM_TIMINGS.get()
+    if sink is not None:
+        sink[name] = sink.get(name, 0) + int(ms)
 
 
 def estimate_tokens(s: str) -> int:
@@ -175,6 +187,7 @@ class CallStats:
     tokens_in: int = 0
     tokens_out: int = 0
     total_ms: float = 0.0
+    wait_ms: float = 0.0              # time queued on the provider/heavy semaphores (ADR-0041)
     lat: deque = field(default_factory=lambda: deque(maxlen=200))
     last_error: str = ""
 
@@ -188,6 +201,7 @@ class CallStats:
         return {"calls": self.calls, "errors": self.errors, "tok_in": self.tokens_in,
                 "tok_out": self.tokens_out, "avg_ms": round(self.total_ms / self.calls) if self.calls else 0,
                 "p50_ms": self.pct(50), "p95_ms": self.pct(95),
+                "avg_wait_ms": round(self.wait_ms / self.calls) if self.calls else 0,
                 **({"last_error": self.last_error} if self.last_error else {})}
 
 
