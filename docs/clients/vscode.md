@@ -3,7 +3,7 @@
 Vendor docs: https://code.visualstudio.com/docs/agents/reference/mcp-configuration  (Verified against the vendor documentation on 2026-10-22.)
 
 Workspace file `.vscode/mcp.json` (or the user-profile `mcp.json` via the command palette,
-"MCP: Open User Configuration"). VS Code uses a top-level **`servers`** key, not `mcpServers`:
+"MCP: Open User Configuration" (the command opens the right file; we did not confirm its path per OS)). VS Code uses a top-level **`servers`** key, not `mcpServers`:
 
 ```json
 {

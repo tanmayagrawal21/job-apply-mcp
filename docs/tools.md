@@ -45,6 +45,13 @@ Tool names are the MCP tool names your client shows. Argument defaults are shown
 | `verify_text` | `id`, `edited_text=None`, `verified_by="user"` | verified record (plus a diff when edited) |
 | `provenance` | `id`, `include_text=False` | origin, model, prompt hash and ancestor chain |
 
+## Style tuning (optional local LoRA)
+
+| Tool | Inputs | Output |
+|---|---|---|
+| `tune_status` | none | backend, promoted and previous adapter, new user texts versus the threshold, last run |
+| `tune_run` | `trigger` (manual, new_data, rollback), `wait=False` | run summary; trains a LoRA on your own texts, gates it against the incumbent and promotes only if better. `wait=False` runs in the background; poll `tune_status` |
+
 ## Operations and self-improvement
 
 | Tool | Inputs | Output |

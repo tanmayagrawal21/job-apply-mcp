@@ -80,6 +80,11 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `max_years_required` | `int \| None` | `none` |  |
 | `salary_floor` | `int \| None` | `none` | annual, in the candidate's home market |
 | `col_multipliers` | `dict[str, float]` | `{}` | city substring -> multiplier |
+| `base_salary` | `int \| None` | `none` |  |
+| `default_ask` | `int \| None` | `none` | used when the posting shows no range: ask = max(floor, default_ask) |
+| `salary_round_to` | `int` | `1000` | clean-number rounding step |
+| `salary_multi_level_ratio` | `float` | `1.4` | top/bottom above this => range spans levels |
+| `salary_lower_middle` | `float` | `0.33` | anchor position inside a multi-level range (0.5 = midpoint) |
 | `requires_sponsorship` | `bool \| None` | `none` |  |
 | `graduation` | `str \| None` | `none` | e.g. "2026-05" |
 | `exclude_employer_patterns` | `list[str]` | `[]` |  |
@@ -191,6 +196,46 @@ Control layer (ADR-0014). Per-control knobs live in `params[<control id>]`; end 
 | `review_enabled` | `bool` | `false` | optional model-based review (router task_class "review") |
 | `review_actions` | `list[str]` | `["write_prose", "send_message"]` |  |
 | `review_fail` | `str` | `"warn"` | what to do when the reviewer errors: warn \| needs_human |
+
+## `[tune]`
+
+Local style tuning (ADR-0017). Everything runs on the user's machine; data and adapters live under `<paths.data_dir>/tuning/` (outside the repo). Needs the optional extra: `pip install job-apply-mcp[tune]`.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `backend` | `str` | `"mlx"` | Trainer backend id (tuning.trainer.trainers registry) |
+| `base_model` | `str` | `"mlx-community/Qwen3-4B-4bit"` | fits 16 GB; swap for a 4-bit Gemma/Qwen up to ~12B |
+| `kinds` | `list[str]` | `["cover_letter", "answer"]` | provenance kinds trained on |
+| `facts_kind` | `str` | `"profile_fact"` | kind whose texts are compacted into the instruction |
+| `facts_chars` | `int` | `600` |  |
+| `context_chars` | `int` | `800` |  |
+| `min_words` | `int` | `20` | length filters on the user's output text |
+| `max_words` | `int` | `700` |  |
+| `eval_fraction` | `float` | `0.2` |  |
+| `paragraph_split` | `bool` | `false` | tiny corpora: one example per paragraph (weak, leaks style) |
+| `seed` | `int` | `7` |  |
+| `iters` | `int` | `200` |  |
+| `batch_size` | `int` | `1` |  |
+| `num_layers` | `int` | `8` |  |
+| `learning_rate` | `float` | `1e-05` |  |
+| `max_seq_length` | `int` | `1536` |  |
+| `grad_checkpoint` | `bool` | `true` |  |
+| `time_budget_s` | `int` | `1500` | hard wall-clock cap; the last checkpoint is kept |
+| `save_every` | `int` | `50` |  |
+| `new_data_threshold` | `int` | `10` | new user texts since the last run that trigger "new_data" |
+| `auto_run` | `bool` | `false` | tune_status() may start a due run in the background |
+| `allow_on_battery` | `bool` | `false` |  |
+| `allow_with_heavy_model` | `bool` | `false` | another model (e.g. in Ollama) resident in memory |
+| `heavy_model_gb` | `float` | `4.0` | resident models smaller than this do not block training |
+| `min_eval_examples` | `int` | `2` |  |
+| `max_gen_tokens` | `int` | `400` |  |
+| `gate_min_nll_gain` | `float` | `0.0` | relative improvement in held-out loss required (0.02 = 2%) |
+| `gate_max_lint_regress` | `float` | `0.0` | allowed increase in lint violations per 100 words |
+| `gate_max_length_regress` | `float` | `0.05` | allowed increase in mean \|len ratio - 1\| |
+| `use_judge` | `bool` | `false` | optional review-tier judge (see tuning.evalgate.set_judge) |
+| `keep_runs` | `int` | `3` | adapters kept on disk besides promoted/previous |
+| `ollama_base` | `str \| None` | `none` | Ollama tag matching the adapter's base, for export |
+| `export_create` | `bool` | `false` | also run `ollama create` after writing the Modelfile |
 
 ## `[ingest]`
 
