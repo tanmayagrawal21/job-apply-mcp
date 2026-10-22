@@ -70,7 +70,7 @@ class UsageState:
             elif e.action == "submit":
                 if e.eid and e.eid in by_id:
                     continue
-                if legacy.get(e.ref):
+                if not e.eid and legacy.get(e.ref):
                     legacy[e.ref] -= 1
                     continue
             if e.action in action_filter:

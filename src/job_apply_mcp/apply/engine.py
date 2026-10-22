@@ -519,10 +519,10 @@ class ApplyEngine:
     async def _release_unsent(self, ref: str, reason: str, event_id: str = "") -> None:
         """Return the control quota of a live submit whose state proves nothing was sent (ADR-0032)."""
         release = getattr(self.control, "release", None)
-        if release is None or self._submission_state(ref) not in _NOT_SENT:
+        if release is None or not event_id or self._submission_state(ref) not in _NOT_SENT:   # no id: fail closed
             return
         with contextlib.suppress(Exception):   # a failed release only keeps the count higher (fail closed)
-            await (release(ref, reason, event_id) if event_id else release(ref, reason))
+            await release(ref, reason, event_id)
 
     async def _control(self, action: str, ctx: _Ctx, dry: bool, eff: dict[str, Any] | None = None) -> str | None:
         """Optional control layer (ADR-0014). Returns a block reason, or None when allowed."""

@@ -15,10 +15,10 @@ async def _submit(a, ref):
 
 async def test_released_ref_not_counted_in_day_platform_run_quotas(tmp_path):
     a = mk(tmp_path, params=QUOTA)
-    await _submit(a, "r1")
+    ids = {"r1": (await _submit(a, "r1")).event_id}
     await _submit(a, "r2")
     assert (await _submit(a, "r3")).decision == "block"
-    await a.release("r1", "fill failed")
+    await a.release("r1", "fill failed", ids["r1"])
     assert a.status()["quotas"]["day"] == {"used": 1, "left": 1}
     assert a.status()["quotas"]["run"] == {"used": 1, "left": 1}
     assert (await _submit(a, "r3")).decision == "pass"   # day, run and platform caps all had room again
@@ -27,17 +27,17 @@ async def test_released_ref_not_counted_in_day_platform_run_quotas(tmp_path):
 
 async def test_released_ref_can_be_retried_by_single_submit(tmp_path):
     a = mk(tmp_path)
-    await _submit(a, "r1")
+    first = await _submit(a, "r1")
     assert (await _submit(a, "r1")).decision == "block"
-    await a.release("r1", "x")
+    await a.release("r1", "x", first.event_id)
     assert not a.state.seen_ref("r1", frozenset({"submit"}), 0)
 
 
 async def test_release_survives_replay_and_is_audited(tmp_path):
     a = mk(tmp_path, params=QUOTA)
-    await _submit(a, "r1")
+    ids = {"r1": (await _submit(a, "r1")).event_id}
     await _submit(a, "r2")
-    await a.release("r1", "fill failed")
+    await a.release("r1", "fill failed", ids["r1"])
     rows = [json.loads(x) for x in (tmp_path / "control_audit.jsonl").read_text().splitlines()]
     rel = rows[-1]
     assert rel["a"] == "submit_release" and rel["ref"] == "r1" and rel["plat"] == "lever" and rel["reason"]
@@ -49,8 +49,8 @@ async def test_release_survives_replay_and_is_audited(tmp_path):
 
 async def test_later_resubmit_after_release_counts(tmp_path):
     a = mk(tmp_path)
-    await _submit(a, "r1")
-    await a.release("r1", "x")
+    r = await _submit(a, "r1")
+    await a.release("r1", "x", r.event_id)
     await _submit(a, "r1")
     assert a.state.count(actions=frozenset({"submit"})) == 1
 
@@ -62,7 +62,7 @@ class Spy:
             self.release = None   # type: ignore[assignment]
 
     async def check(self, action, ctx):
-        return {"decision": "pass"}
+        return {"decision": "pass", "event_id": "e1"}
 
     async def release(self, ref, reason, event_id=""):
         self.released.append((ref, reason))
@@ -117,8 +117,16 @@ async def test_release_cancels_exactly_one_submit_race(tmp_path):
     assert a.state.count(actions=frozenset({"submit"})) == 1
     b = mk(tmp_path)   # replay keeps the pairing
     assert b.state.count(actions=frozenset({"submit"})) == 1
-    c = mk(tmp_path / "legacy")   # release without an id: latest unreleased submit only
-    await _submit(c, "r1")
-    await c.check("submit", {"ref": "r1", "dry_run": False, "submission_state": "approved"})
-    await c.release("r1", "x")
-    assert c.state.count(actions=frozenset({"submit"})) == 1
+    from job_apply_mcp.control.controls import RELEASE, UsageEvent, UsageState
+    st = UsageState()   # legacy rows (no ids): a release cancels the latest unreleased earlier submit only
+    for act in ("submit", "submit", RELEASE):
+        st.add(UsageEvent(1.0, act, "r1"))
+    assert st.count(actions=frozenset({"submit"})) == 1
+
+
+async def test_idless_release_never_cancels_an_idd_submit(tmp_path):
+    a = mk(tmp_path)
+    await _submit(a, "r1")
+    await a.release("r1", "legacy-style")
+    assert a.state.count(actions=frozenset({"submit"})) == 1
+    assert mk(tmp_path).state.count(actions=frozenset({"submit"})) == 1

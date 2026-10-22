@@ -19,7 +19,7 @@ day, platform and run quotas (and the `single_submit` window) although nothing w
 
 - One release cancels exactly ONE submit. `check()` stamps a usage-event id (`ControlReport.event_id`, audit
   field `id`); the engine passes it to `release(ref, reason, event_id)` and replay pairs by id. Releases
-  without an id (old rows) cancel the latest unreleased earlier submit for the ref. This closes a race where
+  without an id (old rows) cancel only the latest unreleased earlier submit that itself has no id; the engine skips the release when it has no event id (fail closed). This closes a race where
   two concurrent submits for one ref pass while the state is still `approved` and one fails.
 
 ## Consequences
