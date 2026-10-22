@@ -25,10 +25,23 @@ from . import paths
 log = logging.getLogger(__name__)
 
 
+class HostLimitCfg(BaseModel):
+    per_host: int = 4               # max concurrent requests to this host
+    min_interval_s: float = 0.25    # minimum spacing between request starts to this host
+
+
+def _default_host_limits() -> dict[str, HostLimitCfg]:
+    # Public job-board APIs built for embedding; modest, documented-friendly rates (ADR-0024).
+    return {"boards-api.greenhouse.io": HostLimitCfg(per_host=16, min_interval_s=0.02),
+            "api.ashbyhq.com": HostLimitCfg(per_host=8, min_interval_s=0.05),
+            "api.lever.co": HostLimitCfg(per_host=8, min_interval_s=0.05)}
+
+
 class ConcurrencyCfg(BaseModel):
-    global_limit: int = 16          # max concurrent outbound tasks
+    global_limit: int = 32          # max concurrent outbound tasks (board fan-out)
     per_host: int = 4               # max concurrent requests per host
     min_interval_s: float = 0.25    # polite spacing per host
+    hosts: dict[str, HostLimitCfg] = Field(default_factory=_default_host_limits)   # per-host overrides of the two knobs above
     browser_workers: int = 2        # concurrent browser sessions
     # keys: "provider" or "provider:model" (most specific wins). Match OLLAMA_NUM_PARALLEL for ollama.
     llm_parallel: dict[str, int] = Field(default_factory=lambda: {"ollama": 2, "default": 4})
@@ -377,6 +390,15 @@ class TuneCfg(BaseModel):
     export_create: bool = False                   # also run `ollama create` after writing the Modelfile
 
 
+class SessionCfg(BaseModel):
+    """Search sessions (ADR-0024): the first search_jobs call builds the full result set once; pages read from it."""
+    enabled: bool = True
+    ttl_s: int = 1800               # a session (and its cursor) expires this long after its last use
+    max_sessions: int = 16          # in-memory LRU size
+    persist: bool = False           # also keep sessions on disk (survives server restarts)
+    max_rows: int = 5000            # rows kept per session
+
+
 class SearchCfg(BaseModel):
     """Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on."""
     match: str = "any"                   # "title": every query term must be in the title; "any": rank title+description
@@ -391,6 +413,7 @@ class SearchCfg(BaseModel):
         "query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency": 1.0})
     recency_half_life_days: float = 14.0
     max_why: int = 3
+    sessions: SessionCfg = Field(default_factory=SessionCfg)
     embeddings: bool = False             # optional semantic rerank through a local Ollama embedding model
     embed_model: str = "nomic-embed-text"
     embed_url: str = "http://127.0.0.1:11434"

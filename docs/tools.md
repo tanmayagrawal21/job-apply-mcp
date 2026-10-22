@@ -15,7 +15,8 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 
 | Tool | Inputs | Output | Token notes |
 |---|---|---|---|
-| `search_jobs` | `query=""`, `boards=None` (e.g. `["greenhouse:acme"]`), `platforms=None`, `location=""`, `since_days=7`, `limit=25`, `cursor=0`, `apply_policy=True` | `{rows:[{ref,co,title,loc,pay,flags}], total, next, errors}` | ~25 tokens per row. Policy gates drop obvious non-fits (sponsorship, citizenship, years, graduation window) before they reach you. With no boards configured it returns a `hint`. |
+| `search_status` | `session_id` | `{session,status,boards_total,boards_done,boards_failed,rows,elapsed_s,total}` | Progress of a search session; accepts a session id or cursor. |
+| `search_jobs` | `query=""`, `boards=None` (e.g. `["greenhouse:acme"]`), `platforms=None`, `location=""`, `since_days=7`, `limit=25`, `cursor=""`, `apply_policy=True` | `{rows:[{ref,co,title,loc,pay,flags}], total, next, session, errors}` | First call fans out once into a search session (ADR-0024); pass `next` back as `cursor` for instant pages from the session (expired sessions return `error`). Emits MCP progress notifications. ~25 tokens per row. Policy gates drop obvious non-fits (sponsorship, citizenship, years, graduation window) before they reach you. With no boards configured it returns a `hint`. |
 | `get_job` | `ref_or_url`, `fields=None` | one posting row; add `"description"` to `fields` for the trimmed text | Description is capped by `platforms.max_description_chars` (6000). Ask for it only for finalists. |
 | `get_form` | `ref_or_url` | `{ref, via, fields:[{key,label,kind,required,options}]}` | Options lists are the expensive part; call only before manual answers. |
 

@@ -43,12 +43,23 @@ def _out(obj: Any) -> str:
 
 
 @mcp.tool()
-async def search_jobs(query: str = "", boards: list[str] | None = None, platforms: list[str] | None = None,
-                      location: str = "", since_days: int = 7, limit: int = 25, cursor: int = 0,
-                      apply_policy: bool = True) -> str:
-    """Search postings across enabled platforms in parallel. Returns compact rows: ref, co, title, loc, pay, flags."""
+async def search_jobs(ctx: Context, query: str = "", boards: list[str] | None = None,
+                      platforms: list[str] | None = None, location: str = "", since_days: int = 7, limit: int = 25,
+                      cursor: str = "", apply_policy: bool = True) -> str:
+    """Search postings across enabled platforms in parallel. Returns compact rows: ref, co, title, loc, pay, flags.
+    The first call runs the whole search once; pass the returned `next` as `cursor` for more pages (instant)."""
+    async def progress(done: int, total: int) -> None:
+        await ctx.report_progress(done, total)
+
     return _out(await svc().search(query=query, boards=boards, platforms=platforms, location=location,
-                                   since_days=since_days, limit=limit, cursor=cursor, apply_policy=apply_policy))
+                                   since_days=since_days, limit=limit, cursor=cursor, apply_policy=apply_policy,
+                                   progress=progress))
+
+
+@mcp.tool()
+async def search_status(session_id: str) -> str:
+    """Progress of a search_jobs session: status, boards done/total, rows, elapsed. Accepts a session id or cursor."""
+    return _out(svc().search_status(session_id))
 
 
 @mcp.tool()

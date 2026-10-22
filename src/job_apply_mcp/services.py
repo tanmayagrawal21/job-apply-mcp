@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .core.interfaces import PlatformAdapter
 from .core.models import Posting
 from .platforms import AdapterError, HttpClient, build_adapters, detect
 from .platforms.textflags import grad_window_conflict, years_required
+from .search.sessions import Session, SessionError, SessionStore, parse_cursor
 
 
 class Services:
@@ -26,7 +28,9 @@ class Services:
         self._engine = engine
         c = settings.concurrency
         self._prov = None
-        self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s)
+        self.hosts = HostLimiter(per_host=c.per_host, min_interval_s=c.min_interval_s,
+                                 overrides={h: (v.per_host, v.min_interval_s) for h, v in c.hosts.items()})
+        self._sessions: SessionStore | None = None
         self._http: HttpClient | None = None
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
@@ -140,19 +144,98 @@ class Services:
             return True
         return bool(pol.graduation and "grad_window" in f and grad_window_conflict(f["grad_window"], pol.graduation))
 
+    @property
+    def sessions(self) -> SessionStore:
+        if self._sessions is None:
+            c = self.settings.search.sessions
+            d = Path(self.settings.paths.data_dir).expanduser() / "search_sessions" if c.persist else None
+            self._sessions = SessionStore(ttl_s=c.ttl_s, max_sessions=c.max_sessions, directory=d)
+            self._sessions.prune()
+        return self._sessions
+
+    def search_status(self, session_id: str) -> dict[str, Any]:
+        """Progress/state of a search session (running, done, or expired)."""
+        try:
+            s = self.sessions.get(session_id.split(":", 1)[0])
+        except SessionError as e:
+            return {"error": str(e)}
+        return {**s.progress(), "total": s.meta.get("total", len(s.rows))}
+
     async def search(self, query: str = "", boards: list[str] | None = None, platforms: list[str] | None = None,
-                     location: str = "", since_days: int = 7, limit: int = 25, cursor: int = 0,
-                     apply_policy: bool = True, **_: Any) -> dict[str, Any]:
-        """Fan out over (platform, board) pairs in parallel; compact, paginated rows (newest first)."""
+                     location: str = "", since_days: int = 7, limit: int = 25, cursor: int | str | None = 0,
+                     apply_policy: bool = True, progress: Any = None, **_: Any) -> dict[str, Any]:
+        """Fan out over (platform, board) pairs once into a session, then page from it (newest/best first).
+
+        `cursor` is the opaque `next` of a previous page (`<session_id>:<offset>`); pages never touch the network.
+        """
+        try:
+            sid, offset = parse_cursor(cursor)
+            sess = self.sessions.get(sid) if sid else None
+        except SessionError as e:
+            return {"rows": [], "total": 0, "next": None, "error": str(e)}
+        if sess is not None and sess.status == "running":
+            return {"rows": [], "total": 0, "next": f"{sess.sid}:{offset}", "progress": sess.progress(),
+                    "hint": "search still running; poll search_status then retry this cursor"}
+        if sess is None:
+            sess = self.sessions.create()
+            try:
+                await self._build_session(sess, query, boards, platforms, location, since_days, apply_policy, progress)
+            except BaseException:
+                sess.status = "error"
+                raise
+            finally:
+                sess.elapsed_s = time.monotonic() - sess.started
+                if sess.status == "running":
+                    sess.status = "done"
+                self.sessions.save(sess)
+        return self._page(sess, offset, limit)
+
+    def _page(self, sess: Session, cursor: int, limit: int) -> dict[str, Any]:
+        rows, meta = sess.rows, sess.meta
+        limit = max(1, limit)
+        end = min(cursor + limit, len(rows))
+        page = rows[cursor:end]
+
+        def nxt(e: int) -> str | None:
+            if e >= len(rows):
+                return None
+            return f"{sess.sid}:{e}" if self.settings.search.sessions.enabled else e   # type: ignore[return-value]
+
+        out: dict[str, Any] = {"rows": page, "total": len(rows), "next": nxt(end), "session": sess.sid, **meta.get("extra", {})}
+        if meta.get("filtered"):
+            out["filtered"] = meta["filtered"]
+        if meta.get("errors"):
+            out["errors"] = meta["errors"][:10]
+        budget = self.settings.response_budget_chars   # shrink the page rather than let the server truncate JSON
+        while len(page) > 1 and len(json.dumps(out, separators=(",", ":"), default=str)) > budget:
+            page.pop()
+            out["next"] = nxt(cursor + len(page))
+        out["rows"] = list(page)
+        return out
+
+    async def _build_session(self, sess: Session, query: str, boards: list[str] | None, platforms: list[str] | None,
+                             location: str, since_days: int, apply_policy: bool, progress: Any) -> None:
         targets, errors = self._targets(boards, platforms)
+        sess.boards_total = len(targets)
         if not targets:
-            return {"rows": [], "total": 0, "next": None, "errors": errors,
-                    "hint": "pass boards=['greenhouse:acme', ...] or set [platforms.boards] in config"}
+            sess.meta = {"errors": errors,
+                         "extra": {"hint": "pass boards=['greenhouse:acme', ...] or set [platforms.boards] in config"}}
+            return
         since = (datetime.now(UTC).date() - timedelta(days=since_days)).isoformat() if since_days else None
+        step = max(1, len(targets) // 50)
 
         async def one(a: Any, b: str) -> list[Posting]:
             kw = {"location": location} if a.name == "jobspy" else {}
-            return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
+            try:
+                return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
+            except BaseException:
+                sess.boards_failed += 1
+                raise
+            finally:
+                sess.boards_done += 1
+                if progress and (sess.boards_done % step == 0 or sess.boards_done == sess.boards_total):
+                    with contextlib.suppress(Exception):   # a broken client channel must not fail the search
+                        await progress(sess.boards_done, sess.boards_total)
 
         results = await bounded_gather((one(a, b) for a, b in targets), self.settings.concurrency.global_limit)
         cfg = self.settings.search
@@ -184,24 +267,14 @@ class Services:
             dropped += d2
         else:
             rows.sort(key=lambda p: (p.posted_at or "", p.ref), reverse=True)
-        page = rows[cursor: cursor + limit]
-        nxt = cursor + limit if cursor + limit < len(rows) else None
         out_rows = []
-        for p in page:
+        for p in rows[: cfg.sessions.max_rows]:
             r = {**p.compact(), "d": p.posted_at}
             if p.ref in scored:
                 r["score"], r["why"] = scored[p.ref][0], scored[p.ref][1]
             out_rows.append(r)
-        out: dict[str, Any] = {"rows": out_rows, "total": len(rows), "next": nxt, **extra}
-        if dropped:
-            out["filtered"] = dropped
-        if errors:
-            out["errors"] = errors[:10]
-        budget = self.settings.response_budget_chars   # shrink the page rather than let the server truncate JSON
-        while len(out_rows) > 1 and len(json.dumps(out, separators=(",", ":"), default=str)) > budget:
-            out_rows.pop()
-            out["next"] = cursor + len(out_rows)
-        return out
+        sess.rows = out_rows
+        sess.meta = {"extra": extra, "filtered": dropped, "errors": errors}
 
     # ------------------------------------------------------------------ relevance ranking (ADR-0022)
     def _profile_skills(self) -> list[str]:

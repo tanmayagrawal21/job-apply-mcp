@@ -28,7 +28,7 @@ async def test_fanout_compact_rows_and_pagination(tmp_path):
     mock_all()
     s = svc(tmp_path)
     out = await s.search(since_days=0, apply_policy=False, limit=2)
-    assert out["total"] == 4 and out["next"] == 2 and len(out["rows"]) == 2
+    assert out["total"] == 4 and out["next"].endswith(":2") and len(out["rows"]) == 2
     assert set(out["rows"][0]) <= {"ref", "co", "title", "loc", "pay", "flags", "d", "score", "why"}
     assert "description" not in json.dumps(out)
     assert out["rows"][0]["d"] >= out["rows"][1]["d"]  # newest first
