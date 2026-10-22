@@ -118,6 +118,8 @@ INTENT_AFFIRM = {"yes", "willing", "open", "able", "happy", "ready", "eager", "e
 def option_intent(text: str) -> tuple[int, int]:
     """(-1|0|1, strength): negators -> negative; else count of distinct willingness words (0 -> neutral)."""
     toks = tokens(text)
+    if re.search(r"\bno (?:preference|difference)\b|\beither\b|\bboth\b|\bany\b", " ".join(toks)):
+        return 0, 0
     if any(w in _NEGATORS for w in toks):
         return -1, 0
     hits = len(set(toks) & INTENT_AFFIRM)

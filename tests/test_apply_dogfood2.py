@@ -77,3 +77,21 @@ async def test_engine_answers_salary_deterministically_with_audit():
     assert ans == {"a": "$115,000", "b": "$115,000", "c": "115000"}
     assert "d" in out.plan.unresolved  # current salary is never auto-answered
     assert out.plan.audit["salary"]["rule"] == "range" and out.compact()["audit"]["salary"]["ask"] == 115_000
+
+
+def test_synonyms_do_not_leak_to_interviews_and_modes():
+    p = Profile(answers={"on-site": "Yes"})
+    for q in ("Are you comfortable with in person interviews?", "Is in-person onboarding OK?",
+              "Can you attend an in-person interview?"):
+        assert p.answer_for(q) is None
+    assert p.answer_for("Willing to do a 5 day in person office culture?") == "Yes"
+    off = Profile(answers={"in office": "Yes"}, answer_synonyms_mode="replace")
+    assert off.answer_for("Do you want office culture?") is None
+    rep = Profile(answers={"hybrid": "Yes"}, answer_synonyms_mode="replace", answer_synonyms=[["hybrid", "flex"]])
+    assert rep.answer_for("flex schedule?") == "Yes"
+
+
+def test_no_preference_options_are_neutral():
+    opts = ["No preference", "Open to both", "I am not able to relocate"]
+    assert best_option("Yes", opts) is None
+    assert best_option("No", opts) == "I am not able to relocate"
