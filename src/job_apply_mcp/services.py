@@ -374,11 +374,18 @@ class Services:
                      approval_id: str | None = None, approver: Any = None) -> dict[str, Any]:
         r = await self.engine.submit(ref_or_url, answers, approval_id, dry_run, approver)
         st = self.engine.approvals.state(ref_or_url)
+        return self._submit_row(r, st, self.engine.timings.get(ref_or_url))
+
+    def _submit_row(self, r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
-               "state": st["state"] if st else None, "t": self.engine.timings.get(ref_or_url)}
+               "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t}
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return {k: v for k, v in row.items() if v}
+
+    async def provide_verification_code(self, pending_id: str, code: str) -> dict[str, Any]:
+        r = await self.engine.provide_verification_code(pending_id, code)
+        return self._submit_row(r, self.engine.approvals.state(r.ref) if r.ref else None)
 
     async def resolve_submission(self, ref: str, outcome: str, note: str, actor: str,
                                   evidence: str = "") -> dict[str, Any]:

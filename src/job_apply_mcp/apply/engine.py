@@ -458,12 +458,14 @@ class ApplyEngine:
 
     def _state_block(self, ref: str) -> SubmitResult | None:
         cur = self.approvals.state(ref)
-        if cur and cur["state"] in ("submitting", "unknown", "submitted"):
+        if cur and cur["state"] in ("submitting", "unknown", "submitted", "awaiting_code"):
             ev = cur.get("evidence") or evidence_path(self.s.paths.data_dir, ref)
             return SubmitResult(ref=ref, status="needs_human" if cur["state"] != "submitted" else "duplicate",
                                 detail=(f"submission state={cur['state']} (never auto-resubmitted); "
                                         f"detail={cur.get('detail')}; evidence={ev}; "
-                                        "verify manually then call resolve_submission")[:300])
+                                        "verify manually then call resolve_submission"
+                                        + ("; a verification code is pending: provide_verification_code"
+                                           if cur["state"] == "awaiting_code" else ""))[:300])
         return None
 
     async def _authorize(self, ref: str, ctx: _Ctx, eff: dict[str, Any], approval_id: str | None,
@@ -531,6 +533,7 @@ class ApplyEngine:
         supplied = dict(answers or {})
         try:
             if not dry:
+                await self.expire_pending()
                 blocked = self._state_block(ref)
                 if blocked:
                     return blocked
@@ -601,7 +604,7 @@ class ApplyEngine:
                     raise
                 if not dry:
                     st = {"submitted": "submitted", "roadblock": "failed", "needs_human": "handoff",
-                          "duplicate": "failed"}.get(result.status, "unknown")
+                          "duplicate": "failed", "awaiting_code": "awaiting_code"}.get(result.status, "unknown")
                     if result.status == "error" and not ctx.meta.get("dispatched"):
                         st = "failed"
                     self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
@@ -616,6 +619,59 @@ class ApplyEngine:
             raise
         except Exception as e:  # noqa: BLE001
             return SubmitResult(ref=ref, status="error", detail=f"{type(e).__name__}: {e}"[:200])
+
+    # ------------------------------------------------ human-provided verification codes (ADR-0026)
+    def _code_drivers(self) -> list[Any]:
+        return [d for d in self._drivers.values() if d is not None and hasattr(d, "provide_code")]
+
+    async def _apply_code_result(self, res: SubmitResult) -> SubmitResult:
+        """Persist the outcome of a code step. Never a second submit: an unclear outcome stays blocking."""
+        ref = res.ref
+        st = {"submitted": "submitted", "awaiting_code": "awaiting_code", "duplicate": "failed",
+              "roadblock": "unknown", "handoff": "unknown"}.get(res.status, "unknown")
+        if res.status == "handoff":
+            res = res.model_copy(update={"detail": f"handoff: {res.detail or ''}"[:400]})
+        self.approvals.finish(ref, st, f"{res.status}: {res.detail or ''}",
+                              evidence_path(self.s.paths.data_dir, ref))
+        if res.status == "submitted":
+            cur = self.approvals.state(ref) or {}
+            await self.store.record(res, company=cur.get("company", ""), title=cur.get("title", ""))
+            self._plans.pop(ref, None)
+        return res
+
+    async def expire_pending(self) -> list[SubmitResult]:
+        """Move every code prompt past its window to a handoff (state `unknown`: blocking, human-resolvable)."""
+        out: list[SubmitResult] = []
+        for d in self._code_drivers():
+            for r in await d.expire_pending():
+                self.approvals.audit("code_expired", ref=r.ref, actor="server")
+                out.append(await self._apply_code_result(r))
+        return out
+
+    async def provide_verification_code(self, pending_id: str, code: str) -> SubmitResult:
+        """The USER typed the code they received; this only validates its format, types it, clicks the page's
+        verify button once and runs normal confirmation detection. Never reads mail; never logs/stores the code."""
+        await self.expire_pending()
+        drv = next((d for d in self._code_drivers() if d.pending_info(pending_id)), None)
+        if drv is None:
+            return SubmitResult(ref="", status="error", detail="unknown or expired pending_id")
+        info = drv.pending_info(pending_id)
+        ref = info["ref"]
+        if (err := drv.pending_check(pending_id, code)):             # format only; costs no attempt
+            return SubmitResult(ref=ref, status="awaiting_code", pending_id=pending_id,
+                                detail=f"invalid code format: {err}. Not entered; ask the user to re-check it.")
+        if not self.approvals.set_state(ref, "submitting", detail="verification code entered by the user",
+                                        only_from=("awaiting_code",)):
+            return SubmitResult(ref=ref, status="error", detail="submission is not awaiting a code")
+        self.approvals.audit("code_provided", ref=ref, actor="user", detail="code entered (value not recorded)")
+        try:
+            res = await drv.provide_code(pending_id, code)
+        except BaseException:
+            self.approvals.finish(ref, "unknown", "code entry interrupted; verify manually")
+            raise
+        if res is None:
+            res = SubmitResult(ref=ref, status="error", detail="unknown or expired pending_id")
+        return await self._apply_code_result(res)
 
     async def resolve_submission(self, ref: str, outcome: str = "", note: str = "",
                                  actor: str = "agent", evidence: str = "") -> dict[str, Any]:
@@ -699,7 +755,7 @@ class ApplyEngine:
                 return {"ref": ref, "status": "awaiting_approval", "approval_id": out.approval_id, "t": out.timings}
             async with browser_cap:
                 r = await self.submit(ref, {}, out.approval_id, dry)
-            row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail,
+            row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail, "pending_id": r.pending_id,
                    "t": self.timings.get(ref, {})}
             return {k: v for k, v in row.items() if v}
 

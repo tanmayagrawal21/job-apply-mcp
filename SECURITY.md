@@ -18,7 +18,7 @@ Supported versions: the latest release and `main`.
 ## Security model in brief
 
 - Defaults are safe: `dry_run = true`; real submission needs an approval token bound to the exact answers.
-- The server never solves CAPTCHAs, creates accounts, enters verification codes, or ticks attestations that
+- The server never solves CAPTCHAs, creates accounts, enters verification codes on its own (only a code the user types is entered, ADR-0026), or ticks attestations that
   match `policy.stop_phrases`.
 - HTTP mode binds 127.0.0.1; a non-loopback bind requires `JOB_APPLY_MCP_TOKEN` (compared in constant time).
   Put TLS in front of it (reverse proxy) for any network use. The token is never accepted as a CLI flag.
