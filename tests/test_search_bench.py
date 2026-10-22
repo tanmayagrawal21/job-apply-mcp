@@ -48,17 +48,20 @@ def _lever(board: str) -> list:
 
 
 class FakeTransport(httpx.AsyncBaseTransport):
-    """Board payloads by URL, with latency; `slow` boards sleep `slow_s`; counts requests per host."""
+    """Board payloads by URL, with latency; a `gated` board blocks until its event is set; counts requests per host."""
 
-    def __init__(self, slow: dict[str, float] | None = None):
+    def __init__(self, gated: dict[str, asyncio.Event] | None = None):
         self.calls: dict[str, int] = {}
-        self.slow = slow or {}
+        self.gated = gated or {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host, path = request.url.host, request.url.path
         self.calls[host] = self.calls.get(host, 0) + 1
         board = path.rstrip("/").split("/")[-2 if path.endswith("/jobs") else -1]
-        await asyncio.sleep(self.slow.get(board, LATENCY_S))
+        if board in self.gated:
+            await self.gated[board].wait()
+        else:
+            await asyncio.sleep(LATENCY_S)
         if host == "boards-api.greenhouse.io":
             body = _gh(board)
         elif host == "api.ashbyhq.com":
@@ -120,9 +123,6 @@ async def test_cold_then_warm_search_skips_network_limiter_and_parse(tmp_path):
     assert warm["timings"]["derive_s"] == 0 and warm["total"] == cold["total"]
     assert [r["ref"] for r in warm["rows"]] == [r["ref"] for r in cold["rows"]]
     print(f"\nbench boards={len(boards)} cold={cold_s:.2f}s warm={warm_s:.3f}s timings={warm['timings']}")
-    # Wall-clock totals include ranking, which runs in both and is noisy on shared CI runners. The fetch phase is
-    # what the memo removes, so compare that phase. The structural assertions above are the real guarantee.
-    assert warm["timings"]["fetch_s"] < cold["timings"]["fetch_s"] / 4
 
     # a new process (empty memo) reads the disk cache: still no network, and parses each board once
     s2 = _svc(tmp_path, tr)
@@ -164,16 +164,18 @@ async def test_revalidation_304_keeps_memo_and_runs_concurrently(tmp_path):
 
 
 async def test_slow_board_times_out_without_stalling_the_fanout(tmp_path):
-    tr = FakeTransport(slow={"gh001": 1.0})
-    s = _svc(tmp_path, tr, board_timeout_s=0.3)
+    release = asyncio.Event()   # the slow board answers only when the test says so: no timing race
+    tr = FakeTransport(gated={"gh001": release})
+    s = _svc(tmp_path, tr, board_timeout_s=2.0)
     boards = ["greenhouse:gh000", "greenhouse:gh001", "ashby:ab000"]
-    t = time.perf_counter()
     out = await s.search(boards=boards, since_days=0, apply_policy=False)
-    assert time.perf_counter() - t < 0.9
-    assert out["errors"] == [{"board": "greenhouse:gh001", "err": "timed out after 0.3s"}]
+    assert out["errors"] == [{"board": "greenhouse:gh001", "err": "timed out after 2s"}]
     assert out["total"] == 2 * JOBS and out["timings"]["slowest"][0][0] == "greenhouse:gh001"
-    assert len(s._late) == 1   # the slow fetch keeps running in the background ...
-    await asyncio.sleep(1.0)
+    late = next(iter(s._late))
+    assert not late.done()   # the search returned without waiting for the slow board, whose fetch keeps running ...
+    release.set()
+    await asyncio.wait_for(asyncio.shield(late), 30)   # wait for the background fetch itself, not a fixed sleep
+    await asyncio.sleep(0)
     assert not s._late
     again = await s.search(boards=boards, since_days=0, apply_policy=False)
     assert "errors" not in again and again["total"] == 3 * JOBS   # ... and the next search reads it from cache
@@ -181,25 +183,34 @@ async def test_slow_board_times_out_without_stalling_the_fanout(tmp_path):
     await s.aclose()
 
 
-def test_ranking_scales_linearly():
+def test_ranking_work_is_linear_in_rows(monkeypatch):
+    """Deterministic, no wall clock: tokenization calls grow exactly 4x for 4x rows (a per-row pass over all rows,
+    i.e. quadratic work, would grow 16x)."""
     from job_apply_mcp.config import SearchCfg
     from job_apply_mcp.core.models import Posting
+    from job_apply_mcp.search import ranking
 
-    def rows(n):
-        return [Posting(platform="greenhouse", ref=f"greenhouse:b:{i}", company=f"co{i % 300}",
-                        title=f"Software Engineer {i % 7}", location="Remote", url=f"https://example.com/{i}",
-                        posted_at="2026-10-01", description=DESC if i % 5 == 0 else None) for i in range(n)]
+    calls = [0]
+    real = ranking.tokens
 
-    def best(n):
-        rs, out = rows(n), []
-        for _ in range(3):
-            t = time.perf_counter()
-            rank_postings(rs, "software engineer", ["python"], SearchCfg())
-            out.append(time.perf_counter() - t)
-        return min(out)
+    def counting(text):
+        calls[0] += 1
+        return real(text)
 
-    small, big = best(2500), best(10000)
-    assert big < small * 8   # 4x rows: linear (+ n log n sort) stays far below the 16x of a quadratic pass
+    monkeypatch.setattr(ranking, "tokens", counting)
+
+    def work(n):
+        rs = [Posting(platform="greenhouse", ref=f"greenhouse:b:{i}", company=f"co{i % 300}",
+                      title=f"Software Engineer {i % 7}", location="Remote", url=f"https://example.com/{i}",
+                      posted_at="2026-10-01", description=DESC if i % 5 == 0 else None) for i in range(n)]
+        calls[0] = 0
+        out = rank_postings(rs, "software engineer", ["python"], SearchCfg())
+        assert len(out) == n
+        return calls[0]
+
+    small, big = work(500), work(2000)
+    fixed = work(0)   # per-call setup (query and skill tokens)
+    assert big - fixed == 4 * (small - fixed)
 
 
 async def test_targets_are_interleaved_across_platforms(tmp_path):
