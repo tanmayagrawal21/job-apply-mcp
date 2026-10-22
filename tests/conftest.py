@@ -19,3 +19,20 @@ async def http(tmp_path):
     c = HttpClient(cache_dir=tmp_path / "cache", ttl_s=900, retries=2, backoff_s=0)
     yield c
     await c.aclose()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    """No test may touch the real ~/.local/share/job-apply-mcp (audit log, store, profile, evidence):
+    every Settings() built during a test points its data and browser-profile dirs at tmp_path."""
+    from job_apply_mcp.config import Settings
+    orig = Settings.__init__
+
+    def init(self, *a, **kw):
+        orig(self, *a, **kw)
+        if self.paths.data_dir.startswith("~"):
+            self.paths.data_dir = str(tmp_path / "data")
+        if self.browser.user_data_dir.startswith("~"):
+            self.browser.user_data_dir = str(tmp_path / "profile")
+
+    monkeypatch.setattr(Settings, "__init__", init)

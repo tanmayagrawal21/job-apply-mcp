@@ -33,3 +33,31 @@ layouts may need selector tuning.
 ## Verify / revert
 Offline: `uv run pytest tests/test_apply_browser_pure.py`. Live: `uv sync --extra browser` then
 `JAM_LIVE=1 BROWSER_CHANNEL=chrome uv run pytest tests/test_apply_browser_live.py`. Revert: delete the two driver modules and the extras.
+
+## Amendment 1: evidence, confirmation detection, pre-submit validation (fix/browser-evidence)
+Context: two real Ashby submits (3 and 5 fields) ended "submit clicked but no confirmation detected" and no email
+arrived, so the outcome was unknown. A manual submit of the same form later worked. Ashby has no `<form>` element
+around its controls (buttons are "outside" any form), carries an invisible reCAPTCHA, autosaves via
+`ApiSetFormValue`, and its React state needs real key events (a fixture reproduces a controlled input that ignores
+programmatic sets).
+Decision:
+- **Evidence** on every dry run, pre-submit failure, live submit and non-success outcome, under
+  `<paths.data_dir>/evidence/<sha256(ref)[:12]>/<stage>-<ts>.{png,json}`: full-page screenshot, trimmed visible text,
+  URL, visible validation errors (`aria-invalid`, `role=alert`, banner/alert/error classes), POST responses (status
+  + short body for ATS submit endpoints, status only for others), reCAPTCHA/hCaptcha/Turnstile presence and a
+  button summary. `SubmitResult.detail` carries `evidence=<dir>` and field keys only, never values. Knobs:
+  `browser.evidence`, `evidence_text_chars`, `evidence_body_chars`.
+- **Detection**: `decide_outcome` prefers the network response (Ashby `ApiSubmit*` mutation: success typename /
+  no `errors`; Greenhouse/Lever POST status), then URL (`/confirmation`, `/thanks`), then success text only once the
+  form is gone. Polling up to `confirmation_wait_s`. No success signal is reported as FAILED/not submitted
+  (`needs_human`, never retried) with the captured errors.
+- **Pre-submit validation** (`browser.presubmit_validation`): after fill + read-back (now including Yes/No state via
+  `aria-pressed`/`aria-checked`/radio and location input values) any visible validation error returns `needs_human`
+  without clicking.
+- **Ashby**: keyboard typing plus blur; Yes/No need a real click confirmed by `aria-pressed` (one retry); location
+  requires a chosen suggestion; submit waits for the uploaded filename chip.
+- **Submit button**: prefers visible+enabled buttons named Submit/Submit application inside the `<form>`, then
+  anywhere by name; still refuses if more than one candidate remains.
+- Captcha-protected platforms. The project never evades, solves or manipulates bot detection (no stealth/fingerprint changes, no reCAPTCHA token handling, no timing tricks, no borrowed personal browser profile). When a captcha/reCAPTCHA/hCaptcha/Turnstile script or widget is detected (always for Ashby), the driver fills and verifies the form in a VISIBLE (headless=false) browser, saves evidence, does NOT click the final submit, leaves the tab open, and returns status handoff so a human performs the final click. If a visible browser is unavailable (headless) it returns needs_human.
+Verify: `uv run pytest tests/test_apply_browser_local.py` (needs local Chrome, skipped otherwise). Tests always use a
+tmp `data_dir` (autouse fixture in `tests/conftest.py`). Revert: revert the PR; config knobs are additive.
