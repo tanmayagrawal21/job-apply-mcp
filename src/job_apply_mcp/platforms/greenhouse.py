@@ -53,8 +53,12 @@ class GreenhouseAdapter(BaseAdapter):
                  location=(j.get("location") or {}).get("name", ""),
                  url=j.get("absolute_url") or f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
                  apply_url=f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
-                 posted_at=iso_date(j.get("updated_at") or j.get("first_published")),
+                 posted_at=self._posted(j),
                  countries=self._countries(j))
+
+    @staticmethod
+    def _posted(j: dict) -> str | None:
+        return iso_date(j.get("updated_at") or j.get("first_published"))
 
     def _countries(self, j: dict) -> list[str]:
         """["US"] only when every office's location ends in an explicit United States name (ADR-0040). One office that
@@ -72,11 +76,19 @@ class GreenhouseAdapter(BaseAdapter):
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:
         params = {"content": "true"} if (self.cfg.list_with_descriptions or with_description) else None
-        data = await self._get(f"{API}/{board}/jobs", params=params)
-        for j in data.get("jobs", []):
-            p = self._to_posting(board, j, with_description=with_description)
-            if not_before(p.posted_at, since):
-                yield p
+
+        def derive(data: Any) -> list[Posting]:
+            jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            return [self._to_posting(board, j, with_description=with_description) for j in jobs
+                    if not_before(self._posted(j), since)]   # date filter first: text flags are the costly part
+
+        try:   # finished postings are memoized per response digest (ADR-0043)
+            postings = await self.http.get_derived(f"{API}/{board}/jobs", derive, params=params,
+                                                   tag=f"{self.name}:{with_description}:{since}")
+        except HttpError as e:
+            raise AdapterError("job not found (closed or moved)" if e.status == 404 else str(e)) from e
+        for p in postings:
+            yield p
 
     async def get_posting(self, url_or_ref: str, *, with_description: bool = False) -> Posting:
         board, jid = self._need_job(url_or_ref)

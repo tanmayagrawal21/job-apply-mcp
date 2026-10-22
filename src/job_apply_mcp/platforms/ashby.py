@@ -13,6 +13,7 @@ from .http import HttpError
 
 BOARD_API = "https://api.ashbyhq.com/posting-api/job-board"
 GRAPHQL = "https://jobs.ashbyhq.com/api/non-user-graphql"
+_BOARD_PARAMS = {"includeCompensation": "true"}   # one fixed value: the cache key never varies by call site
 _URL = re.compile(r"ashbyhq\.com/([^/?#]+)(?:/([0-9a-f]{8}-[0-9a-f-]{27}))?", re.IGNORECASE)
 _QUERY = ("query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) { "
           "jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) "
@@ -45,7 +46,16 @@ class AshbyAdapter(BaseAdapter):
             j.get("descriptionPlain") or "", with_description=with_description, api_salary=pay,
             ref=self.ref(board, j["id"]), company=board, title=j.get("title", ""), location=j.get("location") or "",
                  url=url, apply_url=j.get("applyUrl") or url + "/application",
-                 posted_at=iso_date(j.get("publishedAt")), countries=self._countries(j))
+                 posted_at=self._posted(j),
+                 countries=self._countries(j))
+
+    @staticmethod
+    def _posted(j: dict) -> str | None:
+        return iso_date(j.get("publishedAt"))
+
+    @staticmethod
+    def _listed(d: Any) -> list[dict]:
+        return [j for j in (d.get("jobs", []) if isinstance(d, dict) else []) if j.get("isListed", True)]
 
     def _countries(self, j: dict) -> list[str]:
         """addressCountry of the primary and every secondary location (ADR-0040). A single location without a country
@@ -59,17 +69,24 @@ class AshbyAdapter(BaseAdapter):
 
     async def _board(self, board: str) -> list[dict]:
         try:
-            d = await self.http.get_json(f"{BOARD_API}/{board}", params={"includeCompensation": "true"})
+            d = await self.http.get_json(f"{BOARD_API}/{board}", params=_BOARD_PARAMS)
         except HttpError as e:
             raise AdapterError("board not found" if e.status == 404 else str(e)) from e
-        return [j for j in d.get("jobs", []) if j.get("isListed", True)]
+        return self._listed(d)
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:
-        for j in await self._board(board):
-            p = self._to_posting(board, j, with_description=with_description)
-            if not_before(p.posted_at, since):
-                yield p
+        def derive(d: Any) -> list[Posting]:
+            return [self._to_posting(board, j, with_description=with_description) for j in self._listed(d)
+                    if not_before(self._posted(j), since)]   # date filter first: text flags are the costly part
+
+        try:   # same URL + params as _board, so get_posting reuses the cached response (ADR-0043)
+            postings = await self.http.get_derived(f"{BOARD_API}/{board}", derive, params=_BOARD_PARAMS,
+                                                   tag=f"{self.name}:{with_description}:{since}")
+        except HttpError as e:
+            raise AdapterError("board not found" if e.status == 404 else str(e)) from e
+        for p in postings:
+            yield p
 
     async def get_posting(self, url_or_ref: str, *, with_description: bool = False) -> Posting:
         board, jid = self._need_job(url_or_ref)
