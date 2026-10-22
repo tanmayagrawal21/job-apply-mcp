@@ -286,7 +286,7 @@ def auth(label, job_in_us=False, options=("Yes", "No")):
 
 
 def test_real_us_sponsorship_labels_are_answered():
-    for label in [SPONS_EG, SPONS_ETC, SPONS_ITAR, "Will you now or in the future require sponsorship (i.e. OPT, CPT)?",
+    for label in [SPONS_EG, SPONS_ETC, "Will you now or in the future require sponsorship (i.e. OPT, CPT)?",
                   "Do you require visa sponsorship such as H-1B or TN?",
                   "Will you require immigration sponsorship for work authorization?"]:
         assert auth(label) == "No", label
@@ -415,3 +415,42 @@ def test_containment_is_word_bounded_elsewhere():
     assert best_option("Java", ["JavaScript", "Python"]) is None
     assert best_option("Indeed", ["Indeed.com", "LinkedIn"]) == "Indeed.com"
     assert best_option("Senior Software Engineer", ["Engineer", "Manager"]) == "Engineer"
+
+
+# ---------------------------------------------------------------- control review: legal-status terms block auth rules
+def test_authorization_never_answers_when_legal_status_is_mentioned():
+    for label in [SPONS_ITAR,
+                  "Are you authorized to work in the US? (U.S. persons as defined under ITAR/EAR)",
+                  "Are you authorized to work in the US? Note: this role requires a U.S. person under export control.",
+                  "Are you legally authorized to work in the United States? (citizens and green card holders only)",
+                  "Will you require sponsorship? Deemed export rules apply.",
+                  "Are you authorized to work in the US? A security clearance is required.",
+                  "Are you authorized to work in the United States as a permanent resident?"]:
+        assert auth(label) is None, label
+    opts = ["Yes, I am a U.S. person (ITAR)", "No"]
+    assert auth("Are you authorized to work in the United States?", options=opts) is None
+    assert auth("Do you require sponsorship?", options=["Yes", "No, I am a US citizen"]) is None
+    f = opt("q", "Are you authorized to work in the US? (U.S. persons as defined under ITAR/EAR)", ["Yes", "No"])
+    assert never_llm(f)
+
+
+# ---------------------------------------------------------------- control review: company name only as notice owner
+def ack(label, options, company):
+    r = map_fields([opt("q", label, options, required=True)], full(ack=True), company=company)
+    return {a.key: a.value for a in r.answers}.get("q")
+
+
+def test_company_name_only_strips_as_notice_owner():
+    assert ack("Data Sharing Applicant Privacy Notice", ["I acknowledge receipt"], "Data Sharing Inc") == \
+        "I acknowledge receipt"
+    assert ack("Data Sharing Inc's Privacy Policy", ["I have read it"], "Data Sharing Inc") == "I have read it"
+    # company words never satisfy or erase substantive content
+    assert ack("Privacy Notice", ["I agree to data sharing"], "Data Sharing Inc") is None
+    assert ack("Privacy notice: I agree to data sharing", ["Yes"], "Data Sharing Inc") is None
+    assert ack("Data Sharing consent", ["I agree"], "Data Sharing Inc") is None
+    assert ack("Marketing Labs Privacy Notice", ["I agree to Marketing Labs emails"], "Marketing Labs") is None
+    assert ack("Background Check Co Privacy Notice and background check consent", ["I agree"],
+               "Background Check Co") is None
+    # a notice noun must remain after stripping
+    assert ack("Acme Privacy", ["I acknowledge"], "Acme Privacy") is None
+    assert ack("Acme Privacy Notice", ["I acknowledge"], "Acme Privacy") is None

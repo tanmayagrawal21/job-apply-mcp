@@ -93,10 +93,13 @@ def test_country_where_you_live_variant_snaps_to_consistent_option():
     assert run(sel("Your authorization to work in the country where you live. Please select", COUNTRY))[0] is None
     assert run(sel("Can you work here and not require sponsorship?"))[0] is None
     f = sel("Your authorization to work in the United States. Please select", COUNTRY)
-    assert run(f)[0] == COUNTRY[1]
+    # ADR-0040: an option naming a citizenship status makes it a legal-status question -> owner, never a rule guess
+    assert run(f)[0] is None
+    g = sel("Your authorization to work in the United States. Please select", COUNTRY[1:])
+    assert run(g)[0] == COUNTRY[1]
     no_spons = prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False))
-    assert run(f, no_spons)[0] == COUNTRY[3]
-    assert run(f, prof(authorization=Authorization(work_authorized=True)))[0] is None
+    assert run(g, no_spons)[0] == COUNTRY[3]
+    assert run(g, prof(authorization=Authorization(work_authorized=True)))[0] is None
     assert pick_auth_option(COUNTRY, True, True, True) in (None, COUNTRY[0], COUNTRY[1])  # citizen option only if citizen
     assert pick_auth_option([COUNTRY[0], COUNTRY[2]], True, True, False) is None
 

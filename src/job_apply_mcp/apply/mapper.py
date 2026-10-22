@@ -562,9 +562,8 @@ _VISA_TYPES = frozenset(["h1b", "1b", "h4", "opt", "cpt", "tn", "f1", "l1", "o1"
 _VISA_EXAMPLE_VOCAB = _VISA_TYPES | frozenset(["h", "4", "f", "1", "l", "o", "e", "3", "j", "visa", "visas", "status",
                                                "etc", "and", "or", "a", "an", "the", "holder", "holders", "permit",
                                                "work", "sponsorship", "s"])
-_AUTH_NOTE_VOCAB = frozenset(["if", "qualify", "qualifies", "defined", "define", "person", "persons", "itar", "ear",
-                              "export", "regulations", "note", "considered", "applicants", "candidates", "those",
-                              "under", "per", "etc", "e", "g"])
+_AUTH_NOTE_VOCAB = frozenset(["if", "qualify", "qualifies", "defined", "define", "regulations", "note", "considered",
+                              "applicants", "candidates", "those", "under", "per", "etc", "e", "g"])
 _JOB_PLACE = re.compile(r"\b(?:the|this) country (?:where|in which) (?:the|this) (?:job|role|position) is "
                         r"(?:located|based)\b|\bthis country\b|\bthis location\b|\bthe country of employment\b",
                         re.IGNORECASE)
@@ -634,7 +633,20 @@ def location_is_us(location: str) -> bool:
     return bool(parts) and all(_part_is_us(p) for p in parts)
 
 
+# ADR-0040 (control review): an authorization/sponsorship rule never answers a field whose label, help text or options
+# mention export control or a legal status other than work authorization. "Authorized to work in the US? (U.S. persons
+# as defined under ITAR/EAR)" is an export-control question; it stays with the owner (and never goes to an LLM).
+_AUTH_LEGAL_BLOCK = re.compile(r"\bitar\b|\bear\b|\bu ?s persons?\b|\bexport|\bcitizen\w*|permanent resident\w*|"
+                               r"green card|\bclearance\b|deemed export")
+
+
+def auth_legal_blocked(f: FormField) -> bool:
+    return any(_AUTH_LEGAL_BLOCK.search(normalize(t)) for t in (f.label, *f.options))
+
+
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_in_us: bool = False) -> tuple[bool, Any]:
+    if auth_legal_blocked(f):
+        return True, None
     core = auth_core(f.label, job_in_us)
     n = normalize(core if core is not None else f.label)
     if core is None:
@@ -1086,13 +1098,26 @@ _ACK_EXTRA = frozenset(["below", "above", "receipt", "received", "linked", "atta
                         "collection", "notification", "required"])
 
 
-def _only_ack_words(text: str, extra: frozenset[str] = frozenset()) -> bool:
-    return all(t in _ACK_VOCAB or t in _ACK_EXTRA or t in extra for t in normalize(text).split())
+def _only_ack_words(text: str) -> bool:
+    return all(t in _ACK_VOCAB or t in _ACK_EXTRA for t in normalize(text).split())
 
 
-def _company_words(company: str) -> frozenset[str]:
-    """The posting company's own name words, so "Acme Applicant Privacy Notice" reads as a plain notice."""
-    return frozenset(t for t in normalize(company).split() if len(t) >= 3 and t not in _GENERIC_CO_WORDS)
+_LEGAL_SUFFIX = frozenset(["inc", "llc", "ltd", "corp", "co", "corporation", "gmbh", "plc", "limited", "company"])
+_NOTICE_OWNED = r"(?=(?:applicant |candidate |job applicant |recruitment |recruiting )?(?:privacy|data protection)\b)"
+
+
+def strip_company_owner(text: str, company: str) -> str:
+    """Normalized `text` with the posting company's full name removed ONLY where it owns the notice
+    ("Acme's Privacy Notice", "Acme Applicant Privacy Policy"). Elsewhere its words stay and must pass on their own."""
+    n = normalize(text)
+    words = normalize(company).split()
+    names = {" ".join(words)}
+    while words and words[-1] in _LEGAL_SUFFIX:
+        words = words[:-1]
+        names.add(" ".join(words))
+    for name in sorted((x for x in names if x), key=len, reverse=True):
+        n = re.sub(rf"\b{re.escape(name)}(?: s)? {_NOTICE_OWNED}", "", n)
+    return re.sub(r"\s+", " ", n).strip()
 
 
 _ACK_STRONG = re.compile(r"\b(acknowledg\w*|agree\w*|accept\w*|confirm\w*|understand\w*|read)\b")
@@ -1104,7 +1129,7 @@ def is_ack_option(option: str, company: str = "") -> bool:
     n = normalize(option)
     if not n or is_sensitive_question(option) or has_negator(option) or any(w in n for w in DECLINE_MARKERS):
         return False
-    if not _only_ack_words(option, _company_words(company)):
+    if not _only_ack_words(strip_company_owner(option, company)):
         return False
     return bool(_ACK_STRONG.search(n)) or n in ("yes", "y")
 
@@ -1116,10 +1141,11 @@ def is_privacy_notice(label: str, stop_phrases: Sequence[str] = (), company: str
     low = label.lower()
     if _PRIVACY_EXCLUDE.search(low) or any(p.lower() in low for p in (*default_stop, *stop_phrases) if p):
         return False
+    stripped = strip_company_owner(label, company)
     if (canonical_key(label) not in (None, "privacy_ack") or is_sensitive_question(label)
-            or not _only_ack_words(label, _company_words(company))):
+            or not _only_ack_words(stripped)):
         return False
-    return bool(_PRIVACY_LABEL.search(normalize(label)))
+    return bool(_PRIVACY_LABEL.search(stripped))     # a privacy / data-protection notice noun must remain
 
 
 def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: str = "") -> Any | None:

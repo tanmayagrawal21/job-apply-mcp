@@ -65,6 +65,10 @@ A QA round (issues #47, #48, #51) found:
   United States, name a full US state (not "Georgia"), or be "City, ST" with a state code that is not also an
   ISO-3166 country code; an ambiguous code (CA, IN, DE, LA, ...) counts only with a city from a small explicit US
   city table. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
+- **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
+  options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
+  security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an
+  LLM. This also leaves a sponsorship question with an ITAR note unresolved.
 - **Never-LLM questions (#58 and export non-determinism).** `never_llm` (label or options) covers export control,
   ITAR/EAR, "U.S. person", citizenship, nationality, immigration, visa, sponsorship, authorization, clearance and
   criminal history, plus residence, location, relocation, commute, on-site, in-office, hybrid, remote, time zone and
@@ -74,7 +78,9 @@ A QA round (issues #47, #48, #51) found:
   from the profile country; "continental"/"contiguous" also needs `contact.region` (Alaska, Hawaii and territories ->
   No; missing -> unresolved). Any other wording stays unresolved.
 - **Privacy-notice acknowledgement (#56).** The acknowledgement vocabulary adds plain words such as "below",
-  "receipt", "linked", "attached" and "required", and the posting company's own name words are allowed. The opt-in,
+  "receipt", "linked", "attached" and "required". The posting company's full name is removed only as an exact
+  phrase that owns the notice ("Acme's Privacy Notice", "Acme Applicant Privacy Policy"); its words never satisfy or
+  erase other content, and a privacy / data-protection notice noun must remain after removal. The opt-in,
   the exclusion list, the sensitive-topic checks and the EEO refusal are unchanged.
 
 ## Consequences
