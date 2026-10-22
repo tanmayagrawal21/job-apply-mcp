@@ -148,3 +148,38 @@ async def test_lever_urls_typed_for_real(drv):
     ans = {"urls[LinkedIn]": "https://www.linkedin.com/in/alex-rivera", "urls[GitHub]": "https://github.com/alex-rivera"}
     res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/1/apply", form, ans, {}, dry_run=True)
     assert res.status == "dry_run", res.detail
+
+
+EEO_HTML = """<html><body><form id=f>
+<label for=first_name>First Name *</label><input id=first_name name=first_name required>
+<label for=why>Why do you want to work here? *</label><textarea id=why aria-required=true></textarea>
+<label id=g_l for=gender>Gender *</label><div id=gender_wrap></div>
+<label id=v_l for=vet>Veteran Status *</label><div id=vet_wrap></div>
+<input aria-hidden=true tabindex=-1 required value="" class=shim>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('gender', ['Male', 'Female', "I don't wish to answer"]);
+rs('vet', ['I am not a protected veteran', "I don't wish to answer"]);
+document.querySelectorAll('#gender,#vet').forEach(i => i.setAttribute('aria-required', 'true'));
+function report() { fetch('/state', {method: 'POST', body: JSON.stringify([...document.querySelectorAll('.select__single-value')].map(x => x.textContent))}); }
+new MutationObserver(report).observe(document.body, {subtree: true, childList: true}); report();
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+async def test_incomplete_reports_required_gaps_and_declines_eeo(drv):
+    srv, posts = _serve(EEO_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:2", fields=[
+        FormField(key="first_name", label="First Name *", kind=FieldKind.text, required=True)])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/2", form, {"first_name": "Alex"},
+                                    {}, dry_run=True)
+    assert res.status == "incomplete", res.detail
+    assert "Why do you want" in res.detail and "Gender" not in res.detail and "Veteran" not in res.detail
+    assert "shim" not in res.detail
+    vals = json.loads([p for p in posts if p[0] == "/state"][-1][1])
+    assert vals == ["I don't wish to answer", "I don't wish to answer"]
+
+
+def test_located_in_us_maps_from_country():
+    from job_apply_mcp.apply.mapper import canonical_key
+    assert canonical_key("Are you currently located in the US?") == "located_in_us"
+    assert canonical_key("Are you currently based in or willing to relocate to the Bay Area?") == "willing_to_relocate"

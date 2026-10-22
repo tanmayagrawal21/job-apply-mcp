@@ -1,4 +1,4 @@
-# ADR-0026: Commit react-select choices, set phone country first, type Lever urls
+# ADR-0028: Commit react-select choices, set phone country first, type Lever urls
 
 ## Context
 Live Greenhouse dry-runs left react-selects open with an option highlighted but not chosen, Yes/No questions
@@ -16,6 +16,13 @@ hidden duplicate inputs were located first; programmatic `fill` is ignored by co
   country change resets the number. Failure reports `phone_country`.
 - Prefer visible matches in `_locate`; type `urls[...]` inputs with real key events; URL read-back ignores
   scheme/www/trailing slash. Cookie banners are not counted as validation errors.
+
+- Before any submit click (and in dry-run) scan the DOM for visible required controls (asterisk label, aria-required,
+  required; aria-hidden shims ignored; checkbox/radio groups need one member) that are still empty. Any gap returns
+  status `incomplete` with the labels; nothing is clicked. Required prose stays a client task upstream.
+- EEO selects that exist only in the DOM: the profile value (`demographic:<key>` answers from the engine) or else the
+  decline / "I don't wish to answer" option; never an invented demographic.
+- Mapper: `located_in_us` is derived from the configured country.
 
 ## Consequences
 Slightly slower selects (typing + commit check). Only dry-run/local fixtures and live read-back verify it.
