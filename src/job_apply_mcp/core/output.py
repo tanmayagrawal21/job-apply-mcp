@@ -20,6 +20,7 @@ DROP_PRIORITY: dict[str, tuple[str, ...]] = {
     "get_job": ("description", "raw", "html"),
     "get_form": ("options", "help", "raw"),
     "plan_application": ("evidence", "debug", "trace"),
+    "draft_answers": ("evidence", "debug", "trace"),
     "submit_application": ("evidence", "debug", "trace", "raw"),
     "apply_batch": ("evidence", "debug", "trace", "detail"),
     "search_jobs": ("desc", "description", "raw", "tags"),
