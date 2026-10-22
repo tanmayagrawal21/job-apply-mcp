@@ -302,6 +302,17 @@ Mail-confirmation dedupe (ADR-0016). `client` needs no credentials in the server
 | `max_new_shown` | `int` | `10` | compact outputs list at most this many new matches |
 | `max_messages_per_call` | `int` | `300` |  |
 
+## `[grants]`
+
+Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only from the user config.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_duration_s` | `int` | `43200` | longest grant `job-apply-mcp grant --for` will issue |
+| `max_uses_cap` | `int` | `1000` | upper bound for --max-uses |
+| `otp_window_min` | `int` | `10` | otp_assist reads only a message newer than this |
+| `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available |
+
 ## `[search.sessions]`
 
 Search sessions (ADR-0024): the first search_jobs call builds the full result set once; pages read from it.
