@@ -1,0 +1,11 @@
+# Extra confirmation patterns (ADR-0016). Point `ingest.patterns_file` at your copy of this file.
+# Lists in [defaults] append to the built-ins; a [[platform]] with an existing name merges into it.
+# `extract` regexes are case-insensitive and use named groups `company` and/or `role`.
+
+[[platform]]
+name = "examplehire"                       # any label; shows up as "platform" in results
+sender_domains = ["mail.examplehire.test"] # suffix match on the sender's domain
+subject_positive = ["we got your application"]
+company_from_sender = true                 # fall back to the sender display name for the company
+[[platform.extract]]
+regex = "application for (?P<role>.+?) at (?P<company>.+)$"
