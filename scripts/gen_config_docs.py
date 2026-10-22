@@ -86,6 +86,10 @@ def render() -> str:
         "`$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables "
         "`JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). "
         "Secrets (API keys, IMAP passwords) are only ever read from the environment."), "",
+        ("**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, "
+        "`dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the "
+        "platform-default user config, owned by you and not group/world-writable. A file selected via "
+        "`JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter."), "",
         "Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to validate it.", ""]
     seen: list[tuple[str, type[BaseModel]]] = [("", Settings)]
     queue = list(seen)

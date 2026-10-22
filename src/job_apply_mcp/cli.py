@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 
-COMMANDS = {"serve", "init", "doctor", "version"}
+COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--offline", action="store_true", help="skip network probes of model servers")
 
     sub.add_parser("version", help="print the version")
+    for name, h in (("approve", "HUMAN ONLY (needs a TTY): approve a pending submission"),
+                    ("deny", "HUMAN ONLY (needs a TTY): deny a pending submission"),
+                    ("pending", "list pending approvals"),
+                    ("resolve", "HUMAN ONLY (needs a TTY): resolve a submission stuck in submitting/unknown")):
+        sub.add_parser(name, help=h).add_argument("rest", nargs="*")
     return p
 
 
@@ -55,6 +60,12 @@ def main(argv: list[str] | None = None) -> None:
         contact = {k: getattr(args, k) for k in CONTACT_KEYS if getattr(args, k, None)}
         raise SystemExit(run_init(yes=args.yes, force=args.force, config_dir=args.config_dir, contact=contact,
                                   model=args.model, command_style=args.client_command))
+    elif args.cmd in ("approve", "deny", "pending", "resolve"):
+        from .apply.approvals import cli as approvals_cli
+        from .config import load_settings
+
+        st = load_settings()
+        raise SystemExit(approvals_cli([args.cmd, *args.rest], st.paths.data_dir, st.apply.approval_ttl_s))
     elif args.cmd == "doctor":
         from .doctor import run_doctor
 

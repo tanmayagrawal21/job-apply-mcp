@@ -12,14 +12,17 @@ never from the project file, so a repo checkout cannot leak them.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from . import paths
+
+log = logging.getLogger(__name__)
 
 
 class ConcurrencyCfg(BaseModel):
@@ -236,7 +239,13 @@ class ProvenanceCfg(BaseModel):
 
 
 class ApplyCfg(BaseModel):
-    auto_approve: bool = False          # True skips the hash-bound approval token (ADR-0011)
+    @property
+    def auto_approve_active(self) -> bool:
+        return self.auto_approve and self.approval_mode == "agent"
+
+    approval_mode: Literal["agent", "human"] = "human"  # human: a human channel must approve (ADR-0021)
+    approval_ttl_s: int = 1800          # lifetime of a server-held approval record
+    auto_approve: bool = False          # USER CONFIG FILE ONLY (env/project file ignored); needs approval_mode="agent"
     short_text_max: int = 200           # unresolved fields up to this length go to the local LLM
     llm_min_confidence: float = 0.6     # below this an LLM answer is treated as unresolved
     plan_ttl_s: int = 1800              # how long a plan (and its token) stays valid
@@ -436,11 +445,75 @@ def _coerce(v: str) -> Any:
     return v
 
 
+# Security-relevant settings: (section, key) -> predicate. A project file or
+# environment variable may only set the safe value; relaxing needs the user-level config file (ADR-0021).
+# Predicates are "this value RELAXES the setting"; invalid values pass through so validation reports them.
+_RELAXES: dict[tuple[str | None, str], Any] = {
+    ("apply", "auto_approve"): lambda v: v is True,
+    ("apply", "approval_mode"): lambda v: v == "agent",
+    (None, "dry_run"): lambda v: v is False,
+    ("control", "apply_enabled"): lambda v: v is True,
+    ("control", "dev_mode"): lambda v: v is False,
+}
+
+
+def _restrict(d: dict, source: str) -> dict:
+    """Drop values that would relax a security setting; log each. Stricter values pass."""
+    out = dict(d)
+    for (sect, key), relaxes in _RELAXES.items():
+        tgt = out.get(sect) if sect else out
+        if isinstance(tgt, dict) and key in tgt and relaxes(tgt[key]):
+            log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
+                        f"{sect}." if sect else "", key, tgt[key], source)
+            if sect:
+                out[sect] = {k: v for k, v in tgt.items() if k != key}
+            else:
+                out = {k: v for k, v in out.items() if k != key}
+    return out
+
+
+def _user_file_trusted(user: Path) -> tuple[bool, str]:
+    """Only the platform-default user config, owned by this user and not group/world-writable, may relax
+    security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
+    default = paths.config_dir() / "config.toml"
+    try:
+        if user.resolve() != default.resolve():
+            return False, "not the platform-default user config path"
+        if os.name != "nt":
+            st = user.stat()
+            if st.st_uid != os.getuid():
+                return False, "not owned by the current user"
+            if st.st_mode & 0o022:
+                return False, "group/world-writable"
+    except OSError as e:
+        return False, str(e)
+    return True, ""
+
+
 def load_settings(project_dir: Path | None = None) -> Settings:
     data: dict = {}
+    udata: dict = {}
     user = paths.config_file()
-    for p in (user, (project_dir or Path.cwd()) / "job-apply-mcp.toml"):
-        if p.is_file():
-            data = _deep_merge(data, tomllib.loads(p.read_text(encoding="utf-8")))
-    data = _deep_merge(data, _env_overrides())
-    return Settings.model_validate(data)
+    if user.is_file():
+        udata = tomllib.loads(user.read_text(encoding="utf-8"))
+        trusted, why = _user_file_trusted(user)
+        if not trusted:
+            udata = _restrict(udata, f"{user} ({why}; can only make settings stricter)")
+        data = _deep_merge(data, udata)
+    proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
+    if proj.is_file() and proj.resolve() != user.resolve():
+        data = _deep_merge(data, _restrict(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj)))
+    data = _deep_merge(data, _restrict(_env_overrides(), "environment (JOB_APPLY__*)"))
+    s = Settings.model_validate(data)
+    for (sect, key), relaxes in _RELAXES.items():  # log which explicitly-set relaxations came from the user file
+        v = (udata.get(sect, {}) if sect else udata).get(key, None) if udata else None
+        if v is not None and relaxes(v):
+            log.warning("security setting %s%s=%r is relaxed by the trusted user config %s",
+                        f"{sect}." if sect else "", key, v, user)
+    if s.apply.auto_approve:
+        if s.apply.approval_mode == "human":
+            log.warning("apply.auto_approve=true is IGNORED because apply.approval_mode='human'")
+        else:
+            log.warning("!!! apply.auto_approve=true: real submissions need NO approval id (agent mode). "
+                        "Set it back to false unless you accept unattended submissions !!!")
+    return s

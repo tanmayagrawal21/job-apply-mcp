@@ -4,6 +4,8 @@
 
 Settings load in this order, later wins: built-in defaults, the user file (`~/.config/job-apply-mcp/config.toml`, `%APPDATA%\job-apply-mcp\config.toml` on Windows, or `$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables `JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). Secrets (API keys, IMAP passwords) are only ever read from the environment.
 
+**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter.
+
 Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to validate it.
 
 ## Top level
@@ -148,7 +150,9 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `auto_approve` | `bool` | `false` | True skips the hash-bound approval token (ADR-0011) |
+| `approval_mode` | `Literal['agent', 'human']` | `"human"` | human: a human channel must approve (ADR-0021) |
+| `approval_ttl_s` | `int` | `1800` | lifetime of a server-held approval record |
+| `auto_approve` | `bool` | `false` | USER CONFIG FILE ONLY (env/project file ignored); needs approval_mode="agent" |
 | `short_text_max` | `int` | `200` | unresolved fields up to this length go to the local LLM |
 | `llm_min_confidence` | `float` | `0.6` | below this an LLM answer is treated as unresolved |
 | `plan_ttl_s` | `int` | `1800` | how long a plan (and its token) stays valid |
