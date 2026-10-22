@@ -1,0 +1,17 @@
+# Fictional example of the boards searched by default (merge into ~/.config/job-apply-mcp/config.toml).
+# Board ids are the slug in the careers URL: boards.greenhouse.io/<board>, jobs.lever.co/<board>,
+# jobs.ashbyhq.com/<board>, jobs.smartrecruiters.com/<board>, <tenant>.<wdN>.myworkdayjobs.com/<site>.
+[platforms.boards]
+greenhouse = ["acmeco", "examplelabs"]
+lever = ["democo"]
+ashby = ["exampleai"]
+smartrecruiters = ["samplecorp"]
+workday = ["demo.wd5/External"]
+
+[platforms]
+cache_ttl_s = 900
+jobspy_sites = ["linkedin", "indeed"]   # only used when the 'jobspy' extra is installed and enabled
+
+# API keys are NOT configured here. Export them (never commit them):
+#   JOB_APPLY_KEY_GREENHOUSE_ACMECO=<Greenhouse Job Board API key for board acmeco>
+#   JOB_APPLY_KEY_LEVER_DEMOCO=<Lever API key>
