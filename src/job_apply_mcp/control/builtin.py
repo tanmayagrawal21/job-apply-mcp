@@ -180,12 +180,18 @@ def hard_stop_control(params: dict[str, Any], settings: Settings) -> Control:
 # ------------------------------------------------------------------ single submit / idempotency
 
 
+# Submission states (apply/approvals.py) in which nothing was sent; absent/unknown states keep the window rule.
+_NOT_SENT = frozenset({"planned", "approved", "failed"})
+
+
 @controls.register("single_submit")
 def single_submit_control(params: dict[str, Any], settings: Settings) -> Control:
     minutes = float(params.get("window_minutes", 1440))
 
     def check(ctx: Context) -> list[Violation]:
         if ctx.dry_run or not ctx.ref:
+            return []
+        if ctx.get("submission_state") in _NOT_SENT:   # state machine proves the earlier attempt never clicked submit
             return []
         if ctx.state.seen_ref(ctx.ref, frozenset({"submit"}), ctx.now - minutes * 60):
             return [Violation("single_submit", f"ref already submitted within {minutes:g} min", evidence=ctx.ref)]

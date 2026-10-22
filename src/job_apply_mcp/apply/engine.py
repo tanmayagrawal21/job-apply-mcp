@@ -506,13 +506,18 @@ class ApplyEngine:
                               f"(then retry with the same answers)"), ""
         return rec.approval_id, "", self.approvals.get(rec.approval_id).approved_by or "human"  # type: ignore[union-attr]
 
+    def _submission_state(self, ref: str) -> str | None:
+        st = self.approvals.state(ref) if self.approvals is not None else None
+        return st["state"] if st else None
+
     async def _control(self, action: str, ctx: _Ctx, dry: bool, eff: dict[str, Any] | None = None) -> str | None:
         """Optional control layer (ADR-0014). Returns a block reason, or None when allowed."""
         if self.control is None:
             return None
         res = await self.control.check(action, {"ref": ctx.form.ref, "company": ctx.posting.company,
                                                 "title": ctx.posting.title, "dry_run": dry,
-                                                "platform": ctx.posting.platform, "answers": eff or {}})
+                                                "platform": ctx.posting.platform, "answers": eff or {},
+                                                "submission_state": self._submission_state(ctx.form.ref)})
         verdict = res
         for attr in ("decision", "verdict", "status", "allowed", "ok"):
             v = res.get(attr) if isinstance(res, dict) else getattr(res, attr, None)
