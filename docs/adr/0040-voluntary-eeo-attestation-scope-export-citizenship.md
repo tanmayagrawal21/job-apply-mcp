@@ -39,6 +39,41 @@ A QA round (issues #47, #48, #51) found:
 - **Prior employee.** `_CO_QUALIFIERS` adds county, city, municipal(ity), police, township, borough, sheriff,
   university and usaf; `_CO_QUALIFIER_PHRASES` adds "armed forces", "transit authority" and "school district".
 
+## Amendment 1 (review of 1fed829, QA round 3: #56, #57, #58)
+- **EEO isolation.** `map_fields` classifies EEO first (`eeo_class`: any word form of gender/sex, Hispanic/Latino,
+  race/races/racial/ethnic*, veteran(s)/military/armed forces, disability/disabilities/impairment, sexual
+  orientation/LGBT, pronoun(s), or generic EEO/self-identification wording). An EEO field is answered only by
+  `demographic_value` (the `[demographics]` value or the decline option); us_citizen, privacy_ack, authorization,
+  prior_employee and saved `[answers]` never see it. `eeo_option_ok` checks that a chosen option belongs to the field's
+  own domain (category words and values such as "Asian" or "Woman"; race and Hispanic share one domain) and that a bare
+  Yes/No never answers a select that has category options. Outside the EEO path an answer whose option names a
+  demographic category is dropped to unresolved, and `privacy_ack_value` refuses any field whose label or options
+  name a category. EEO fields never go to the LLM.
+- **Option matching.** `best_option` containment is word-bounded both ways (no "Female" -> "Male"), and values or
+  options that name a demographic category use `exact_option` only, with an explicit synonym table (man/male,
+  woman/female, non-binary). No match -> unresolved.
+- **Attestation gate.** Required markers ("*", "(required)", "required", "needed", "mandatory") are stripped before
+  matching and are never an exemption. The only exemptions are: (1) whole-word, per-segment matching (no substrings,
+  no spans across fields or options); (2) in posting text only, a "no ..." phrase followed by a requirement noun
+  (experience, background, knowledge, expertise, skills, degree). Periods inside abbreviations ("A.I.", "U.S.") do not
+  end a segment.
+- **US authorization/sponsorship (#57).** `auth_core` drops an example clause (e.g./i.e./such as/like/for example/
+  including) that lists only US visa types, treats text after the question mark as a note that may contain only
+  authorization/visa/export wording and no place, and, when the posting location is US-only (`location_is_us`), reads
+  "the country where the job is located", "this country" and "this location" as the US. The rest of ADR-0038's
+  allow-list is unchanged.
+- **Never-LLM questions (#58 and export non-determinism).** `never_llm` (label or options) covers export control,
+  ITAR/EAR, "U.S. person", citizenship, nationality, immigration, visa, sponsorship, authorization, clearance and
+  criminal history, plus residence, location, relocation, commute, on-site, in-office, hybrid, remote, time zone and
+  address. The engine sends these fields to neither the short-field model nor the writer; they are answered by
+  deterministic rules or become owner tasks.
+- **Residence.** "Do you (currently) reside/live/are you located/based in the (continental) United States?" is answered
+  from the profile country; "continental"/"contiguous" also needs `contact.region` (Alaska, Hawaii and territories ->
+  No; missing -> unresolved). Any other wording stays unresolved.
+- **Privacy-notice acknowledgement (#56).** The acknowledgement vocabulary adds plain words such as "below",
+  "receipt", "linked", "attached" and "required", and the posting company's own name words are allowed. The opt-in,
+  the exclusion list, the sensitive-topic checks and the EEO refusal are unchanged.
+
 ## Consequences
 More voluntary EEO answers from the owner's stated values, visible blanks instead of silent ones, fewer false
 attestation stops, and one more prefilled export-control field. Wording outside the vocabularies stays unresolved
@@ -47,5 +82,5 @@ exist only in the page DOM are still filled by the browser driver's required-onl
 blocks is a driver change outside this ADR.
 
 ## Verify / revert
-`uv run pytest tests/test_qa_round3.py tests/test_gates.py tests/test_mapper_safety.py tests/test_apply_dogfood.py`.
+`uv run pytest tests/test_qa_round3.py tests/test_gates.py tests/test_mapper_safety.py tests/test_privacy_ack.py tests/test_apply_dogfood.py`.
 Revert by reverting this PR. The two new `[demographics]` keys have defaults, so existing profiles keep loading.

@@ -226,32 +226,41 @@ def title_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     return None
 
 
-# ADR-0040: a stop phrase matches whole words within one segment (one form label / option, or one description
-# sentence). "no ai" no longer matches "no aim", "techno aid" or two adjacent form labels, and a requirement statement
-# ("no AI experience required") is not an attestation. Real attestations ("personally completed", "my own work",
-# "no AI allowed", "without the use of AI") still stop the application.
-_REQUIREMENT_AFTER = re.compile(r"^[ \t/,-]*(?:/?ml\b|/?machine learning\b)?[ \t/,-]*(?:prior |previous |professional )?"
-                                r"(?:experience|background|knowledge|expertise|skills?|degree|required|needed|necessary)\b",
-                                re.IGNORECASE)
+# ADR-0040: a stop phrase matches whole words within one segment (one form field line, or one sentence of the posting
+# text). Exactly two false-positive classes are removed, nothing else:
+#   1. substrings of other words or spans across two fields/options ("no aim", "casino airline", "...No | AI tools");
+#   2. in POSTING TEXT only, a "no ..." phrase followed by a requirement noun ("No AI experience", "no AI/ML
+#      background"). Form labels and options never get this exemption.
+# Required markers ("*", "(required)", "required", "needed", "mandatory") are stripped before matching and are never an
+# exemption: "This is my own work Required" and "No AI - required" still stop.
+_REQUIRED_MARKER = re.compile(r"\*|\(\s*(?:required|needed|mandatory)\s*\)|[\s,:-]*\b(?:required|needed|mandatory)\b\W*$",
+                              re.IGNORECASE)
+_REQUIREMENT_NOUN_AFTER = re.compile(r"^[ \t/,-]*(?:/?ml\b|/?machine learning\b)?[ \t/,-]*"
+                                     r"(?:prior |previous |professional )?(?:experience|background|knowledge|expertise|"
+                                     r"skills?|degree)\b", re.IGNORECASE)
+# sentence ends: newline, ! ? ; or a period after a word of 2+ characters ("A.I." and "U.S." stay whole)
+_SEGMENT_END = re.compile(r"\n|[!?;]|(?<=[A-Za-z0-9]{2})\.(?=\s|$)")
 
 
 def _phrase_rx(phrase: str) -> re.Pattern[str] | None:
     words = re.findall(r"[a-z0-9]+", phrase.lower())
     if not words:
         return None
-    return re.compile(r"(?<![a-z0-9])" + r"[ \t_/-]+".join(map(re.escape, words)) + r"(?![a-z0-9])", re.IGNORECASE)
+    return re.compile(r"(?<![a-z0-9])" + r"[ \t_/.-]+".join(map(re.escape, words)) + r"\.?(?![a-z0-9])", re.IGNORECASE)
 
 
-def stop_phrase_hit(text: str, phrases: list[str]) -> str | None:
-    """The first stop phrase found as whole words in one segment of `text`, else None."""
-    segments = [x for x in re.split(r"[\n.!?;]+", text or "") if x.strip()]
+def stop_phrase_hit(text: str, phrases: list[str], *, posting_text: bool = False) -> str | None:
+    """The first stop phrase found as whole words in one segment of `text`, else None. `posting_text=True` (the job
+    description only) lets "no <phrase> experience/background/..." through as a job requirement."""
+    segments = [_REQUIRED_MARKER.sub(" ", x) for x in _SEGMENT_END.split(text or "") if x.strip()]
     for ph in phrases:
         rx = _phrase_rx(ph)
         if rx is None:
             continue
+        exempt_ok = posting_text and re.findall(r"[a-z0-9]+", ph.lower())[:1] == ["no"]
         for seg in segments:
             for m in rx.finditer(seg):
-                if not _REQUIREMENT_AFTER.match(seg[m.end():]):
+                if not (exempt_ok and _REQUIREMENT_NOUN_AFTER.match(seg[m.end():])):
                     return ph
     return None
 
@@ -260,7 +269,7 @@ def stop_phrase_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     for label in (ctx.form_text or "").split("\n"):
         if ph := stop_phrase_hit(label, cfg.stop_phrases):
             return Decision.needs_human, f"attestation: '{ph}' in field: {label.strip()[:120]}"
-    if ph := stop_phrase_hit(ctx.text, cfg.stop_phrases):
+    if ph := stop_phrase_hit(ctx.text, cfg.stop_phrases, posting_text=True):
         return Decision.needs_human, f"attestation: '{ph}' in posting text"
     return None
 

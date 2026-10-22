@@ -6,11 +6,21 @@ from apply_fakes import POSTING, F, FakeAdapter, FakeGates, FakeProfile, FakeRou
 
 from job_apply_mcp.apply.adapters import PolicyGates, ProfileView
 from job_apply_mcp.apply.engine import ApplyEngine
-from job_apply_mcp.apply.mapper import about_this_company, map_fields
+from job_apply_mcp.apply.mapper import (
+    about_this_company,
+    auth_core,
+    best_option,
+    eeo_option_ok,
+    exact_option,
+    location_is_us,
+    map_fields,
+    never_llm,
+    privacy_ack_value,
+)
 from job_apply_mcp.config import PolicyCfg, Settings
 from job_apply_mcp.core.models import ApplicationForm, Decision, FieldKind
 from job_apply_mcp.policy.gates import GateContext, stop_phrase_gate, stop_phrase_hit
-from job_apply_mcp.profile import Authorization, Contact, Demographics, Profile
+from job_apply_mcp.profile import Authorization, Contact, Demographics, Preferences, Profile
 
 YND = ["Yes", "No", "Decline to self-identify"]
 GENDER = ["Man", "Woman", "Non-binary", "Decline to self-identify"]
@@ -90,7 +100,7 @@ def test_adversarial_labels_never_take_a_real_value():
         assert ans == {} and unres == ["x"] and skipped == ["x"], f.label
     # with a decline option the safe answer is to decline, never the profile value
     assert mapped([opt("x", "Race and gender", RACE)], p)[0] == {"x": "Decline to self-identify"}
-    assert mapped([opt("x", "Gender", ["Man", "Female"])], p)[1] == ["x"]       # "Woman" has no exact option
+    assert mapped([opt("x", "Gender", ["Man", "Non-binary"])], p)[1] == ["x"]   # "Woman" has no exact option
 
 
 async def test_engine_lists_skipped_voluntary_and_never_sends_them_to_the_llm():
@@ -189,3 +199,209 @@ def test_public_sector_company_names_never_answer_prior_employee():
                "Springfield University", "Armed Forces Bank", "USAF Labs"]:
         assert not about_this_company(label.format(co), co), co
     assert about_this_company("Have you ever worked for Acme Robotics?", "Acme Robotics")
+
+
+# ---------------------------------------------------------------- review: EEO isolation (ADR-0040)
+
+
+def full(demo=None, ack=True, answers=None):
+    return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city="Springfield"),
+                               demographics=Demographics(**(demo or DEMO | {"race_ethnicity": "Asian"})),
+                               authorization=Authorization(work_authorized=True, requires_sponsorship=False, citizen=True),
+                               preferences=Preferences(acknowledge_privacy_notices=ack),
+                               answers=answers or {}), Settings())
+
+
+def test_eeo_labels_never_take_another_rules_answer():
+    p = full()
+    assert mapped([opt("x", "Gender (required for US citizens)", ["Yes", "No"])], p)[1] == ["x"]
+    assert mapped([opt("x", "Gender (required for US citizens)", DISABILITY)], p)[0] == {"x": "I do not want to answer"}
+    assert mapped([opt("x", "Gender (required for US citizens)", GENDER)], p)[0] == {"x": "Decline to self-identify"}
+    assert mapped([opt("x", "Are you a U.S. citizen or protected veteran?", ["Yes", "No"])], p)[1] == ["x"]
+    assert mapped([opt("x", "Are you authorized to work in the US? (veterans: see below)", ["Yes", "No"])], p)[1] == ["x"]
+    assert mapped([opt("x", "Have you ever worked for Acme Robotics? (EEO data)", ["Yes", "No"])], p)[1] == ["x"]
+    # a saved [answers] entry never answers an EEO label
+    q = full(answers={"races": "Asian", "privacy notice": "I acknowledge"})
+    assert mapped([opt("x", "Races", RACE)], q)[0] == {"x": "Asian"}          # the [demographics] value, plain label
+    assert mapped([opt("x", "Races you have worked with", RACE[:-1])], q)[1] == ["x"]
+
+
+def test_privacy_notice_mentioning_a_category_never_gets_a_category_or_ack():
+    p = full()
+    for label in ["Privacy notice - races", "Privacy notice - racial data", "Privacy policy (ethnicities)",
+                  "Applicant privacy notice: genders", "Privacy notice for veterans", "Privacy notice - disabilities"]:
+        ans, unres, _, _ = mapped([opt("x", label, RACE[:-1] + ["I acknowledge"])], p)
+        assert "Asian" not in ans.values() and "I acknowledge" not in ans.values(), label
+        assert unres == ["x"], label
+    # a plain privacy notice whose options name a category is refused too
+    assert privacy_ack_value(opt("x", "Applicant Privacy Notice", ["I acknowledge", "Asian"])) is None
+    assert privacy_ack_value(opt("x", "Applicant Privacy Notice", ["I acknowledge", "Woman"])) is None
+
+
+def test_eeo_word_forms_are_classified():
+    p = full()
+    for label in ["Races", "Racial identity", "Ethnicities", "Genders", "Veterans", "Disabilities", "Ethnic background"]:
+        ans, _, skipped, _ = mapped([opt("x", label, ["Yes", "No"])], p)
+        assert ans == {} and skipped == ["x"], label
+
+
+def test_option_domain():
+    assert not eeo_option_ok("Yes, I have a disability", "gender", DISABILITY + GENDER)
+    assert not eeo_option_ok("Asian", "gender", GENDER + ["Asian"])
+    assert not eeo_option_ok("Woman", "race", RACE + ["Woman"])
+    assert not eeo_option_ok("Yes", "race", RACE + ["Yes"])
+    assert eeo_option_ok("Hispanic or Latino", "race", RACE + ["Hispanic or Latino"])
+    assert eeo_option_ok("No", "hispanic", YND)
+    assert eeo_option_ok("Decline to self-identify", "gender", GENDER)
+
+
+# ---------------------------------------------------------------- review: required markers never exempt
+def test_required_markers_never_exempt_an_attestation():
+    for label in ["This is my own work Required", "This is my own work - required", "My own work, required",
+                  "No AI - required", "No AI Required", "No AI/ML required", "Without the use of AI - required",
+                  "AI policy - required", "AI Policy (required)", "AI Policy, required",
+                  "I certify this is my own work, required", "I certify this is my own work *",
+                  "This application must be personally completed - needed"]:
+        v = gate(form_text=label)
+        assert v is not None and v[0] == Decision.needs_human, label
+    assert gate(text="No AI - required.") is not None                 # no requirement noun: stops in posting text too
+    assert gate(form_text="No AI experience required") is not None    # labels never get the requirement exemption
+    assert stop_phrase_hit("No A.I. was used", ["A.I."]) == "A.I."     # abbreviations are not sentence ends
+    assert stop_phrase_hit("Are you a U.S. person?", ["U.S. person"]) == "U.S. person"
+
+
+# ---------------------------------------------------------------- #57 / live QA: US authorization and sponsorship
+SPONS_EG = "Will you now or in the future require sponsorship for employment visa status (e.g., H-1B visa status)?"
+SPONS_ETC = "Will you now or in the future require employment visa sponsorship (e.g., H-1B, TN, etc.)?"
+SPONS_ITAR = ("Will you now or in the future require employment visa sponsorship (e.g., H-1B, H-4, TN, OPT, CPT etc.)?"
+              "\n\n**If you are currently on OPT, CPT, H-4 Visa you do NOT qualify as a U.S Person status as defined by "
+              "ITAR**")
+AUTH_JOB_COUNTRY = "Are you authorized to work in the country where the job is located?"
+SPONS_THIS_COUNTRY = "Will you now or in the future require sponsorship for employment visa status in this country?"
+
+
+def auth(label, job_in_us=False, options=("Yes", "No")):
+    r = map_fields([opt("q", label, list(options), required=True)], full(), company="Acme Robotics", job_in_us=job_in_us)
+    return {a.key: a.value for a in r.answers}.get("q")
+
+
+def test_real_us_sponsorship_labels_are_answered():
+    for label in [SPONS_EG, SPONS_ETC, SPONS_ITAR, "Will you now or in the future require sponsorship (i.e. OPT, CPT)?",
+                  "Do you require visa sponsorship such as H-1B or TN?",
+                  "Will you require immigration sponsorship for work authorization?"]:
+        assert auth(label) == "No", label
+    assert auth("Are you authorized to work in the United States?") == "Yes"
+
+
+def test_examples_and_notes_that_could_be_another_place_stay_unresolved():
+    for label in ["Will you require visa sponsorship (e.g., UK Skilled Worker visa)?",
+                  "Will you require visa sponsorship (e.g. to work in London)?",
+                  "Will you require visa sponsorship? Note: this role is based in Toronto.",
+                  "Will you require visa sponsorship? This applies to our Berlin office",
+                  "Will you now or in the future require sponsorship for employment visa status to work in this location?",
+                  AUTH_JOB_COUNTRY, SPONS_THIS_COUNTRY]:
+        assert auth(label) is None, label
+    assert auth_core("Are you authorized to work in Canada (e.g., H-1B)?") is None
+
+
+def test_job_country_phrases_resolve_only_for_a_us_only_posting():
+    assert auth(AUTH_JOB_COUNTRY, job_in_us=True) == "Yes"
+    assert auth(SPONS_THIS_COUNTRY, job_in_us=True) == "No"
+    assert location_is_us("New York, NY (HQ)") and location_is_us("Springfield, IL or Remote - US")
+    for loc in ["London, UK", "Remote", "", "New York, NY; Toronto, ON", "Springfield, IL / Berlin, Germany"]:
+        assert not location_is_us(loc), loc
+
+
+# ---------------------------------------------------------------- #58 residence: deterministic only
+CONTINENTAL = "Do you currently reside within the continental United States?"
+
+
+def resident(region, country="United States", label=CONTINENTAL):
+    p = ProfileView(Profile(contact=Contact(first_name="Alex", city="Springfield", region=region, country=country)),
+                    Settings())
+    r = map_fields([opt("q", label, ["Yes", "No"], required=True)], p)
+    return {a.key: a.value for a in r.answers}.get("q")
+
+
+def test_continental_us_residence_from_profile_location():
+    assert resident("IL") == "Yes"
+    assert resident("Hawaii") == "No"
+    assert resident("") is None                                 # continental needs a configured state
+    assert resident("ON", country="Canada") == "No"
+    assert resident("", label="Do you currently reside in the United States?") == "Yes"
+    assert resident("IL", label="Do you currently reside within the continental United States or Canada?") is None
+    assert resident("IL", label="Will you reside in the United States after graduation?") is None
+
+
+NEVER_LLM_LABELS = ["EXPORT COMPLIANCE", "Are you a U.S. person under ITAR/EAR?", "Country of citizenship and date",
+                    "Do you hold a security clearance?", "Do you currently reside within the continental United States?",
+                    "Are you willing to commute to our office?", "Which time zone do you work in?",
+                    "Are you open to a hybrid schedule?", "Where are you located?", "Are you open to relocation?"]
+
+
+async def test_legal_and_place_questions_never_reach_the_llm():
+    fields = [F(f"k{i}", lab, FieldKind.text, max_length=80) for i, lab in enumerate(NEVER_LLM_LABELS)]
+    fields.append(F("export_opt", "Status", FieldKind.select, options=['I am currently a "U.S. Person"', "I am not"]))
+    fields.append(F("tool", "Favorite build tool", required=False))
+    router = FakeRouter(short={f.key: "No" for f in fields})
+    e = ApplyEngine(settings(), resolve_adapter=lambda ref: FakeAdapter(form=ApplicationForm(ref=POSTING.ref, fields=fields)),
+                    profile=FakeProfile(), router=router, gates=FakeGates(), store=FakeStore(),
+                    driver_factory=lambda n: None)
+    out = await e.plan(POSTING.ref)
+    prompts = " ".join(p for _, p in router.calls)
+    for f in fields[:-1]:
+        assert never_llm(f), f.label
+        assert f.label not in prompts and f.key in out.plan.unresolved, f.label
+    assert not any(a.source.startswith("llm") and a.key != "tool" for a in out.plan.answers)
+
+
+# ---------------------------------------------------------------- #56 privacy-notice acknowledgement
+def test_real_privacy_notice_acknowledgements_are_applied():
+    p = full(ack=True)
+    cases = [("Privacy Notice", ["I have read and acknowledge the privacy notice below"]),
+             ("Applicant Privacy Notice", ["I acknowledge receipt of the Applicant Privacy Notice."]),
+             ("Acme Robotics Applicant Privacy Notice *",
+              ["I acknowledge receipt of the Acme Robotics Applicant Privacy Notice. (required)"])]
+    for label, options in cases:
+        r = map_fields([opt("q", label, options, required=True)], p, company="Acme Robotics")
+        assert [(a.value, a.source) for a in r.answers] == [(options[0], "rule:privacy_ack")], label
+    r = map_fields([opt("q", "Privacy Notice", ["I have read and acknowledge the privacy notice below"])], full(ack=False))
+    assert r.answers == []                                      # opt-in still required
+
+
+def test_privacy_notice_adversarial_still_refused():
+    p = full(ack=True)
+    for label, options in [("Privacy notice - races", ["I acknowledge"]),
+                           ("Privacy notice for California residents", ["I acknowledge"]),
+                           ("Privacy Notice", ["I acknowledge receipt and agree to receive marketing texts"]),
+                           ("Privacy Notice", ["I acknowledge the notice below and certify my answers are true"]),
+                           ("Privacy Notice and visa sponsorship", ["I acknowledge"]),
+                           ("Other Company Applicant Privacy Notice", ["I acknowledge receipt"])]:
+        r = map_fields([opt("q", label, options, required=True)], p, company="Acme Robotics")
+        assert r.answers == [], label
+
+
+# ---------------------------------------------------------------- option matching: no substring snaps
+
+
+def test_demographic_pairs_never_cross():
+    assert best_option("Female", ["Male", "Decline"]) is None
+    assert best_option("Woman", ["Man", "Prefer not to say"]) is None
+    assert best_option("Man", ["Woman"]) is None
+    assert best_option("Asian", ["Asian Indian", "White"]) is None
+    assert best_option("Asian Indian", ["Asian", "White"]) is None
+    assert exact_option("Female", ["Male", "Female"]) == "Female"
+    assert exact_option("Woman", ["Male", "Female"]) == "Female"          # explicit synonym
+    assert exact_option("Man", ["Male", "Female"]) == "Male"
+    assert exact_option("Female", ["Male"]) is None
+    assert exact_option("Asian", ["Asian Indian", "White"]) is None
+    p = full({"gender": "Female", "race_ethnicity": "Asian"})
+    assert mapped([opt("g", "Gender", ["Male", "Female"])], p)[0] == {"g": "Female"}
+    assert mapped([opt("g", "Gender", ["Male"])], p)[1] == ["g"]
+    assert mapped([opt("r", "Race", ["Asian Indian", "White"])], p)[1] == ["r"]
+
+
+def test_containment_is_word_bounded_elsewhere():
+    assert best_option("Java", ["JavaScript", "Python"]) is None
+    assert best_option("Indeed", ["Indeed.com", "LinkedIn"]) == "Indeed.com"
+    assert best_option("Senior Software Engineer", ["Engineer", "Manager"]) == "Engineer"

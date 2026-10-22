@@ -134,6 +134,8 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key == "derived:region":                 # ADR-0040: state/region for the continental-US rule
+            return self.p.contact.region or None
         if key == "citizenship_country":
             return self._citizenship_country()
         if key.startswith("gpa:"):
@@ -174,7 +176,8 @@ class ProfileView:
 
     def lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
-                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:"))):
+                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:",
+                                                                        "derived:"))):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v

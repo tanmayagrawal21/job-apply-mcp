@@ -38,9 +38,12 @@ from .mapper import (
     SEMANTIC_SENSITIVE,
     best_option,
     canonical_key,
+    eeo_class,
     geo_kind,
+    location_is_us,
     looks_fabricated,
     map_fields,
+    never_llm,
     normalize,
     polarity,
     tokens,
@@ -249,11 +252,14 @@ class ApplyEngine:
                                 min_score=self.s.apply.option_min_score,
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
-                                company_aliases=self._company_aliases(ctx.posting.company))
+                                company_aliases=self._company_aliases(ctx.posting.company),
+                                job_in_us=location_is_us(ctx.posting.location))
         answers = sal_answers + list(mapped.answers)
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
         voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
         pending = [f for f in mapped.unresolved if f.key not in voluntary]
+        owner_only = [f for f in pending if never_llm(f)]        # legal status / place: never a model (ADR-0040)
+        pending = [f for f in pending if f not in owner_only]
         short = [f for f in pending if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in pending if f not in short]
         tasks: list[dict[str, Any]] = []
@@ -268,6 +274,7 @@ class ApplyEngine:
             tasks += wtasks
         else:
             long_ += short
+        long_ += owner_only
         unresolved_keys: list[str] = []
         have = {t["key"] for t in tasks}
         for f in long_:
@@ -331,7 +338,8 @@ class ApplyEngine:
         return True
 
     def _llm_allowed(self, f: FormField) -> bool:
-        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label)
+        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label) or eeo_class(f.label)[0]
+                    or never_llm(f)
                     or self._needs_human(f) or _NO_FABRICATE_LABEL.search(f.label)
                     or geo_kind(f) or f.kind == FieldKind.file)
 
