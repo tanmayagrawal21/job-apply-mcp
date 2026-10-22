@@ -61,6 +61,13 @@ class PolicyCfg(BaseModel):
         "personally completed", "my own work", "without the use of ai", "no ai", "ai policy",
     ])
     dedupe_days: int = 180
+    # Gate pipeline (ADR-0009). None = run every built-in gate in default order; a list enables/reorders.
+    gates: list[str] | None = None
+    us_citizen: bool = False                     # candidate facts used by the citizenship gate
+    us_person: bool = False                      # citizen or permanent resident (ITAR "US person")
+    has_clearance: bool = False
+    graduation_flex_months: int = 0              # tolerance around a posting's graduation window
+    hours_per_year: int = 2080                   # hourly -> annual conversion
 
 
 class PathsCfg(BaseModel):
