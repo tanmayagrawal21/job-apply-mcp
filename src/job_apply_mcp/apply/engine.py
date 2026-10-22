@@ -726,7 +726,8 @@ class ApplyEngine:
             if drv is None:
                 continue
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
-            edu = {f"education:{i}": r for i, r in enumerate(self.profile.p.education_rows()[:1])}
+            rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
+            edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
             async with self._browser_sem:
                 ctx.meta["dispatched"] = True
                 last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu}, files, dry_run=dry)
