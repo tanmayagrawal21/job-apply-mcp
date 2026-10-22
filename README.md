@@ -1,4 +1,6 @@
-# job-apply-mcp
+# job-apply-mcp (ApplyWise)
+
+<!-- mcp-name: io.github.tanmayagrawal21/applywise -->
 
 An MCP server that finds jobs and fills applications for you, and stops before anything irreversible. It is
 **modular** (pluggable platforms, LLM providers, browser drivers), **parallel**, **token-frugal** (compact,
@@ -13,6 +15,21 @@ hard prose escalates). Works with any MCP client on macOS, Linux and Windows.
 > (`handoff`), which is the intended behaviour. Free-text questions need `writing.reviewer = "router"` (local strict
 > review) to go out without you. Expect rough edges; every irreversible step is gated, logged and
 > never retried when the outcome is uncertain.
+
+## Install as a Claude Code plugin
+
+The repository is also a Claude Code plugin marketplace. The `applywise` plugin starts the MCP server for you
+(pinned to a reviewed version) and adds a skill that tells Claude how to use the tools safely:
+
+```bash
+claude plugin marketplace add tanmayagrawal21/job-apply-mcp
+claude plugin install applywise@applywise
+```
+
+Then run `init` and `doctor` from the quickstart below in your own terminal, and check `/mcp` for
+`plugin:applywise:applywise`. The same safety model applies: dry run by default, a human approves every real
+submit, and CAPTCHAs, verification codes and account creation always come back to you. To update, run
+`claude plugin update applywise@applywise`. How releases and the version pin work: [docs/release.md](docs/release.md).
 
 ## 5-minute quickstart
 
@@ -33,7 +50,8 @@ Then ask your assistant: "search jobs at greenhouse:examplecorp for data roles, 
 Everything is a dry run until you set `dry_run = false`.
 
 Install alternatives: `pipx install git+https://github.com/tanmayagrawal21/job-apply-mcp` (then the command is just
-`job-apply-mcp`), or `pip install` into a virtualenv. After the first PyPI release, `uvx job-apply-mcp`.
+`job-apply-mcp`), or `pip install` into a virtualenv. After the first PyPI release, `uvx applywise` (the PyPI distribution is
+`applywise`; the `job-apply-mcp` command stays as an alias).
 Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]`, `[litellm]`, `[keyring]`.
 
 ## Features
