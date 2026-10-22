@@ -32,4 +32,4 @@ layouts may need selector tuning.
 
 ## Verify / revert
 Offline: `uv run pytest tests/test_apply_browser_pure.py`. Live: `uv sync --extra browser` then
-`BROWSER_CHANNEL=chrome uv run pytest -m live`. Revert: delete the two driver modules and the extras.
+`JAM_LIVE=1 BROWSER_CHANNEL=chrome uv run pytest tests/test_apply_browser_live.py`. Revert: delete the two driver modules and the extras.

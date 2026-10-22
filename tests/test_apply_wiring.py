@@ -38,10 +38,15 @@ def test_factory_reports_missing_component_clearly():
         build_engine(s, store=FakeStore(), gates=FakeGates(), resolve_adapter=lambda r: FakeAdapter())
 
 
+class _Allow:
+    async def check(self, action, ctx):
+        return {"decision": "pass"}
+
+
 async def test_services_wiring_with_injected_engine():
     e = build_engine(settings(apply__auto_approve=True, writing__max_rounds=1), store=FakeStore(),
                      profile=FakeProfile(), gates=FakeGates(), router=FakeRouter(short={}, prose="I am passionate."),
-                     resolve_adapter=lambda r: FakeAdapter(), driver_factory=lambda n: FakeDriver(), control=None)
+                     resolve_adapter=lambda r: FakeAdapter(), driver_factory=lambda n: FakeDriver(), control=_Allow())
     svc = Services(settings(), engine=e)
     plan = await svc.plan(POSTING.ref)
     assert plan["gate"] == "submit" and plan["token"] and "client_tasks" in plan

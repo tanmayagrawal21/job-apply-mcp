@@ -1,4 +1,4 @@
-"""Real-browser smoke test against a local fixture form. Run with: uv run pytest -m live
+"""Real-browser smoke test against a local fixture form. Run with: JAM_LIVE=1 uv run pytest -m live
 (needs `uv sync --extra browser` and either `playwright install chromium` or BROWSER_CHANNEL=chrome)."""
 import http.server
 import os
