@@ -20,11 +20,12 @@ def on_battery() -> bool:
 
 
 def resident_models(settings: Settings) -> list[str]:
-    """Models currently loaded in Ollama (empty if unreachable)."""
+    """Heavy models (>= tune.heavy_model_gb) currently loaded in Ollama (empty if unreachable)."""
     base = settings.llm.providers.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")
     try:
         r = httpx.get(f"{base}/api/ps", timeout=2.0)
-        return [m.get("name", "?") for m in r.json().get("models", [])]
+        floor = settings.tune.heavy_model_gb * 2**30
+        return [m.get("name", "?") for m in r.json().get("models", []) if m.get("size", 0) >= floor]
     except (httpx.HTTPError, ValueError):
         return []
 

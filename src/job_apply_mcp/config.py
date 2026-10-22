@@ -141,6 +141,7 @@ class TuneCfg(BaseModel):
     auto_run: bool = False                        # tune_status() may start a due run in the background
     allow_on_battery: bool = False
     allow_with_heavy_model: bool = False          # another model (e.g. in Ollama) resident in memory
+    heavy_model_gb: float = 4.0                   # resident models smaller than this do not block training
     # eval gate
     min_eval_examples: int = 2
     max_gen_tokens: int = 400
