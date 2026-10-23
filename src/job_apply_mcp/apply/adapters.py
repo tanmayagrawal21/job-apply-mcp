@@ -217,6 +217,8 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key == "work:several_current":           # ADR-0057
+            return "Yes" if sum(1 for w in self.p.work if not w.end) > 1 else None
         if key == "work:last_internship":           # ADR-0055
             return self._last_internship()
         if key.startswith("work:"):                 # ADR-0053: employer / title facts from [[work]]

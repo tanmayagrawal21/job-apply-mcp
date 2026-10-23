@@ -77,7 +77,8 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("gpa", (r"\bgpa\b", r"grade point average")),
     ("prior_employee", (r"\b(previously|ever|formerly|before)\b.*\b(employed|worked|interned)\b.*\b(at|for|by|with)\b",
                         r"\b(current|former|previous|past|prior) (employee|contractor|intern)\b",
-                        r"\bhave you (ever )?(been employed|worked) (at|by|for)\b")),
+                        r"\bhave you (ever )?(been employed|worked) (at|by|for)\b",
+                        r"^are you (?:currently|presently) (?:an? )?employee (?:of|at)\b")),   # ADR-0057
     ("marketing_optin", (r"\btalent (community|network|pool)\b", r"\bjoin (our|the|\w+ s) (talent|community|network)\b",
                          r"\b(newsletters?|marketing (emails?|communications?|messages?))\b")),
     ("first_name", (r"^(legal )?first name$", r"^given name$")),
@@ -100,6 +101,11 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
                   r"(?:reside|live|are located|are based)(?: in)?)$"),
                  r"^(?:in )?(?:what|which) country do you (?:currently |presently )?(?:reside|live)(?: in)?$",
                  r"^(?:your )?(?:current )?country of residen(?:ce|cy)$")),
+    # ADR-0057: "Which state, province, or region do you currently live in?" ([contact].region only)
+    ("residence_region", ((r"^(?:in )?(?:which|what) (?:state|province|region)(?:,? (?:or |and )?(?:state|province|"
+                           r"region|territory))* do you (?:currently |presently )?(?:live|reside)(?: in)?$"),
+                          (r"^(?:your )?(?:current )?(?:state|province|region)(?: or (?:state|province|region))* of "
+                           r"residence$"))),
     # ADR-0053: "If located in the US, in what city and state do you reside?" (from [contact] city + region only)
     ("residence_city_state", ((r"^(?:if (?:you are |you re )?(?:located|based|living|residing) in the "
                                r"(?:us|u s|usa|united states)(?: of america)? )?(?:in )?(?:what|which) city (?:and|or) "
@@ -117,7 +123,8 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("current_title", (r"^current (job )?title$", r"^(?:what is )?(?:your )?current (?:job )?(?:title|position)$")),
     ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization",
                          r"authori[sz]ation to work", r"(permitted|allowed) to work", r"right to work")),
-    ("requires_sponsorship", (r"sponsorship", r"require.* visa", r"\bsponsor(s|ed|ing)?\b")),
+    ("requires_sponsorship", (r"sponsorship", r"require.* visa", r"\bsponsor(s|ed|ing)?\b",
+                              r"^visa(?: status)?$")),      # ADR-0057: a bare "Visa" (confirmed home-country job only)
     ("willing_to_relocate", (r"relocat",)),
     ("open_to_hybrid", (r"\bhybrid\b",)),
     ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",
@@ -440,7 +447,8 @@ _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relo
 PROFILE_FACT_KEYS = frozenset(["country", "residence_city_state", "recent_company", "recent_title", "current_company",
                                "current_title", "located_near", "located_in_place",
                                # ADR-0055: [[education]] / [[work]] facts (#86, #87)
-                               "recent_school", "recent_degree", "degree_type", "last_internship"])
+                               "recent_school", "recent_degree", "degree_type", "last_internship",
+                               "residence_region"])                         # ADR-0057
 SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"} | PROFILE_FACT_KEYS
 _TOTAL_GENERIC = frozenset(
     ["how", "many", "total", "years", "yrs", "year", "of", "experience", "professional", "software", "engineering", "engineer", "work", "working", "relevant", "practical", "career", "industry", "overall", "do", "you", "have", "at", "least", "a", "an", "the", "your", "please", "input", "enter", "number", "in", "that", "are", "to", "this", "role", "position", "related", "full", "time", "hands", "on", "is", "what", "minimum", "prior", "paid", "commercial", "real", "world", "combined", "cumulative", "amount", "can", "say", "for", "with", "or", "and", "i", "am", "if", "any", "has", "s", "plus", "more", "field"]
@@ -624,7 +632,7 @@ _ISO_NAME = {v: k for k, v in _NAME_ISO.items() if v}
 # authorization/sponsorship wording, that country's visa lexicon, or the country itself (replaced by a placeholder).
 # Any other word (a city, region, another country, "here", "the country where ...") leaves it unresolved.
 _PLACE = "zzplacezz"
-_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "retain", "extend", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", "either", _PLACE])
+_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "retain", "extend", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", "either", "our", _PLACE])
 _US_WORDS = frozenset(["us", "u", "s", "usa", "united", "states", "america", "american"])
 _AUTH_VOCAB = _AUTH_VOCAB_GENERIC | VISA_LEXICON["US"] | _US_WORDS      # ADR-0038 US vocabulary (compatibility)
 _US_NAME_IN_QUESTION = re.compile(r"\b(?:united states(?: of america)?|usa|u s(?: a)?|america|american|us)\b")
@@ -640,17 +648,29 @@ _EXAMPLE_CLAUSE = re.compile(
     r"[,;:]?\s*\b(?:e\.\s?g\.|i\.\s?e\.|such as|for example|including)\s*[,:]?\s*([^.?;()]*)", re.IGNORECASE)
 _VISA_TYPES = VISA_MARKERS["US"]
 _AUTH_NOTE_VOCAB = frozenset(["if", "qualify", "qualifies", "defined", "define", "regulations", "note", "considered",
-                              "applicants", "candidates", "those", "under", "per", "etc", "e", "g"])
+                              "applicants", "candidates", "those", "under", "per", "etc", "e", "g", "sometimes",
+                              "called", "also", "known"])
 _JOB_PLACE = re.compile(r"\b(?:the|this) country (?:where|in which) (?:the|this) (?:job|role|position) is "
                         r"(?:located|based)\b|\bthis country\b|\bthis location\b|\bthe country of employment\b|"
                         # ADR-0053 variants
                         r"\bthe country (?:where|in which) (?:this|the) (?:job|role|position) (?:will be|is to be) "
                         r"(?:located|based|performed)\b|\b(?:the|this) (?:job|role|position) s country\b|"
                         r"\bthe country (?:of|for) (?:this|the) (?:job|role|position)\b|"
+                        # ADR-0057: "the country of origin for this position"
+                        r"\bthe country of origin for (?:this|the) (?:job|role|position)\b|"
                         # ADR-0055: "in (the) country in which the job you're applying for is located"
                         r"\b(?:the )?country (?:where|in which) the (?:job|role|position) (?:(?:that )?you(?:'|’| a)?re "
                         r"applying (?:for|to) )?is (?:located|based)\b",
                         re.IGNORECASE)
+
+
+# ADR-0057: generic words inside a visa example ("(e.g., H-1B or other employment-based visa sponsorship)")
+_EXAMPLE_GENERIC = frozenset(["other", "employment", "based", "immigration", "case", "cases", "sponsorship", "petition"])
+# ADR-0057: wordings that only rephrase "sponsor"
+_AUTH_REWRITES = [
+    (re.compile(r"\bcommence\s*\(?\s*[\"“'‘]?\s*sponsor\s*[\"”'’]?\s*\)?\s*an immigration case\b", re.IGNORECASE), "sponsor"),
+    (re.compile(r"\bin order to employ you\b", re.IGNORECASE), " "),
+]
 
 
 def _drop_examples(text: str, country: str | None = "US") -> str:
@@ -661,7 +681,8 @@ def _drop_examples(text: str, country: str | None = "US") -> str:
             return " "
         lex, marks = VISA_LEXICON.get(country, frozenset()), VISA_MARKERS.get(country, frozenset())
         visa = any(t in marks for t in inner)
-        return " " if inner and visa and all(t in lex or t in _VISA_COMMON or t.isdigit() for t in inner) else m.group(0)
+        return " " if inner and visa and all(t in lex or t in _VISA_COMMON or t in _EXAMPLE_GENERIC or t.isdigit()
+                                             for t in inner) else m.group(0)
     return _EXAMPLE_CLAUSE.sub(sub, text)
 
 
@@ -676,6 +697,8 @@ def auth_core(label: str, country: str = "US", job_place: bool = False) -> str |
     """The authorization/sponsorship question about `country` inside `label` (normalized, the country replaced by a
     placeholder), or None when it may be about another place. `job_place`: "this country" / "the country where the job
     is located" refer to `country` (the job's confirmed country)."""
+    for rx, rw in _AUTH_REWRITES:
+        label = rx.sub(rw, label)
     text = _drop_examples(label, country)
     if job_place:
         text = _JOB_PLACE.sub(_PLACE, text)
@@ -758,7 +781,7 @@ def job_country(location: str, countries: Sequence[str] = (), locations: Sequenc
 
 _OFFICE_ENTRY = re.compile(r"\b(?:office|offices|hq|headquarters)\b", re.IGNORECASE)
 _LOC_NOISE = re.compile(r"\b(?:greater|metro(?:politan)?|bay|area|office|offices|hq|headquarters|data center|campus|"
-                        r"downtown)\b")
+                        r"downtown|hybrid|on ?site|in office)\b")             # "Hybrid - Denver" (ADR-0057)
 
 
 def _us_hub(text: str) -> bool:
@@ -831,13 +854,17 @@ def _home_job_core(label: str, country: str, company: str) -> str | None:
     head, sep, tail = label.strip().partition(". ")
     if sep and "?" not in head and _SPONSOR_PREAMBLE.fullmatch(strip_co(_drop_examples(head, country))):
         label = tail
-    return auth_core(strip_co(label), country)
+    q, mark, note = label.partition("?")           # keep the question / note split for auth_core
+    return auth_core(strip_co(q) + (mark + " " + strip_co(note) if mark else ""), country)
 
 
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str | None = None,
                  gaps: list[dict[str, Any]] | None = None, company: str = "") -> tuple[bool, Any]:
-    if auth_legal_blocked(f):
+    status_opts = auth_legal_blocked(f)
+    if status_opts and (_AUTH_LEGAL_BLOCK.search(normalize(f.label)) or not f.options or _yes_no_options(f.options)):
         return True, None
+    # ADR-0057: a plain sponsorship question whose OPTIONS list legal statuses ("Citizen", "Permanent Resident",
+    # "Visa Holder", "Require Sponsorship") may take only the sponsorship option, and only when sponsorship is required
     named = named_countries(f.label)
     job_place = bool(_JOB_PLACE.search(f.label))
     if len(named) > 1 or (named and named[0] is None) or (named and job_place and named[0] != job_country):
@@ -853,7 +880,10 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
     home = str(profile.lookup("home_country") or "").upper() or None
     if core is None and not named and country == job_country == home and company:
         core = _home_job_core(f.label, country, company)
-    elif core is None and named == [home] and job_country == home and company:
+    elif core is None and named == [home] and company and (
+            job_country == home or (job_country is None and names_us(f.label) and home == "US")):
+        # ADR-0057 (#54 explicit-country rule): "authorized to work lawfully in the United States for <company>" names
+        # the place itself, so an unconfirmed job country does not matter; a confirmed OTHER country still does
         # ADR-0053: on a confirmed home-country job, a question that also names that country ("Will <company> need to
         # sponsor you to work in the US?"): the company's name is not a place word
         core = _home_job_core(f.label, country, company)
@@ -876,10 +906,15 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
     has_auth, has_sp = bool(ma), bool(ms)
     if ma and ms and ms.start() < ma.start():    # "require sponsorship ... for work authorization": a sponsorship question
         has_auth = False
+    if status_opts and not (has_sp and not has_auth and req is True):
+        return True, None
     if f.options and not _yes_no_options(f.options):
         if has_auth:
             return True, pick_auth_option(f.options, auth, req, cit)
-        return False, None
+        if has_sp and req is True:           # ADR-0057: ["Citizen", "Permanent Resident", "Visa Holder", "Require Sponsorship"]
+            hit = [o for o in f.options if re.search(r"sponsor", o, re.IGNORECASE) and not _NO_SPONSOR.search(o.lower())]
+            return True, (hit[0] if len(hit) == 1 else None)
+        return (True, None) if has_sp else (False, None)
     if has_auth and has_sp:                  # compound: only the explicit "authorized ... without sponsorship" form
         if _SPONS_NEG.search(n) and auth is not None and req is not None:
             return True, _yn(auth and not req)
@@ -895,6 +930,16 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
         if req is None:
             return missing("requires_sponsorship")
         return True, _yn(not req if _SPONS_NEG.search(n) else req)
+    if re.search(r"\b(?:require|need)s?\b(?: \w+){0,2} (?:work |employment )?authori[sz]ation\b", n):
+        # ADR-0057: "Do you REQUIRE work authorization ...?" asks whether the owner lacks it: Yes when not authorized,
+        # No only when authorized AND no sponsorship is needed; authorized-now-but-sponsorship-later is the owner's call
+        if auth is None:
+            return missing("work_authorized")
+        if auth is False:
+            return True, "Yes"
+        if req is None:
+            return missing("requires_sponsorship")
+        return True, ("No" if req is False else None)
     if auth is None:
         return missing("work_authorized")
     return True, _yn(not auth if _AUTH_NEG.search(n) else auth)
@@ -981,6 +1026,24 @@ def _mark_company(words: list[str], name: str) -> tuple[list[str], bool]:
         i = words.index(lead[0])
         return words[:i] + [_CO] + words[i + 1:], True
     return words, False
+
+
+_CURRENT_EMPLOYEE = re.compile(rf"^are you (?:currently|presently) (?:an? )?employee (?:of|at) (?:an? )?{_CO}"
+                               r"(?: (?:agency|company|affiliate|subsidiary|entity|brand|group company|office))?$")
+
+
+def _mark_all(n: str, company: str, aliases: Sequence[str] = ()) -> str:
+    words = _SELF_REF.sub(_CO, n).split()
+    for name in [x for x in (company, *aliases) if normalize(x)]:
+        found = True
+        while found:
+            words, found = _mark_company(words, name)
+    return " ".join(words)
+
+
+def _has_current_ambiguity(profile: ProfileLike) -> bool:
+    """Several open-ended [[work]] entries: the current employer is ambiguous (work:current_company is None)."""
+    return bool(profile.lookup("work:several_current"))
 
 
 def about_this_company(label: str, company: str, aliases: Sequence[str] = ()) -> bool:
@@ -1150,6 +1213,19 @@ def _profile_fact(f: FormField, ck: str, profile: ProfileLike, gaps: list[dict[s
         if not hit:
             return c                           # no option names the country exactly: the usual option snapping
         return hit if f.kind == FieldKind.multiselect else hit[0]
+    if ck == "residence_region":            # ADR-0057: the state/province from [contact], options by name or code
+        region = str(profile.lookup("contact:region") or "").strip()
+        if not region:
+            gap("contact.region")
+            return None
+        code = _region_code(region)
+        names = {normalize(region)} | ({code.lower(), normalize(US_STATES[code])} if code else set())
+        if choice:
+            hit = [o for o in f.options if normalize(o) in names]
+            if len(hit) != 1:
+                return None
+            return [hit[0]] if f.kind == FieldKind.multiselect else hit[0]
+        return US_STATES[code] if code else region
     if ck == "residence_city_state":
         if choice:
             return None
@@ -1506,6 +1582,9 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         v = profile.lookup("us_citizen")
         return (False, None) if v is None else (True, v)
     if ck in ("work_authorized", "requires_sponsorship"):
+        home = str(profile.lookup("home_country") or "").upper() or None
+        if n in ("visa", "visa status") and (job_country is None or job_country != home):
+            return True, None                # ADR-0057: a bare "Visa" only on a confirmed home-country job
         return _auth_answer(f, ck, profile, job_country, gaps, company)
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
@@ -1541,6 +1620,17 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             return True, pick_gpa_option(g, f.options)
         return True, re.sub(r"\s*/.*$", "", str(raw).strip())
     if ck == "prior_employee":
+        cur = _CURRENT_EMPLOYEE.match(_mark_all(n, company, company_aliases)) if company else None
+        if cur:
+            # ADR-0057: "Are you currently an employee of <company> (or a <company> agency)?" is about the CURRENT
+            # [[work]] employer only: Yes when it is <company>, else No (no current entry also means No)
+            mine = profile.lookup("work:current_company")
+            from .adapters import same_company
+            if mine and any(same_company(str(mine), x) for x in (company, *company_aliases) if x):
+                return True, "Yes"
+            if mine is None and profile.lookup("work_history") and _has_current_ambiguity(profile):
+                return True, None
+            return True, "No"
         worked = bool(company) and bool(profile.lookup("employer:" + normalize(company)))
         if company and re.search(r"\b(?:worked|work|working) with\b", n):
             # ADR-0053 (control): "worked WITH <company>" may mean a vendor or partner relationship. Employment
