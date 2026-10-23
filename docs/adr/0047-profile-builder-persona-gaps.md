@@ -20,8 +20,7 @@ The tool must work for any user, so none of this may encode one person's choices
    title. Keys are the mapper's canonical keys, `ai_tools`, `persona.*`, or `q:<normalized question>`. Re-planning a
    ref replaces its rows. Ranking = frequency x impact: a hit weighs 3 when a required field blocked the
    application, 2 for an open optional field, 1 for a default; a key's score is the sum.
-3. **Ask when present.** MCP tools `profile_questions(limit)` and `answer_profile_question(key, value, scope,
-   scope_value)` (scopes `global | company | role_family`; origin always `user_written`). `plan_application` and
+3. **Ask when present.** MCP tools `profile_questions(limit)` and `answer_profile_question(key, scope, scope_value)` (elicits the value from the user; scopes `global | company | role_family`; origin always `user_written`). `plan_application` and
    `apply_batch` call `ask_at_start` before any planning: one MCP-elicitation form per server session with the top
    `persona.ask_limit` gaps, silent when the client cannot elicit. Blank answers mark the gap `skipped`. CLI:
    `job-apply-mcp profile ask|list|answer` (`ask` needs a TTY).
@@ -37,16 +36,19 @@ The tool must work for any user, so none of this may encode one person's choices
    overlay the policy (`persona.experience_counting`, `persona.salary_no_range`, `persona.exceptional_work`).
 6. Config: `[persona] enabled, ask_on_start, ask_limit, min_hits`.
 
-7. **Trust boundary (amendment after review).** `answer_profile_question` asks the human through MCP elicitation
-   (confirm or edit); only a confirmed value, or one typed in the TTY CLI, is stored `user_written`. Any other call
-   stores `origin=client`; in `approval_mode=human` it is refused. For sensitive keys (authorization, sponsorship,
-   citizenship, clearance, export, privacy acknowledgement, salary floor; country-agnostic, so `key:DE` style and
-   per-country maps match) a client answer is only a suggestion shown to the human and is never applied.
-   Demographic keys come from `[demographics]` only. Blocked labels (attestation, certification, consent, arbitration,
-   criminal, AI-use, clearance/export, EEO, stop phrases, `is_sensitive_question`) are never collected, asked, stored
-   or claimed. The mapper hook runs after all sensitive guards, only for non-canonical fields, and persona patterns
-   must match the whole question. `ProfileView.lookup` uses stored answers for canonical keys only. Elicitation is
-   once per client session.
+7. **Trust boundary (final, after three review rounds).** Only the human writes answers. Answers are stored
+   `user_written` through exactly two paths: the elicitation form (start-of-session round, or
+   `answer_profile_question`) and the TTY CLI. `answer_profile_question(key, scope, scope_value)` takes **no value**
+   from the client: it only starts an elicitation and stores nothing if the client cannot elicit. `ProfileDB`
+   refuses any origin other than `user_written`. Demographic keys are never stored or collected ([demographics] only).
+8. **Fail-closed hook.** `persona.claim` (called after all mapper sensitive guards, only for non-canonical fields)
+   is a positive allowlist: `ai_tools`, and `q:` questions whose label is a plain fact about tools, editors,
+   frameworks, notice period, start date or links (`guard.plain_fact_label`), and which also clear `blocked_label`
+   (attestation, certification, consent, arbitration, criminal, AI-use, clearance/export, relocation, EEO, stop
+   phrases). Persona patterns must match the whole question. Canonical keys reach stored answers only through
+   `ProfileView.lookup` (never for demographics). The collector records, and the CLI/elicitation asks, only what an
+   answer could actually fill. The sensitive-key matcher is country-agnostic (`work_authorized:DE`, per-country maps).
+   Policies read the three `persona.*` answers (experience counting, no-range salary figure, preferred project).
 
 ## Consequences
 - Safe defaults remain (decline, full-time only, midpoint); every default use becomes a ranked, askable question.

@@ -332,7 +332,7 @@ def seeded(monkeypatch):
 
 async def test_tools_questions_and_answer(seeded):
     from mcp.server.fastmcp import FastMCP
-    db, s = seeded
+    _db, s = seeded
     m = FastMCP("t")
     ptools.register(m, lambda: _Svc(s))
     names = {t.name for t in await m.list_tools()}
