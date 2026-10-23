@@ -806,3 +806,30 @@ def test_status_explains_how_to_enable_unattended_codes(cfg):
 def test_trusted_authserv_ids_cannot_come_from_a_project_file(tmp_path):
     (tmp_path / "job-apply-mcp.toml").write_text('[verification]\ntrusted_authserv_ids = ["mx.example.com"]\n')
     assert load_settings(tmp_path)._otp_mail_trusted is False
+
+
+# ------------------------------------------------------------------ integration with the vault (ADR-0046)
+
+def test_vault_scopes_follow_a_real_consent_window(cfg):
+    assert not consent.active(cfg, "credentials") and not consent.active(cfg, "mail")
+    consent.store_for(cfg).issue_consent(600, scopes=["credentials"])
+    assert consent.active(cfg, "credentials") and not consent.active(cfg, "mail")
+    consent.store_for(cfg).issue_consent(600, scopes=["otp_unattended"])
+    assert consent.active(cfg, "mail")
+    assert set(consent.SCOPES) >= {"credentials", "mail"}
+
+
+def test_vault_status_serializes_with_an_open_window(cfg):
+    from job_apply_mcp.accounts import tools as vtools
+    consent.store_for(cfg).issue_consent(600, scopes=["credentials"])
+
+    class NoVault:
+        def entries(self):
+            return []
+    out = vtools.status(cfg, vault=NoVault())
+    assert out["consent"] is True and json.loads(json.dumps(out))["consent"] is True
+
+
+def test_the_adr_0046_stub_module_is_gone():
+    import job_apply_mcp.consent as c
+    assert Path(c.__file__).name == "__init__.py" and callable(c.use) and callable(c.status)

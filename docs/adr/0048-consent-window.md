@@ -98,6 +98,14 @@ unattended action covered right now?"
   `awaiting_code` for the human / `otp_assist` path, its detail says `otp: needs_human` and how to configure the id,
   and `consent_status` reports `otp_unattended: off: ...`. This supersedes the round-2 "topmost header" default.
 
+## Integration with the vault (ADR-0046, #67)
+- This package replaces the ADR-0046 stub `job_apply_mcp/consent.py` (always closed). `consent.active()` now returns
+  the covering `Consent` (truthy) or `None`; `vault_status` reports it as a boolean.
+- `credentials` gates vault logins and account creation; `mail` (= `otp_unattended`) gates sign-up email
+  verification. Any registered email verifier must follow the otp_unattended rules above (newest message,
+  trusted authserv id, DKIM/DMARC pass, trusted mail settings); none is registered yet, so sign-ups that need email
+  verification stay `pending_verification`.
+
 ## Consequences
 - An unattended run needs one terminal command per period; review happens afterwards (`list_applications`, the
   approvals audit `consent:<id>` actor, `consent_audit.jsonl`).

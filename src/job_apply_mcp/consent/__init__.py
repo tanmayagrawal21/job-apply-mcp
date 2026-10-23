@@ -27,6 +27,7 @@ __all__ = ["CONSENT_SCOPES", "DEFAULT_SCOPES", "Consent", "ConsentStore", "activ
 
 # Accepted spellings from sibling modules; each maps to exactly one real scope.
 SCOPE_ALIASES = {"mail": "otp_unattended", "otp": "otp_unattended"}
+SCOPES = (*CONSENT_SCOPES, *SCOPE_ALIASES)     # every name `active()` accepts (ADR-0046 stub compatibility)
 
 
 def _scope(scope: str) -> str:

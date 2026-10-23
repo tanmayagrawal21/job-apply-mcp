@@ -59,14 +59,19 @@ Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]
 3. **Control layer.** Independent checks run before every side effect: daily and per-run quotas, single-submit
    guard, recipient deny-list, prose lint, page-text injection screen, `apply_enabled` kill switch. Add your own
    rules in `controls.toml`.
-4. **Hard stops.** Visible CAPTCHA challenges, account creation and attestation checkboxes matching
-   `policy.stop_phrases` (for example "no AI used") always return `needs_human`. They are not configurable away.
-   Verification codes are entered only when the USER types them, confirms a granted prefill (ADR-0026/0027), or
-   consented to unattended runs from a terminal (below).
+4. **Hard stops.** Visible CAPTCHA challenges and attestation checkboxes matching `policy.stop_phrases` (for
+   example "no AI used") always return `needs_human`. They are not configurable away. Verification codes are
+   entered only when the USER types them, confirms a granted prefill (ADR-0026/0027), or consented to unattended
+   runs from a terminal (item 8). Account creation is off by default; it needs `accounts.auto_create = true` in your
+   own user config file AND an open credentials consent window (ADR-0046).
 5. **No invented facts.** Answers come from your profile or are marked; unresolved required fields stop the run.
 6. **Privacy.** Profile and secrets stay on your machine, are never committed, and API keys are read only from
    the environment. See [SECURITY.md](SECURITY.md).
-7. **Consent window (optional, ADR-0048).** `job-apply-mcp consent --for 24h` (or `--per-run`, `--max N`,
+7. **Credentials never reach the model.** ATS logins live in the OS keychain (`job-apply-mcp vault add <host>
+   --username U`, password prompted without echo). The browser fills them straight into the page; MCP exposes only
+   `vault_status` (hosts, never secrets). At most 2 sign-in attempts per host per run; a lockout or wrong password
+   stops that host (ADR-0046).
+8. **Consent window (optional, ADR-0048).** `job-apply-mcp consent --for 24h` (or `--per-run`, `--max N`,
    `--scopes ...`) is typed once, in a terminal, per period you choose. Inside the window submissions are approved
    automatically (logged with the consent id), a page whose only bot check is an invisible widget is submitted
    with one click, and an emailed code is read from the newest message of the expected sender and entered once.
