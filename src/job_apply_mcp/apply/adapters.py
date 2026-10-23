@@ -102,6 +102,59 @@ class ProfileView:
     def _edu(self):
         return max(self.p.education, key=lambda e: e.end or "") if self.p.education else None
 
+    def _edu_fact(self, key: str) -> str | None:
+        """ADR-0055: education facts from [[education]] only. "recent_*" = the entry with the latest end date (a tie or an
+        undated entry among several is ambiguous); "recent_degree_completed" = the latest entry whose end date has
+        passed; "highest_degree" = the entry with the highest degree level (an unrecognised level is ambiguous)."""
+        from datetime import UTC, datetime
+
+        from .mapper import degree_level
+        rows = [e for e in self.p.education if e.school.strip() or e.degree.strip()]
+        if key == "recent_degree_completed":
+            today = datetime.now(UTC).strftime("%Y-%m")
+            rows = [e for e in rows if re.fullmatch(r"\d{4}-\d{2}", e.end or "") and e.end <= today]
+        if not rows:
+            return None
+        if key == "highest_degree":
+            rank = {"High School": 0, "Associate": 1, "Bachelor": 2, "Master": 3, "M.B.A": 3, "Doctor": 4}
+            lv = [degree_level(e.degree) for e in rows]
+            if any(x is None for x in lv):
+                return None
+            top = max(rank[x] for x in lv if x)
+            best = {x for x in lv if x and rank[x] == top}
+            if len(best) != 1:
+                return None
+            e = max((e for e, x in zip(rows, lv, strict=True) if x in best), key=lambda e: e.end or "")
+            return e.degree.strip() or None
+        if len(rows) > 1 and any(not e.end for e in rows):
+            return None
+        ends = sorted((e.end for e in rows), reverse=True)
+        if len(ends) > 1 and ends[0] == ends[1]:
+            return None
+        e = max(rows, key=lambda e: e.end or "")
+        return (e.school if key == "recent_school" else e.degree).strip() or None
+
+    def _last_internship(self) -> str | None:
+        """ADR-0055: the company of the [[work]] entry marked kind="internship" (or titled "Intern") that is current or
+        ended last. A tie is ambiguous."""
+        rows = [w for w in self.p.work if w.kind == "internship"
+                or (not w.kind and re.search(r"\bintern(?:ship)?\b", w.title, re.IGNORECASE))]
+        cur = [w for w in rows if not w.end]
+        if cur:
+            return (cur[0].company.strip() or None) if len(cur) == 1 else None
+        ends = sorted((w.end for w in rows), reverse=True)
+        if not ends or (len(ends) > 1 and ends[0] == ends[1]):
+            return None
+        return max(rows, key=lambda w: w.end).company.strip() or None
+
+    def _us_person(self) -> bool | None:
+        """ADR-0055: [authorization].us_person, else policy.us_person only when it was set in the TRUSTED user config
+        (load_settings marks it). A default, a project file or JOB_APPLY__* is never a fact."""
+        v = self.p.authorization.us_person
+        if v is None and getattr(self.settings.policy, "_us_person_trusted", False):
+            v = self.settings.policy.us_person
+        return v
+
     # canonical key -> [answers] phrases tried (the user's own pattern wins; nothing is invented)
     _ANSWER_PHRASES: ClassVar[dict[str, tuple[str, ...]]] = {
         "work_authorized": ("work authorized", "authorized to work", "eligible to work", "work authorization",
@@ -164,8 +217,15 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key == "work:last_internship":           # ADR-0055
+            return self._last_internship()
         if key.startswith("work:"):                 # ADR-0053: employer / title facts from [[work]]
             return self._work_fact(key[5:])
+        if key.startswith("edu:"):                  # ADR-0055: [[education]] facts
+            return self._edu_fact(key[4:])
+        if key == "us_person":                      # ADR-0055: structured fact only, never an [answers] pattern
+            v = self._us_person()
+            return None if v is None else self._TRI[v]
         if key == "work_history":
             return "Yes" if self._employers() else None
         if key in ("contact:city", "contact:region"):
@@ -235,7 +295,7 @@ class ProfileView:
             return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
         v = self._lookup(key)
         if (self.persona is not None and (v is None or v == "") and " " not in key
-                and not key.startswith(("work:", "contact:")) and key != "work_history"):   # canonical keys only
+                and not key.startswith(("work:", "contact:", "edu:")) and key not in ("work_history", "us_person")):
             s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile
             if s is not None:
                 return s
@@ -243,8 +303,9 @@ class ProfileView:
 
     def _lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
-                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:",
-                                                                        "derived:", "auth:", "work:", "contact:"))
+                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices", "us_person")
+                or key.startswith(("referral:", "gpa:", "employer:", "country_answer:", "derived:", "auth:", "work:",
+                                   "contact:", "edu:"))
                 or key in ("home_country", "work_history")):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
@@ -262,7 +323,7 @@ class ProfileView:
             "discipline": e.field if e else None, "graduation": e.end if e else None,
             "lat": c.lat, "lon": c.lon, "sexual_orientation": d.sexual_orientation,
             "gender": d.gender, "gender_if_required": d.gender_if_required, "hispanic": d.hispanic_latino,
-            "race": d.race_ethnicity,
+            "race": d.race_ethnicity, "race_detail": d.race_detail,
             "veteran": d.veteran_status, "disability": d.disability_status, "pronouns": d.pronouns,
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),

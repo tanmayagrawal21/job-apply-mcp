@@ -453,7 +453,7 @@ class Services:
     def _submit_row(self, r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
                "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t,
-               "client_tasks": getattr(r, "client_tasks", None)}
+               "client_tasks": getattr(r, "client_tasks", None), "unresolved": getattr(r, "unresolved", None)}
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return {k: v for k, v in row.items() if v}

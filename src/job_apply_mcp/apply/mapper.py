@@ -19,6 +19,7 @@ from .derive import pick_languages, whole_years, years_option
 from .geo import US_STATES
 from .places import (
     _VISA_COMMON,
+    COUNTRY_NAMES,
     ISO2,
     MULTI_REGION,
     SUBDIVISIONS,
@@ -26,6 +27,7 @@ from .places import (
     VISA_MARKERS,
     _part_in,
     country_iso,
+    markers_in,
     split_location,
     strip_own_subdivisions,
 )
@@ -61,6 +63,9 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("languages_known", (r"\blanguages?\b.*\b(proficient|production|programming|coding|comfortable|strongest|primary|expert)",
                         r"\b(proficient|programming|coding)\b.*\blanguages?\b",
                         r"\b(strongest|primary|main|favou?rite|preferred|best)\b.*\b(coding|programming|code)\b.*\blanguage\b")),
+    # ADR-0055 (#86/#87 item 5): "Are you a U.S. person (ITAR/EAR)?" / "Which best describes your U.S. person status?".
+    # Before every citizenship key: a U.S.-person definition names citizens and permanent residents.
+    ("us_person", (r"\bu ?s persons?\b",)),
     # ADR-0040: "country/countries of citizenship" (export control). Before us_citizen so "... (US citizens: write USA)"
     # takes the strict vocabulary check below instead of a Yes/No citizen answer.
     ("citizenship_countries", (r"\bcountr(y|ies)( s)? of (your )?citizenships?\b", r"\bcitizenship countr(y|ies)\b",
@@ -76,8 +81,9 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("marketing_optin", (r"\btalent (community|network|pool)\b", r"\bjoin (our|the|\w+ s) (talent|community|network)\b",
                          r"\b(newsletters?|marketing (emails?|communications?|messages?))\b")),
     ("first_name", (r"^(legal )?first name$", r"^given name$")),
-    ("last_name", (r"^(legal )?(last|family) name$", r"^surname$")),
-    ("full_name", (r"^(your )?(full |legal |full legal |legal full )?name$",)),
+    ("last_name", (r"^(legal |preferred )?(last|family) name$", r"^surname$")),      # ADR-0055: "Preferred Last Name"
+    ("full_name", (r"^(your )?(full |legal |full legal |legal full )?name$",
+                   r"^(?:your )?(?:legal |full )?first and last (?:legal )?names?$")),             # "Legal First and Last Name"
     ("preferred_name", (r"^preferred (first )?name$",)),
     ("email", (r"^e ?mail( address)?$",)),
     ("phone", (r"^(mobile |cell )?phone( number)?$", r"^mobile( number)?$")),
@@ -101,7 +107,9 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
                               r"^(?:your )?(?:current )?city (?:and|or) state of residence$")),
     # ADR-0053: "current or previous employer/title" = the current [[work]] entry, else the latest ended one
     ("recent_company", ((r"^(?:(?:who|what) (?:is|was) )?(?:your )?(?:current or (?:previous|most recent|last|former|"
-                         r"past)|most recent|latest) (?:company|employer)(?: name)?$"),)),
+                         r"past)|most recent|latest) (?:company|employer)(?: name)?$"),
+                        # ADR-0055: "Where have you most recently worked?"
+                        r"^where (?:have|did) you (?:most recently|last) work(?:ed)?$")),
     ("recent_title", ((r"^(?:what (?:is|was) )?(?:your )?(?:current or (?:previous|most recent|last|former|past)|"
                        r"most recent|latest) (?:job )?(?:title|position)$"),)),
     ("current_company", (r"^current (company|employer)$",
@@ -112,7 +120,10 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("requires_sponsorship", (r"sponsorship", r"require.* visa", r"\bsponsor(s|ed|ing)?\b")),
     ("willing_to_relocate", (r"relocat",)),
     ("open_to_hybrid", (r"\bhybrid\b",)),
-    ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",)),
+    ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",
+                        # ADR-0055: "able to work from our office in X", "open to working out of our X Office"
+                        (r"\b(open|willing|able|comfortable)\b.*\bwork(?:ing)? (?:from|in|out of|at) (?:one of )?"
+                         r"(?:our|the|an?) (?:\w+ ){0,4}offices?\b"))),
     ("located_in_us", ((r"(located|based|reside|live|residing)\b.*\b(in|within) the ((continental|contiguous) )?"
                         r"(us|u s|usa|united states)\b"),)),
     # ADR-0053: "Do you live within 50 miles of Austin, TX?" / "Are you located in Canada?" (from [contact] only)
@@ -129,7 +140,18 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("disability", (r"disabilit",)),
     ("pronouns", (r"pronoun",)),
     ("sexual_orientation", (r"sexual orientation",)),
-    ("school", (r"^school( name)?$", r"^university$", r"^college$")),
+    # ADR-0055 (#86, #87): education facts from [[education]] only (PROFILE_FACT_KEYS)
+    ("recent_school", ((r"^(?:what (?:is|was) )?(?:the |your )?(?:most recent|latest|last) (?:school|university|college|"
+                        r"institution)(?: (?:you|that you) (?:attended|graduated from))?$"),)),
+    ("recent_degree", ((r"^(?:what (?:is|was) )?(?:the |your )?(?:most recent|latest|last) degree(?: (?:you|that you) "
+                        r"(?:have )?(?:obtained|earned|completed|received|attained))?$"),)),
+    ("degree_type", (r"^(?:your )?(?:highest )?degree (?:type|level)$",
+                     (r"^(?:what is )?(?:your )?highest (?:level of education|education level|degree)(?: (?:you have )?"
+                      r"(?:obtained|earned|completed|attained))?$"),)),
+    ("last_internship", (r"^(?:where|what) (?:was|is) (?:your )?(?:last|latest|most recent) internship(?: company)?$",
+                         r"^(?:last|latest|most recent) internship(?: company| employer)?$")),
+    ("school", (r"^school( name)?$", r"^university$", r"^college$",
+                r"^(?:university|college|school)(?: or (?:university|college|school))*(?: attended)?$")),
     ("degree", (r"^degree$",)),
     ("discipline", (r"^(discipline|major|field of study)$",)),
     ("graduation", (r"graduat", r"\byear\b.*\b(complete|completed|finish|earn|earned|receive|received|obtain)\b.*\bdegree",
@@ -416,7 +438,9 @@ _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relo
 # Never sent to the local LLM: a guess is a false statement about the candidate.
 # ADR-0053: facts read from [contact] / [[work]] only; unresolved (and a profile gap) when the fact is missing
 PROFILE_FACT_KEYS = frozenset(["country", "residence_city_state", "recent_company", "recent_title", "current_company",
-                               "current_title", "located_near", "located_in_place"])
+                               "current_title", "located_near", "located_in_place",
+                               # ADR-0055: [[education]] / [[work]] facts (#86, #87)
+                               "recent_school", "recent_degree", "degree_type", "last_internship"])
 SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"} | PROFILE_FACT_KEYS
 _TOTAL_GENERIC = frozenset(
     ["how", "many", "total", "years", "yrs", "year", "of", "experience", "professional", "software", "engineering", "engineer", "work", "working", "relevant", "practical", "career", "industry", "overall", "do", "you", "have", "at", "least", "a", "an", "the", "your", "please", "input", "enter", "number", "in", "that", "are", "to", "this", "role", "position", "related", "full", "time", "hands", "on", "is", "what", "minimum", "prior", "paid", "commercial", "real", "world", "combined", "cumulative", "amount", "can", "say", "for", "with", "or", "and", "i", "am", "if", "any", "has", "s", "plus", "more", "field"]
@@ -600,7 +624,7 @@ _ISO_NAME = {v: k for k, v in _NAME_ISO.items() if v}
 # authorization/sponsorship wording, that country's visa lexicon, or the country itself (replaced by a placeholder).
 # Any other word (a city, region, another country, "here", "the country where ...") leaves it unresolved.
 _PLACE = "zzplacezz"
-_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "retain", "extend", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", _PLACE])
+_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "retain", "extend", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", "either", _PLACE])
 _US_WORDS = frozenset(["us", "u", "s", "usa", "united", "states", "america", "american"])
 _AUTH_VOCAB = _AUTH_VOCAB_GENERIC | VISA_LEXICON["US"] | _US_WORDS      # ADR-0038 US vocabulary (compatibility)
 _US_NAME_IN_QUESTION = re.compile(r"\b(?:united states(?: of america)?|usa|u s(?: a)?|america|american|us)\b")
@@ -622,7 +646,10 @@ _JOB_PLACE = re.compile(r"\b(?:the|this) country (?:where|in which) (?:the|this)
                         # ADR-0053 variants
                         r"\bthe country (?:where|in which) (?:this|the) (?:job|role|position) (?:will be|is to be) "
                         r"(?:located|based|performed)\b|\b(?:the|this) (?:job|role|position) s country\b|"
-                        r"\bthe country (?:of|for) (?:this|the) (?:job|role|position)\b",
+                        r"\bthe country (?:of|for) (?:this|the) (?:job|role|position)\b|"
+                        # ADR-0055: "in (the) country in which the job you're applying for is located"
+                        r"\b(?:the )?country (?:where|in which) the (?:job|role|position) (?:(?:that )?you(?:'|’| a)?re "
+                        r"applying (?:for|to) )?is (?:located|based)\b",
                         re.IGNORECASE)
 
 
@@ -717,9 +744,30 @@ def job_country(location: str, countries: Sequence[str] = (), locations: Sequenc
         return None
     code = cs[0]
     texts = [str(t) for t in (location, *locations) if str(t or "").strip()]
-    if all(not MULTI_REGION.search(t) and location_in_country(t, code) for t in texts):
+    strict = [not MULTI_REGION.search(t) and (location_in_country(t, code) or (code == "US" and _us_hub(t)))
+              for t in texts]
+    if all(strict):                       # no location text at all: the structured country alone (ADR-0040)
+        return code
+    # ADR-0055: a company office entry that names no place we can parse ("San Jose Office (HQ)") defers to the single
+    # structured country, but only beside a confirmed entry and only when it names no other country or region
+    if any(strict) and all(ok or (_OFFICE_ENTRY.search(t) and not MULTI_REGION.search(t) and not markers_in(t)
+                                  and not question_countries(t)[1]) for ok, t in zip(strict, texts, strict=True)):
         return code
     return None
+
+
+_OFFICE_ENTRY = re.compile(r"\b(?:office|offices|hq|headquarters)\b", re.IGNORECASE)
+_LOC_NOISE = re.compile(r"\b(?:greater|metro(?:politan)?|bay|area|office|offices|hq|headquarters|data center|campus|"
+                        r"downtown)\b")
+
+
+def _us_hub(text: str) -> bool:
+    """ADR-0055: the last comma part is a major US city whose name belongs to one state ("Union Square, New York City",
+    "Los Angeles - Greater Area", "San Francisco")."""
+    comps = [normalize(c) for c in re.sub(r"\([^)]*\)", " ", text).split(",") if normalize(c)]
+    if not comps:
+        return False
+    return re.sub(r"\s+", " ", _LOC_NOISE.sub(" ", comps[-1])).strip() in _HUB_REGION
 
 
 def job_is_us(location: str, countries: Sequence[str] = (), locations: Sequence[str] = ()) -> bool:
@@ -762,13 +810,28 @@ _SELECTED_PLACES = re.compile(r"\b(?:for|in|to work in) (?:the )?locations? (?:s
                               r"(?: (?:in )+(?:your|the) previous (?:response|answer|question))?")
 
 
+# ADR-0055 (#89): a leading company-policy sentence before the question ("Lambda may agree to sponsor individuals to
+# obtain work authorization (such as H-1B, TN or O-1 visa status)."). Dropped only when it is exactly this statement and
+# any example clause lists only the country's own visa types.
+_SPONSOR_PREAMBLE = re.compile(r"company (?:may|will|can|does|is able to) (?:(?:agree|choose|be able) to )?sponsor "
+                               r"(?:individuals|candidates|applicants|employees|people|some (?:candidates|roles))"
+                               r"(?: (?:to obtain|for) (?:work|employment) authori[sz]ation)?")
+
+
 def _home_job_core(label: str, country: str, company: str) -> str | None:
     """auth_core() after the company's name and "the location(s) you selected" are removed (home-country job only)."""
-    n = _SELECTED_PLACES.sub(" ", normalize(label))
     words = [w for w in normalize(company).split() if w not in _LEGAL_SUFFIX and w not in _AUTH_VOCAB_GENERIC]
-    if words:
-        n = re.sub(rf"\b{re.escape(' '.join(words))}(?: s)?\b", " company ", n)
-    return auth_core(re.sub(r"\s+", " ", n).strip(), country)
+
+    def strip_co(text: str) -> str:
+        n = _SELECTED_PLACES.sub(" ", normalize(text))
+        if words:
+            n = re.sub(rf"\b{re.escape(' '.join(words))}(?: s)?\b", " company ", n)
+        n = re.sub(r"\s+", " ", n).strip()
+        return re.sub(r"\bfrom company\b", "by company", n)       # "require sponsorship from <company>"
+    head, sep, tail = label.strip().partition(". ")
+    if sep and "?" not in head and _SPONSOR_PREAMBLE.fullmatch(strip_co(_drop_examples(head, country))):
+        label = tail
+    return auth_core(strip_co(label), country)
 
 
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str | None = None,
@@ -877,10 +940,14 @@ _CO = "zzcozz"
 _SELF_REF = re.compile(r"\b(?:this|the) (?:company|organi[sz]ation)\b|(?<=\bfor )us\b|(?<=\bby )us\b|(?<=\bat )us\b|"
                        r"(?<=\bwith )us\b")
 _TIME = r"(?:(?:ever|previously|formerly|currently|before|once) )*"
+# ADR-0055 (#87): "... in the past in a Full-time, Part-time, contractor or Intern capacity" (capacity words only)
+_CAP = r"(?:full time|part time|contract(?:or)?|intern(?:ship)?|temporary|consultant|seasonal|freelance|employee)"
+_WHEN = (r"(?: before| previously| in the past| at any (?:point|time)| for any (?:length|period) of time)?"
+         rf"(?: in (?:a |an )?{_CAP}(?: (?:or |and )?{_CAP})+ capacity)?")   # a listed capacity set, never "any capacity"
 _DIRECT_EMPLOY = re.compile(
     rf"^(?:have|did|do) you {_TIME}(?:been {_TIME}employed|worked|work|been an? (?:employee|intern)) {_TIME}(?:by|for|at|with) {_CO}"
-    rf"(?: {_TIME}| before| previously| for any (?:length|period) of time)?$|"
-    rf"^(?:are|were) you {_TIME}(?:been )?employed (?:by|at) {_CO}(?: before| previously| for any (?:length|period) of time)?$|"
+    rf"(?: {_TIME}|{_WHEN})?$|"
+    rf"^(?:are|were) you {_TIME}(?:been )?employed (?:by|at) {_CO}{_WHEN}$|"
     rf"^(?:are|were) you an? (?:current or former|former or current|current|former|previous|past|prior) "
     rf"(?:employee|intern) (?:of|at) {_CO}$")
 _CO_QUALIFIERS = frozenset(["state", "states", "federal", "government", "agency", "competitor", "competitors",
@@ -1098,6 +1165,29 @@ def _profile_fact(f: FormField, ck: str, profile: ProfileLike, gaps: list[dict[s
             gap("contact.city" if not city else "contact.region")
             return None
         return f"{city}, {region}"
+    if ck in ("recent_school", "last_internship"):
+        v = profile.lookup("edu:recent_school" if ck == "recent_school" else "work:last_internship")
+        if not v:
+            gap("education" if ck == "recent_school" else "work.internship")
+            return None
+        if choice:
+            return pick_school(str(v), f.options) if ck == "recent_school" and f.kind == FieldKind.select else None
+        return str(v) if f.kind in (FieldKind.text, FieldKind.textarea, FieldKind.unknown) else None
+    if ck in ("recent_degree", "degree_type"):
+        # ADR-0055: "Degree Type" / "highest degree" = the highest level; "most recent degree" = the latest entry, and
+        # with "obtained/earned/completed" only an entry whose end date has passed
+        done = bool(re.search(r"\b(?:obtained|earned|completed|received|attained)\b", n))
+        v = profile.lookup("edu:highest_degree" if ck == "degree_type" else
+                           "edu:recent_degree_completed" if done else "edu:recent_degree")
+        if not v:
+            gap("education")
+            return None
+        if not f.options:
+            return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
+        hit = pick_degree(str(v), f.options)
+        if hit is None:
+            return None
+        return [hit] if f.kind == FieldKind.multiselect else hit
     if ck in ("located_near", "located_in_place"):
         if f.options and not _yes_no_options(f.options) or f.kind not in (FieldKind.boolean, FieldKind.select,
                                                                          FieldKind.text, FieldKind.unknown):
@@ -1107,6 +1197,298 @@ def _profile_fact(f: FormField, ck: str, profile: ProfileLike, gaps: list[dict[s
                                                     f.label, re.IGNORECASE)
         return _place_answer(m.group(1), profile, ck == "located_near", gap) if m else None
     return None
+
+
+# ---- residence coupled with hybrid / on-site / relocation (ADR-0055, #85) ---------------------------------------
+# "Yes, I'm based in this location and able to work from the office 3 days per week" asserts RESIDENCE, not only a
+# work preference. Such an option is chosen only when the profile's city + region match the posting location; the
+# "not based here but willing to relocate" option only when the posting is confirmed elsewhere (another region or
+# country) and [preferences].willing_to_relocate is true. Anything else stays with the owner.
+_RES_HERE = re.compile(r"\b(?:based|located|living|live|reside|residing|local)\b (?:(?:in|near|to|within|at) )"
+                       r"(?:the |this |our |your |an |a )?(?:listed |posted |same |job s |role s )?(?:location|area|city|office|"
+                       r"offices|region|metro(?: area)?|commuting distance|hub)\b|\bbased (?:here|locally)\b|\blocal to\b|"
+                       r"\b(?:live|reside|based) nearby\b")
+_RES_OFFICE = re.compile(r"\boffice\b|\bin person\b|\bon ?site\b|\bhybrid\b|\bdays? (?:a|per) week\b|\bcommut")
+_RES_ONSITE = re.compile(r"\bon ?site\b|\b5 days\b|\bfive days\b|\bfull time in (?:the )?office\b")
+_RES_HYBRID = re.compile(r"\bhybrid\b|\b[1-4] days?\b|\b(?:one|two|three|four) days?\b")
+# major US cities whose bare name names exactly one state ("San Francisco", "New York": city or state, NY either way)
+_HUB_REGION = {"san francisco": "CA", "los angeles": "CA", "san diego": "CA", "palo alto": "CA",
+               "mountain view": "CA", "sunnyvale": "CA", "new york": "NY", "new york city": "NY", "nyc": "NY",
+               "seattle": "WA", "chicago": "IL", "boston": "MA", "austin": "TX",
+               "dallas": "TX", "houston": "TX", "denver": "CO", "atlanta": "GA", "philadelphia": "PA",
+               "pittsburgh": "PA", "phoenix": "AZ", "salt lake city": "UT", "miami": "FL",
+               "minneapolis": "MN", "detroit": "MI", "nashville": "TN", "raleigh": "NC", "baltimore": "MD"}
+
+
+_CITY_ALIAS = {"new york city": "new york", "nyc": "new york"}
+
+
+def _loc_region(loc: str) -> tuple[str | None, str | None, str | None]:
+    """(city, region code or name, ISO-2 country) of one posting location, as far as it is stated; None = unknown."""
+    parts = [re.sub(r"\s+", " ", _LOC_NOISE.sub(" ", normalize(t))).strip()
+             for t in re.sub(r"\([^)]*\)", " ", loc).split(",")]
+    parts = [t for t in parts if t]                                 # "Los Angeles - Greater Area" -> "los angeles"
+    if not parts or MULTI_REGION.search(loc) or re.search(r"\bremote\b", loc, re.IGNORECASE):
+        return None, None, None
+    m = re.fullmatch(r"([A-Z]{2})-([A-Za-z .'-]+)", loc.strip())    # Ashby "GB-London" / "US-Seattle"
+    if m and country_iso(m.group(1)):
+        return normalize(m.group(2)), None, country_iso(m.group(1))
+    if len(parts) >= 2 and parts[-1] in _HUB_REGION:                # "Union Square, New York City"
+        return parts[-1], _HUB_REGION[parts[-1]], "US"
+    country = country_iso(parts[-1], allow_codes=False) if len(parts) >= 2 else None
+    rest = parts[:-1] if country else parts
+    city = rest[0] if rest else None
+    region = rest[1] if len(rest) >= 2 else None
+    if region is None and city in _HUB_REGION and country in (None, "US"):
+        return city, _HUB_REGION[city], "US"
+    if region is None and city and city.removesuffix(" state") in _US_STATE_NAMES and \
+            city.removesuffix(" state") not in ("washington",):
+        return None, _US_STATE_NAMES[city.removesuffix(" state")], "US"     # a bare US state ("New York")
+    if region is not None and country is None and _region_code(region):
+        country = "US"
+    return city, region, country
+
+
+def residence_match(profile: ProfileLike, locations: Sequence[str]) -> bool | None:
+    """True: the profile's city + region equal a posting location. False: every posting location is confirmed in
+    another region or country. None: not computable (no geocoder, so a nearby city is never decided)."""
+    city, region = normalize(str(profile.lookup("contact:city") or "")), str(profile.lookup("contact:region") or "")
+    home = country_iso(profile.lookup("country") or "")
+    locs = [x for x in locations if str(x or "").strip()]
+    if not city or not region or not home or not locs:
+        return None
+    mine = _region_code(region) if home == "US" else normalize(region)
+    verdicts = []
+    for loc in locs:
+        lc, lr, lco = _loc_region(str(loc))
+        if lco is not None and lco != home:
+            verdicts.append(False)
+            continue
+        if lr is None:
+            verdicts.append(None)
+            continue
+        theirs = _region_code(lr) if (lco or home) == "US" else normalize(lr)
+        if theirs is None or mine is None:
+            verdicts.append(None)
+        elif theirs != mine:
+            verdicts.append(False)
+        else:
+            verdicts.append(True if _CITY_ALIAS.get(lc or "", lc) == _CITY_ALIAS.get(city, city) else None)
+    if any(v is True for v in verdicts):
+        return True
+    return False if verdicts and all(v is False for v in verdicts) else None
+
+
+def _work_pref_ok(text: str, profile: ProfileLike) -> bool:
+    """The office / hybrid / on-site commitment an option or label also makes is backed by [preferences]."""
+    hyb, ons = _truth(profile.lookup("structured:open_to_hybrid")), _truth(profile.lookup("structured:open_to_onsite"))
+    if not _RES_OFFICE.search(text):
+        return True
+    if _RES_ONSITE.search(text):
+        return ons is True
+    if _RES_HYBRID.search(text):
+        return hyb is True
+    return hyb is True or ons is True
+
+
+def _res_option_class(o: str) -> str:
+    """'here' (asserts residence here), 'relocate' (not based here, willing to relocate) or 'other'."""
+    n = re.sub(r"\b(?:don|doesn|isn|aren|can|won|didn|wasn|haven) t\b", "not", normalize(o))   # "don't" -> "not"
+    m = _RES_HERE.search(n)
+    if not m:
+        return "other"
+    before, after = n[:m.start()], n[m.end():]
+    if not has_negator(before):
+        return "here" if not has_negator(after) else "other"
+    if re.search(r"\brelocat", after) and not re.search(r"\b(?:not|unable|cannot|can not|never|nor|no)\b(?: \w+){0,3} "
+                                                        r"relocat|\bunwilling\b", after):
+        return "relocate"
+    return "other"
+
+
+def _plain_yes_no(options: Sequence[str]) -> bool:
+    """Every option is a bare Yes / No (not "Yes, I'm based in this location ...")."""
+    return all(normalize(o) in ("yes", "no") for o in options)
+
+
+def is_residence_coupled(f: FormField) -> bool:
+    """A choice whose options assert residence at the posting location, or a yes/no label that asks it ("Are you
+    based in the listed location and ...?"). A conditional ("If you are not local to the area, ...") is not."""
+    if f.options and not _plain_yes_no(f.options):
+        return any(_res_option_class(o) != "other" for o in f.options)
+    n = normalize(f.label)
+    m = _RES_HERE.search(n)
+    if not m or f.kind not in (FieldKind.boolean, FieldKind.select):
+        return False
+    before = n[:m.start()]
+    return not re.search(r"\b(?:if|unless|when|whether|once)\b", before) and not has_negator(before)
+
+
+def residence_coupled_value(f: FormField, profile: ProfileLike, locations: Sequence[str],
+                            job_country: str | None = None) -> Any | None:
+    """ADR-0055: the answer to a residence-coupled field, or None (unresolved). Never claims residence without a
+    confirmed city + region match."""
+    locs = list(locations)
+    home = country_iso(profile.lookup("country") or "")
+    match = residence_match(profile, locs)
+    if match is None and job_country and home and job_country != home:
+        match = False                                    # a confirmed job country other than the home country
+    reloc = _truth(profile.lookup("structured:willing_to_relocate"))
+    if f.options and not _plain_yes_no(f.options):
+        if match is True:
+            want = [o for o in f.options if _res_option_class(o) == "here" and _work_pref_ok(normalize(o), profile)]
+        elif match is False and reloc is True:
+            want = [o for o in f.options if _res_option_class(o) == "relocate" and _work_pref_ok(normalize(o), profile)]
+        else:
+            return None
+        if len(want) != 1:
+            return None
+        return [want[0]] if f.kind == FieldKind.multiselect else want[0]
+    # yes/no label: "Are you based in the listed location and able to ...?" / "... reside within commuting distance OR
+    # are you open to relocation ...?"
+    n = normalize(f.label)
+    either = bool(re.search(r"\bor (?:are|would|will|do|be) you\b|\bor (?:are |be )?(?:open|willing) to relocat", n))
+    if either and re.search(r"relocat", n):
+        if match is True or reloc is True:
+            return "Yes"
+        return "No" if match is False and reloc is False else None
+    pref = _work_pref_ok(n, profile)
+    if match is True and pref:
+        return "Yes"
+    if match is False:
+        return "No"
+    return None
+
+
+# ---- office questions that name the company's office (ADR-0055) -----------------------------------------------
+# "Will you be able to work from our office in Union Square, NYC?", "Are you open to working out of our Torrance (LA)
+# Office 5 Days a Week?" (options Yes / No / "Yes, but require relocation"). Yes needs the [preferences] fact AND
+# either a confirmed residence match or willing_to_relocate; a relocation-qualified Yes is chosen on a confirmed
+# mismatch, a plain Yes only on a match.
+_OFFICE_Q = re.compile(r"\b(?:our|one of our|the company s)\b(?: \w+){0,4} offices?\b")
+_OFFICE_PICK = re.compile(r"\b(?:which|what|preferred|prefer|preference)\b.*\b(?:location|office)s?\b")
+
+
+def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
+                  job_country: str | None, gap: Any) -> Any | None:
+    n = normalize(f.label)
+    key = "open_to_onsite" if _RES_ONSITE.search(n) or ck == "open_to_onsite" else "open_to_hybrid"
+    pref = _truth(profile.lookup("structured:" + key))
+    if pref is None:
+        gap("preferences." + key)
+        return None
+    home = country_iso(profile.lookup("country") or "")
+    match = residence_match(profile, locations)
+    if match is None and job_country and home and job_country != home:
+        match = False
+    reloc = _truth(profile.lookup("structured:willing_to_relocate"))
+    plain = f.kind == FieldKind.boolean or not f.options or _plain_yes_no(f.options)
+    if plain:
+        if pref and (match is True or reloc is True):
+            return "Yes"
+        return "No" if (pref is False or (match is False and reloc is False)) else None
+    yes = [o for o in f.options if tokens(o)[:1] == ["yes"] and not has_negator(re.sub(r"\brequire\w*", "", o))]
+    no = [o for o in f.options if tokens(o)[:1] == ["no"]]
+    relo = [o for o in yes if re.search(r"relocat", o, re.IGNORECASE)]
+    bare = [o for o in yes if o not in relo]
+    if pref is False:
+        pick = no
+    elif match is True:
+        pick = bare
+    elif match is False and reloc is True:
+        pick = relo or bare
+    else:
+        pick = []
+    if len(pick) != 1:
+        return None
+    return [pick[0]] if f.kind == FieldKind.multiselect else pick[0]
+
+
+def office_pick_value(f: FormField, profile: ProfileLike, locations: Sequence[str]) -> Any | None:
+    """"Which of our offices are you interested in?" (options are places, maybe "Remote"): the office where the owner
+    lives; else, when willing to relocate and open to on-site or hybrid work, the posting's primary location."""
+    places = [o for o in f.options if not re.search(r"\bremote\b", o, re.IGNORECASE)]
+    if len(places) < 2 or not all(_loc_region(o)[0] or _loc_region(o)[1] for o in places):
+        return None
+    here = [o for o in places if residence_match(profile, [o]) is True]
+    pick = here
+    if not here:
+        reloc = _truth(profile.lookup("structured:willing_to_relocate"))
+        office = (_truth(profile.lookup("structured:open_to_onsite")) is True
+                  or _truth(profile.lookup("structured:open_to_hybrid")) is True)
+        primary = _loc_region(str(locations[0]))[0] if locations else None
+        pick = [o for o in places if primary and _loc_region(o)[0] == primary] if reloc is True and office else []
+    if len(pick) != 1:
+        return None
+    return [pick[0]] if f.kind == FieldKind.multiselect else pick[0]
+
+
+# ---- U.S.-person status (ADR-0055) ---------------------------------------------------------------------------------
+# Answered only from the structured fact ([authorization].us_person, else a trusted policy.us_person) and only when every
+# word of the label is U.S.-person / export-control definition wording. Anything else stays with the owner.
+_USP_VOCAB = frozenset(["a", "an", "the", "is", "are", "am", "i", "you", "your", "of", "or", "and", "for", "as", "by",
+                        "under", "in", "to", "with", "which", "what", "following", "best", "describes",
+                        "status", "please", "select", "indicate", "confirm", "u", "s", "us", "person", "persons",
+                        "united", "states", "america", "citizen", "citizens", "legal", "lawful", "lawfully", "permanent",
+                        "resident", "residents", "temporary", "refugee", "refugees", "asylee", "asylees", "asylum",
+                        "green", "card", "holder", "holders", "protected", "individual", "individuals", "e", "g",
+                        "defined", "definition", "means", "meaning", "within", "purposes", "purpose", "itar", "ear",
+                        "export", "control", "controls", "regulations", "regulation", "administration",
+                        "international", "traffic", "arms", "laws", "law", "who", "has", "been", "granted", "admitted",
+                        "currently", "do", "does", "qualify", "qualifies", "considered", "applicable", "1324b", "8",
+                        "c", "section", "yes", "no"])
+
+
+def us_person_label_ok(label: str) -> bool:
+    """ONE question about the candidate's own U.S.-person status: definition sentences allowed, then a single question
+    that ends the label. A second question, another person or any other legal topic leaves it to the owner."""
+    raw = (label or "").strip()
+    _, mark, after = raw.partition("?")
+    if mark and after.strip():                       # "...? Have you ever been convicted ...?"
+        return False
+    words = normalize(raw).split()
+    return bool(words) and all(w in _USP_VOCAB or w.isdigit() for w in words)
+
+
+def _us_person_value(f: FormField, profile: ProfileLike, gap: Any) -> Any | None:
+    if not us_person_label_ok(f.label):
+        return None
+    fact = _truth(profile.lookup("us_person"))
+    if fact is None:
+        gap("authorization.us_person")
+        return None
+    if f.kind == FieldKind.boolean or not f.options or _yes_no_options(f.options):
+        return _yn(fact) if (f.kind == FieldKind.boolean or f.options) else None
+    yes = [o for o in f.options if re.search(r"\bu ?s persons?\b", normalize(o)) and not has_negator(o)
+           and not re.search(r"\bnone\b", normalize(o))]
+    if fact:
+        pick = yes
+    else:
+        cit = [x.strip() for x in re.split(r"[,;/]| and ", str(profile.lookup("citizenship_country") or "")) if x.strip()]
+        isos = [country_iso(x) for x in cit]
+        if not isos or any(i is None or i == "US" for i in isos):
+            return None
+        rxs = [_country_rx(i) for i in isos]
+
+        def names_mine(o: str) -> bool:
+            n = normalize(o)
+            return any(rx is not None and rx.search(n) for rx in rxs) or any(normalize(c) in n for c in cit)
+        others = [o for o in f.options if o not in yes]
+        if any(rx is None for rx in rxs):
+            return None
+        if any(names_mine(o) for o in others):
+            return None                                  # an option naming the owner's own country: the owner decides
+        else:
+            pick = [o for o in others if re.search(r"\bnone of the above\b|\b(?:a |an )?(?:different|another|other) "
+                                                    r"country\b", normalize(o))]
+    if len(pick) != 1:
+        return None
+    return [pick[0]] if f.kind == FieldKind.multiselect else pick[0]
+
+
+def _country_rx(iso: str | None) -> re.Pattern[str] | None:
+    pat = COUNTRY_NAMES.get(iso or "")
+    return re.compile(rf"\b(?:{pat})\b") if pat else None
 
 
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
@@ -1402,7 +1784,12 @@ def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any
             return _truth(v)
         return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
     else:   # the exact option for a plainly-worded question; otherwise declining (never a nearest guess)
-        got = (exact_option(str(v), f.options) if demographic_label_ok(f.label, ck) else None) or decline_option(f.options)
+        ok_label = demographic_label_ok(f.label, ck)
+        detail = profile.lookup("race_detail") if ck == "race" and ok_label else None
+        # ADR-0055: [demographics].race_detail (a finer race value) wins when an option matches it exactly; otherwise the
+        # race_ethnicity (EEO-1) option. exact_option never takes a broader or narrower option.
+        got = ((exact_option(str(detail), f.options) if detail and not _is_decline(detail) else None)
+               or (exact_option(str(v), f.options) if ok_label else None) or decline_option(f.options))
     return None if got is None else [got] if f.kind == FieldKind.multiselect else got
 
 
@@ -1760,28 +2147,32 @@ def flat_auth_allowed(f: FormField, profile: ProfileLike, job_country: str | Non
 
 
 _FACT_RULE_KEYS = PROFILE_FACT_KEYS | {"prior_employee", "willing_to_relocate", "relocation_support", "open_to_hybrid",
-                                      "open_to_onsite", "located_in_us", "work_authorized", "requires_sponsorship"}
+                                      "open_to_onsite", "located_in_us", "work_authorized", "requires_sponsorship",
+                                      "us_person"}
 
 
 def fact_rule_field(f: FormField, company: str = "", aliases: Sequence[str] = ()) -> bool:
     """ADR-0053: a field the deterministic profile-fact rules own (employer, title, prior employment, residence,
     preferences, authorization). Left unresolved by those rules, it goes to the owner: the autonomy layer
     (ADR-0052) never assumes or infers it."""
-    return (canonical_key(f.label) in _FACT_RULE_KEYS or is_auth_question(f)
+    return (canonical_key(f.label) in _FACT_RULE_KEYS or is_auth_question(f) or is_residence_coupled(f)
             or (bool(company) and about_this_company(f.label, company, aliases)))
 
 
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
                stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
-               job_in_us: bool = False, job_country: str | None = None) -> MapResult:
-    """`job_country`: the job's confirmed ISO-2 country (see job_country()); `job_in_us=True` is the old alias for "US"."""
+               job_in_us: bool = False, job_country: str | None = None,
+               job_locations: Sequence[str] = ()) -> MapResult:
+    """`job_country`: the job's confirmed ISO-2 country (see job_country()); `job_in_us=True` is the old alias for "US".
+    `job_locations`: the posting's location strings, for residence-coupled options (ADR-0055)."""
     if job_country is None and job_in_us:
         job_country = "US"
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
     res = MapResult()
     eeo_keys: set[str] = set()
     gaps: list[dict[str, Any]] = []
+    originals: dict[str, FormField] = {}          # ADR-0055: fields mapped with residence options removed
 
     def ok(f: FormField, v: Any, src: str) -> None:
         if v is None or v == "":
@@ -1821,7 +2212,37 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             else:
                 res.unresolved.append(f)  # owner-only: never Yes, never an automatic No, no flat/persona/LLM
             continue
+        if is_residence_coupled(f):          # ADR-0055 (#85): residence + hybrid/relocation, before any preference rule
+            rv = residence_coupled_value(f, profile, job_locations, job_country)
+            if rv is not None or not (f.options and not _plain_yes_no(f.options)):
+                ok(f, rv if rv is None or isinstance(rv, list) else _coerce(f, rv, min_score), "rule:residence_here")
+                continue
+            # not decided: the other rules may still pick an option that states no residence ("I am open to
+            # relocating"), never one that claims or denies residence here
+            rest_opts = [o for o in f.options if _res_option_class(o) == "other"]
+            if not rest_opts:
+                res.unresolved.append(f)
+                continue
+            originals[f.key] = f
+            f = f.model_copy(update={"options": rest_opts})
         ck = canonical_key(f.label)
+        if ck == "us_person":                # ADR-0055: structured U.S.-person fact only, strict wording
+            def _usp_gap(fact: str, key: str = f.key) -> None:
+                gaps.append({"country": None, "fact": fact, "key": key, "profile_fact": True})
+            uv = _us_person_value(f, profile, _usp_gap)       # never an [answers] pattern (control, final round)
+            ok(f, uv if uv is None or isinstance(uv, list) else _coerce(f, uv, min_score), "rule:us_person")
+            continue
+        if ck in ("open_to_onsite", "open_to_hybrid") and _OFFICE_Q.search(normalize(f.label)):
+            def _off_gap(fact: str, key: str = f.key) -> None:
+                gaps.append({"country": None, "fact": fact, "key": key, "profile_fact": True})
+            ov = _office_value(f, ck, profile, job_locations, job_country, _off_gap)   # ADR-0055
+            ok(f, ov if ov is None or isinstance(ov, list) else _coerce(f, ov, min_score), f"rule:{ck}")
+            continue
+        if f.options and _OFFICE_PICK.search(normalize(f.label)) and re.search(r"\boffices?\b", normalize(f.label)):
+            pv = office_pick_value(f, profile, job_locations)
+            if pv is not None:
+                res.answers.append(Answer(key=f.key, value=pv, source="rule:office_location"))
+                continue
         if (ck is None and company and not is_auth_question(f)
                 and about_this_company(f.label, company, company_aliases)):
             ck = "prior_employee"        # ADR-0053: "Have you worked with <posting company>?" is work history, not a skill
@@ -1904,6 +2325,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         else:
             keep.append(a)
     res.answers = keep
+    res.unresolved = [originals.get(x.key, x) for x in res.unresolved]      # the owner sees every option
     answered = {a.key for a in res.answers}
     res.profile_gaps = list({(g["country"], g["fact"]): g for g in gaps
                              if g["key"] not in answered and (g["country"] or g.get("profile_fact"))}.values())

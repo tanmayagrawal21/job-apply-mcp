@@ -164,6 +164,9 @@ class PolicyCfg(BaseModel):
     hours_per_year: int = 2080                   # hourly -> annual conversion
     exclude_title_patterns: list[str] = Field(default_factory=list)  # regexes on the title (e.g. "research")
     has_phd: bool = False                        # False: skip titles aimed at PhD graduates/students (ADR-0011)
+    # Set by load_settings only (never from config): True when policy.us_person came from the trusted user config.
+    # Only then may the mapper answer a U.S.-person question from it (ADR-0055).
+    _us_person_trusted: bool = PrivateAttr(default=False)
 
 
 BUILTIN_CONTROLS = ["mode", "quota", "attestation", "hard_stop", "single_submit", "prose_lint",
@@ -693,6 +696,10 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
 for _k in ("sender", "recipient", "self_address", "self_aliases"):
     _RELAXES[("intake.mail", _k)] = lambda new, base: new != base
 _RELAXES[("ingest.imap", "user_env")] = lambda new, base: new != base   # fallback source of the "self" address
+# ADR-0055: candidate legal-status facts (gates, and the mapper's U.S.-person fallback). Only the trusted user config
+# may set them; a project file, JOB_APPLY__* or an untrusted user file cannot change them in either direction.
+for _k in ("us_person", "us_citizen", "requires_sponsorship", "has_clearance"):
+    _RELAXES[("policy", _k)] = lambda new, base: new != base
 
 # Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy
 # spelling and takes precedence when set, so it is guarded too.
@@ -940,6 +947,9 @@ def load_settings(project_dir: Path | None = None) -> Settings:
         for k, raw in qhits:
             log.warning("submission cap control.params.quota.%s=%r is loosened by the trusted user config %s",
                         k, raw, user)
+    upol = udata.get("policy") if isinstance(udata.get("policy"), dict) else {}
+    s.policy._us_person_trusted = (trusted_user and "us_person" in upol
+                                   and s.policy.us_person == base.policy.us_person)          # ADR-0055
     urf = udata.get("control", {}).get("rules_file") if isinstance(udata.get("control"), dict) else None
     if urf and trusted_user and urf == s.control.rules_file:
         s.control._rules_trusted = True

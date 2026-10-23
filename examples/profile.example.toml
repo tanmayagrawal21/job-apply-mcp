@@ -79,6 +79,7 @@ gender = "Decline to self-identify"
 # gender_if_required = ""          # optional: used only when the gender question is required
 hispanic_latino = "Decline to self-identify"   # or the exact option text, e.g. "No"
 race_ethnicity = "Decline to self-identify"
+# race_detail = ""                  # optional finer option, e.g. "Irish"; used only when a form offers it exactly
 veteran_status = "Decline to self-identify"
 disability_status = "Decline to self-identify"
 
