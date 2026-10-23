@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 
 import httpx
@@ -204,3 +205,402 @@ def test_tools_doc_covers_every_registered_tool():
     doc = (Path(__file__).resolve().parents[1] / "docs" / "tools.md").read_text(encoding="utf-8")
     names = [t.name for t in asyncio.run(mcp.list_tools())]
     assert names and [n for n in names if f"`{n}`" not in doc] == []
+
+
+def _cfg_text(path, body="dry_run = true\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def test_xdg_dirs_honoured_everywhere_and_relative_ignored(monkeypatch, tmp_path):
+    for p in ("linux", "win32"):
+        monkeypatch.setattr(paths.sys, "platform", p)
+        for k in ("CONFIG", "DATA", "CACHE"):
+            monkeypatch.setenv(f"XDG_{k}_HOME", str(tmp_path / k))
+        assert paths.config_dir() == tmp_path / "CONFIG" / "job-apply-mcp"
+        assert paths.data_dir() == tmp_path / "DATA" / "job-apply-mcp"
+        assert paths.cache_dir() == tmp_path / "CACHE" / "job-apply-mcp"
+        assert paths.privacy_terms_file().parent == paths.config_dir()
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative/dir")
+    monkeypatch.setenv("XDG_CACHE_HOME", "")
+    assert paths.config_dir() == paths.Path.home() / ".config" / "job-apply-mcp"
+    assert paths.cache_dir() == paths.Path.home() / ".cache" / "job-apply-mcp"
+
+
+def test_server_and_doctor_read_the_xdg_config_not_home(monkeypatch, tmp_path):
+    from job_apply_mcp import server
+    home = tmp_path / "realhome"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    _cfg_text(home / ".config" / "job-apply-mcp" / "config.toml", "[policy]\ndedupe_days = 11\n")
+    xdg = tmp_path / "xdg"
+    _cfg_text(xdg / "job-apply-mcp" / "config.toml", "[policy]\ndedupe_days = 22\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setattr(server, "_svc", None)
+    assert server.svc().settings.policy.dedupe_days == 22
+    checks, s = doctor._config_checks()
+    assert s is not None and s.policy.dedupe_days == 22
+    assert any(str(xdg / "job-apply-mcp" / "config.toml") in c.detail for c in checks)
+    assert not any(str(home) in c.detail for c in checks)
+    monkeypatch.setattr(server, "_svc", None)
+
+
+def test_trusted_config_is_the_fixed_path_not_xdg(monkeypatch, tmp_path):
+    from job_apply_mcp import config
+    fixed = paths.trusted_config_file()
+    _cfg_text(fixed)
+    assert fixed == paths._real_home() / ".config" / "job-apply-mcp" / "config.toml" or os.name == "nt"
+    assert config._user_file_trusted(fixed) == (True, "")
+    xdg = tmp_path / "repo" / ".x"                              # e.g. a repo's .mcp.json env block
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    f = xdg / "job-apply-mcp" / "config.toml"
+    _cfg_text(f)
+    assert paths.config_file() == f and paths.trusted_config_file() == fixed
+    assert config._user_file_trusted(f)[0] is False
+    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(f))
+    assert config._user_file_trusted(f)[0] is False
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG")
+    if os.name != "nt":                                         # POSIX mode bits only; Windows skips this check
+        fixed.chmod(0o666)
+        assert config._user_file_trusted(fixed)[0] is False     # group/world-writable
+
+
+_RELAX = ('dry_run = false\n[apply]\napproval_mode = "agent"\nauto_approve = true\n'
+          '[answers]\nautonomy = "infer"\n')
+
+
+def test_env_set_xdg_config_cannot_relax_settings(monkeypatch, tmp_path):
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    xdg = tmp_path / "repo" / ".x"
+    _cfg_text(xdg / "job-apply-mcp" / "config.toml", _RELAX)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    s = load_settings()
+    assert s.dry_run is True and s.apply.approval_mode != "agent" and not s.apply.auto_approve
+    assert s.answers.autonomy != "infer"
+    _cfg_text(paths.trusted_config_file(), _RELAX)              # the same text at the fixed path IS trusted
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    if os.name != "nt":
+        assert load_settings().dry_run is False
+
+
+def test_state_dir_ignores_xdg_data_home_unless_trusted_config_sets_it(monkeypatch, tmp_path):
+    from job_apply_mcp.config import state_path
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "fresh"))
+    s = Settings()
+    s.paths.state_dir = None
+    assert state_path(s) == paths.state_dir() and tmp_path / "fresh" not in state_path(s).parents
+    assert paths.data_dir() == tmp_path / "fresh" / "job-apply-mcp"       # ordinary data still follows XDG
+    custom = tmp_path / "state"
+    _cfg_text(paths.trusted_config_file(), f'[paths]\nstate_dir = "{custom.as_posix()}"\n')
+    if os.name != "nt":
+        assert state_path(load_settings()) == custom
+    xdg = tmp_path / "x"
+    _cfg_text(xdg / "job-apply-mcp" / "config.toml", f'[paths]\nstate_dir = "{custom.as_posix()}"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))                       # untrusted file cannot move the state
+    assert state_path(load_settings()) == paths.state_dir()
+
+
+def test_fresh_xdg_data_home_does_not_reset_quota_usage(monkeypatch, tmp_path):
+    from job_apply_mcp.control.agent import ControlAgent
+    s = Settings()
+    s.paths.state_dir = None
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d1"))
+    a1 = ControlAgent(s)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d2"))
+    a2 = ControlAgent(s)
+    assert a1.audit_path == a2.audit_path == paths.state_dir() / "control_audit.jsonl"
+
+
+def test_revoked_consent_stays_revoked_after_restoring_an_old_store(tmp_path):
+    import shutil
+
+    from job_apply_mcp.consent.store import ConsentStore
+    from job_apply_mcp.grants.store import GrantError
+    data = tmp_path / "state"
+    st = ConsentStore(data, secret=b"k" * 32, hwm_file=tmp_path / "cfg" / "consent_uses.json")
+    c = st.issue_consent(3600)
+    shutil.copytree(data, tmp_path / "backup")
+    assert st.revoke(c.id) == [c.id]
+    shutil.rmtree(data)
+    shutil.copytree(tmp_path / "backup", data)                  # restore the pre-revoke copy
+    st2 = ConsentStore(data, secret=b"k" * 32, hwm_file=tmp_path / "cfg" / "consent_uses.json")
+    assert st2.active() == []
+    with pytest.raises(GrantError):
+        st2.use("approve_submissions")
+
+
+def test_server_info_version_is_the_package_version():
+    from job_apply_mcp import server
+    opts = server.mcp._mcp_server.create_initialization_options()
+    assert opts.server_version == __version__
+
+
+# ---- migration of the security-state stores into the fixed state dir (ADR-0054): imports only TIGHTEN
+def _old_world(tmp_path):
+    """The previous default dir (a trusted source) holds the old stores; the new state dir (set by the trusted
+    config) starts empty."""
+    from job_apply_mcp import migrate
+    migrate._done.clear()
+    old = paths.state_dir()
+    old.mkdir(parents=True)
+    s = Settings()
+    s.paths.state_dir = str(tmp_path / "newstate")
+    return s, old, tmp_path / "newstate"
+
+
+def _sub(book, ref, state):
+    book.set_state(ref, state, url="https://x.example/" + ref)
+    book._db.commit()
+
+
+def test_migration_keeps_submitted_posting_blocked(tmp_path):
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    from job_apply_mcp.config import state_path
+    s, old, new = _old_world(tmp_path)
+    b = ApprovalBook(old)
+    _sub(b, "g:a:1", "submitted")
+    _sub(b, "g:a:2", "unknown")
+    _sub(b, "g:a:3", "planned")
+    b._db.close()
+    assert state_path(s) == new
+    nb = ApprovalBook(new)
+    assert nb.begin_submit("g:a:1", None) == (False, "submitted")
+    assert nb.state("g:a:2")["state"] == "unknown"
+    assert nb.state("g:a:3") is None                                  # permissive state is not imported
+    assert ApprovalBook(old).state("g:a:1")["state"] == "submitted"   # copied, not moved
+
+
+def test_migration_most_restrictive_state_wins(tmp_path):
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    from job_apply_mcp.config import state_path
+    s, old, new = _old_world(tmp_path)
+    ob = ApprovalBook(old)
+    _sub(ob, "a:b:1", "submitting")
+    ob._db.close()
+    nb0 = ApprovalBook(new)
+    _sub(nb0, "a:b:1", "planned")
+    nb0._db.close()
+    state_path(s)
+    assert ApprovalBook(new).state("a:b:1")["state"] == "submitting"
+
+
+def test_planted_approved_row_does_not_approve(tmp_path):
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    from job_apply_mcp.config import state_path
+    s, old, new = _old_world(tmp_path)
+    nb = ApprovalBook(new)
+    aid = nb.issue("g:a:7", "https://x.example/7", "Acme", "Eng", {"q": "a"})
+    nb._db.close()
+    ob = ApprovalBook(old)
+    ob._db.execute("INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (aid, "g:a:7", "https://x.example/7", "Acme", "Eng", "h", "f", "{}", "approved", "attacker", 1.0, 9e12))
+    ob._db.execute("INSERT INTO approvals VALUES('planted-2','g:a:8','u','c','t','h','f','{}','used','x',1.0,9e12)")
+    ob._db.commit()
+    ob._db.close()
+    state_path(s)
+    nb = ApprovalBook(new)
+    assert nb.get(aid).status == "pending"                            # not upgraded
+    assert nb.get("planted-2") is None                                # nothing inserted, not even `used`
+
+
+def test_migration_carries_over_quota_but_not_planted_release(tmp_path):
+    import json
+    import time
+
+    from job_apply_mcp.config import state_path
+    from job_apply_mcp.control.agent import ControlAgent
+    from job_apply_mcp.control.controls import RELEASE
+    s, old, new = _old_world(tmp_path)
+    now = time.time()
+    rows = [{"ts": round(now - 60 * i, 2), "a": "submit", "d": "pass", "ref": f"g:c:{i}", "plat": "greenhouse",
+             "co": "c", "dry": False, "run": "r", "n": 1, "id": f"e{i}", "v": [], "w": []} for i in range(3)]
+    rows.append({"ts": round(now, 2), "a": RELEASE, "d": "release", "ref": "g:c:0", "plat": "greenhouse", "co": "c",
+                 "dry": False, "run": "r", "n": 1, "id": "e0", "v": [], "w": []})
+    (old / "control_audit.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    a = ControlAgent(s)
+    assert a.audit_path.parent == state_path(s) == new
+    evs = [e for e in a.state.events if e.action == "submit"]
+    assert len(evs) == 3 and not [e for e in a.state.events if e.action == RELEASE]
+
+
+def test_planted_key_is_not_adopted(tmp_path, monkeypatch):
+    from job_apply_mcp.config import state_path
+    s, _old, _new = _old_world(tmp_path)
+    xdg = tmp_path / "xdgcfg"
+    (xdg / "job-apply-mcp").mkdir(parents=True)
+    (xdg / "job-apply-mcp" / "grant.key").write_text("ab" * 32)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    state_path(s)
+    assert not (paths.fixed_config_dir() / "grant.key").exists()
+
+
+def test_forged_consent_is_dropped_and_none_is_added(tmp_path):
+    import json
+
+    from job_apply_mcp.consent.store import ConsentStore
+    from job_apply_mcp.migrate import _merge_signed_rows
+    _s, old, new = _old_world(tmp_path)
+    key = b"k" * 32
+    nst = ConsentStore(new, secret=key, hwm_file=tmp_path / "h.json")
+    c = nst.issue_consent(3600, max_uses=2)
+    ost = ConsentStore(old, secret=key, hwm_file=tmp_path / "h.json")
+    legit = ost.issue_consent(7200)                                   # signed, but not in the new store
+    forged = {**json.loads(c.payload()), "expires": c.expires + 99999, "used": 0, "sig": "00" * 32}
+    ost._write_all([*ost._read_all(), forged])
+    before = nst._read_all()
+    _merge_signed_rows(ConsentStore, old, new, secret=key, hwm_file=tmp_path / "h.json")
+    after = ConsentStore(new, secret=key, hwm_file=tmp_path / "h.json")._read_all()
+    assert after == before and not any(r["id"] == legit.id for r in after)
+
+
+def test_revoked_consent_stays_revoked_through_migration(tmp_path):
+    import shutil
+
+    from job_apply_mcp.consent.store import ConsentStore
+    from job_apply_mcp.migrate import _merge_signed_rows
+    _s, old, new = _old_world(tmp_path)
+    key, h = b"k" * 32, tmp_path / "h.json"
+    st = ConsentStore(new, secret=key, hwm_file=h)
+    c = st.issue_consent(3600)
+    shutil.copytree(new, old, dirs_exist_ok=True)                     # old copy still holds the signed row
+    st.revoke(c.id)
+    _merge_signed_rows(ConsentStore, old, new, secret=key, hwm_file=h)
+    assert ConsentStore(new, secret=key, hwm_file=h).active() == []
+
+
+def test_consent_conflict_tightens_expiry_and_uses(tmp_path):
+    import shutil
+
+    from job_apply_mcp.consent.store import ConsentStore
+    from job_apply_mcp.migrate import _merge_signed_rows
+    key, h = b"k" * 32, tmp_path / "h.json"
+    a, b = tmp_path / "a", tmp_path / "b"
+    sa = ConsentStore(a, secret=key, hwm_file=h)
+    c = sa.issue_consent(7200, max_uses=5)
+    shutil.copytree(a, b)
+    ConsentStore(b, secret=key, hwm_file=h)._resign(c, used=3, expires=c.expires - 3600)
+    _merge_signed_rows(ConsentStore, b, a, secret=key, hwm_file=h)
+    row = next(r for r in ConsentStore(a, secret=key, hwm_file=h)._read_all() if r["id"] == c.id)
+    assert row["used"] == 3 and row["expires"] == c.expires - 3600
+    ConsentStore(a, secret=key, hwm_file=h)._verify_row(row)
+
+
+def test_symlinked_and_env_derived_sources_are_ignored(tmp_path):
+    from job_apply_mcp import migrate
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    from job_apply_mcp.config import state_path
+    s, old, new = _old_world(tmp_path)
+    old.rmdir()
+    real = tmp_path / "attacker"
+    real.mkdir()
+    b = ApprovalBook(real)
+    _sub(b, "g:a:5", "submitted")
+    b._db.close()
+    old.symlink_to(real, target_is_directory=True)                    # the default dir is a symlink: refused
+    env_dir = tmp_path / "envdata"
+    env_dir.mkdir()
+    b = ApprovalBook(env_dir)
+    _sub(b, "g:a:6", "submitted")
+    b._db.close()
+    s.paths.data_dir = str(env_dir)                                   # env/project-derived: ignored too
+    migrate._done.clear()
+    state_path(s)
+    nb = ApprovalBook(new)
+    assert nb.state("g:a:5") is None and nb.state("g:a:6") is None
+
+
+def test_migration_keeps_applications_deduped(tmp_path):
+    import asyncio
+
+    from job_apply_mcp.config import state_path
+    from job_apply_mcp.store.sqlite import SqliteStore
+    s, old, new = _old_world(tmp_path)
+    old_store = SqliteStore(old)
+    asyncio.run(old_store.record(type("R", (), {"ref": "greenhouse:acme:9", "company": "Acme", "title": "Engineer",
+                                                "status": "submitted", "via": "t", "confirmation": None,
+                                                "detail": ""})(), company="Acme", title="Engineer"))
+    old_store.close()
+    assert state_path(s) == new
+    assert asyncio.run(SqliteStore(new).seen("Acme", "Engineer", ref="greenhouse:acme:9"))
+
+
+def test_migration_failure_blocks_submit_and_doctor_says_why(tmp_path):
+    import pytest
+
+    from job_apply_mcp.config import state_path
+    from job_apply_mcp.migrate import StateMigrationError
+    s, old, _new = _old_world(tmp_path)
+    (old / "approvals.db").write_bytes(b"this is not a sqlite database" * 50)
+    with pytest.raises(StateMigrationError):
+        state_path(s)
+    with pytest.raises(StateMigrationError):                          # stays failed: never silently starts empty
+        state_path(s)
+    chk = doctor._state_check(s)
+    assert chk.status == doctor.FAIL and "REFUSED" in chk.detail
+
+
+class _Tty:
+    def __init__(self, tty):
+        self._t = tty
+        self.buf = []
+
+    def isatty(self):
+        return self._t
+
+    def write(self, x):
+        self.buf.append(x)
+
+    def flush(self):
+        pass
+
+    def readline(self):
+        return ""
+
+
+async def test_ignored_dir_with_submitted_record_blocks_live_submit_until_tty_migrate(tmp_path):
+    from apply_fakes import POSTING
+    from test_approvals import EXTRA, make
+
+    from job_apply_mcp import migrate
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    migrate._done.clear()
+    e, ad = make(book=ApprovalBook(tmp_path / "state"))
+    envdir = tmp_path / "envdata"
+    e.s.paths.data_dir, e.s.paths.state_dir = str(envdir), str(tmp_path / "state")
+    ob = ApprovalBook(envdir)
+    ob.set_state(POSTING.ref, "submitted", url="https://x.example/1")
+    ob._db.close()
+    out = await e.plan(POSTING.ref)
+    dry = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=True)       # dry runs still work
+    assert "old state found" not in (dry.detail or "")
+    r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert r.status == "error" and "migrate --from" in r.detail and str(envdir.resolve()) in r.detail
+    assert not [x for x in ad.submits if not x[2]]                                # nothing live was sent
+    assert doctor._state_check(e.s).status == doctor.FAIL
+    assert migrate.cli(["--from", str(envdir)], e.s, stdin=_Tty(False), stdout=_Tty(False)) == 3   # non-TTY refused
+    assert migrate.pending_old_state(e.s)
+    assert migrate.cli(["--from", str(envdir)], e.s, stdin=_Tty(True), stdout=_Tty(True)) == 0
+    assert migrate.pending_old_state(e.s) == [] and doctor._state_check(e.s).status == doctor.OK
+    r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert "old state found" not in (r.detail or "")
+    assert not [x for x in ad.submits if not x[2]]                               # blocked by the imported record
+
+
+def test_tty_migrate_imports_only_blocking_state_and_quota(tmp_path):
+    from job_apply_mcp import migrate
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    migrate._done.clear()
+    s = Settings()
+    s.paths.state_dir = str(tmp_path / "state")
+    src = tmp_path / "envdata"
+    b = ApprovalBook(src)
+    _sub(b, "g:a:1", "submitted")
+    _sub(b, "g:a:2", "approved")
+    b.issue("g:a:3", "u", "c", "t", {})
+    b._db.close()
+    assert migrate.cli(["--from", str(src)], s, stdin=_Tty(True), stdout=_Tty(True)) == 0
+    nb = ApprovalBook(tmp_path / "state")
+    assert nb.state("g:a:1")["state"] == "submitted" and nb.state("g:a:2") is None and nb.pending() == []

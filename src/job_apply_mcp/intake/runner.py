@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..config import state_path
 from ..core.concurrency import bounded_gather
 from ..core.models import Decision
 from .feedback import FeedbackError, apply_overlays, describe, needs_confirmation, normalize
@@ -132,7 +133,7 @@ class IntakeRunner:
     def from_services(cls, svc: Any) -> IntakeRunner:
         st = getattr(svc, "_intake_store", None)
         if st is None:
-            st = svc._intake_store = IntakeStore(svc.settings.paths.data_dir)
+            st = svc._intake_store = IntakeStore(state_path(svc.settings))
         me = ""
         with contextlib.suppress(Exception):   # no readable profile: intake.mail.self_address or the IMAP user
             from ..profile import load_profile
