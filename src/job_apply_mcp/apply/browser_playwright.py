@@ -522,7 +522,12 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   const LEVER = a.ats === 'lever';
   const LQ = '.application-question';
   const REQ_CLS = /(^|[\\s_-])required([\\s_-]|$)/i;
-  const REQ_WORD = /^\\s*[(\\[{]?\\s*required\\b|\\brequired\\s*[)\\]}:.!]?\\s*$/i;
+  // required wording (control review 2 on #91): a signal ANYWHERE in the container text outside option labels; a
+  // bracketed marker always counts; the ONLY exception is a legal-retention phrase ("is required by applicable law"),
+  // removed before the test so any other marker in the same text still counts
+  const REQ_WORDS = /\\brequired\\b|\\bmandatory\\b|\\bobligatory\\b|\\bmust\\s+(?:answer|complete|select|choose|fill|provide)\\b|pflicht|obligatori[oa]|obligatoire|obbligatorio|verplicht|obrigat[oó]rio|必須|必填/i;
+  const REQ_BRACKET = /[(\\[]\\s*(?:required|mandatory)\\s*[)\\]]/i;
+  const REQ_LEGAL = /\\b(?:is|are|be|been|being)\\s+required\\s+(?:by|under|pursuant\\s+to)\\s+(?:the\\s+)?(?:applicable\\s+)?(?:laws?|regulations?|statute|legislation)\\b/gi;
   const clsOf = n => String((n.className && n.className.baseVal !== undefined) ? n.className.baseVal : (n.className || ''));
   const attrReq = n => n.hasAttribute('required') || n.getAttribute('aria-required') === 'true'
     || (n.hasAttribute('data-required') && String(n.getAttribute('data-required')).toLowerCase() !== 'false');
@@ -534,10 +539,13 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     const optLab = n => { const l = n && n.closest && n.closest('label');
       return !!l && l !== title && q.contains(l) && (opts.some(m => l.contains(m)) || ids.has(l.htmlFor)); };
     const tw = document.createTreeWalker(q, NodeFilter.SHOW_TEXT);
+    let txt = '';
     for (let n = tw.nextNode(); n; n = tw.nextNode()) {
       const el = n.parentElement; const t = (n.textContent || '').trim();
       if (!t || !el || el.closest('script, style, noscript, option') || optLab(el)) continue;
-      if (/[*✱]/.test(t) || REQ_WORD.test(t)) return true; }
+      if (/[*✱]/.test(t)) return true;
+      txt += ' ' + t; }
+    if (REQ_BRACKET.test(txt) || REQ_WORDS.test(txt.replace(REQ_LEGAL, ' '))) return true;
     for (const n of els.slice(0, 400)) { if (optLab(n) && n !== title) continue;
       for (const pe of ['::before', '::after']) { const c = getComputedStyle(n, pe).content;
         if (c && c !== 'none' && /[*✱]/.test(c)) return true; } }

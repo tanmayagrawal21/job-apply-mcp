@@ -445,3 +445,24 @@ async def test_prose_mentioning_required_is_not_a_marker(drv):
                               '<p>Recordings are kept unless retention is required by applicable law.</p>')
     pg = await _page(drv, html, ats="ashby")
     assert await drv._empty_required(pg) == []
+
+
+# control review 2 on #91: required WORDING anywhere in the question (outside option labels) is a signal.
+REQUIRED_WORDING = ["Are you 18 or older (required) to apply here?", "Answer is required to continue", "Mandatory field",
+                    "Pick one (mandatory)", "You must answer this question", "Pflichtfeld", "Obligatorio"]
+
+
+@pytest.mark.parametrize("label", REQUIRED_WORDING)
+async def test_required_wording_blocks_on_ashby_and_lever(drv, label):
+    pg = await _page(drv, _ashby_g(title=label), ats="ashby")
+    assert len(await drv._empty_required(pg)) == 1, label
+    pg = await _page(drv, _lever_q(f'<div class="application-label">{label}</div>'), ats="lever")
+    assert len(await drv._empty_required(pg)) == 1, label
+
+
+async def test_legal_sentence_with_another_marker_still_blocks(drv):
+    html = _ashby_g().replace('<label class="_heading_x1  ashby-application-form-question-title">Pick one</label>',
+                              '<label class="_heading_x1  ashby-application-form-question-title">Pick one</label>'
+                              '<p>Retention is required by applicable law. An answer is required.</p>')
+    pg = await _page(drv, html, ats="ashby")
+    assert len(await drv._empty_required(pg)) == 1
