@@ -37,10 +37,14 @@ A QA round on PR #81 found three driver and adapter faults:
   - `required`, `aria-required` or `data-required` on the container or on any descendant;
   - any class matching `/(^|[\s_-])required([\s_-]|$)/`, which includes Ashby's hashed `_required_<hash>` and
     Lever's `.required` / `.required-field`;
-  - an asterisk, or "required" used as a marker, in the container text outside option labels. A marker is a whole
-    text node, or "required" at the start or end of one: "(Required)", a "Required" badge, "This field is
-    required". The same word inside a sentence, such as "retention is required by applicable law" in Ashby's
-    recording-consent notice, is prose and does not count;
+  - an asterisk anywhere in the container text outside option labels;
+  - required wording anywhere in that text: `required`, `mandatory`, `obligatory`,
+    `must answer/complete/select/choose/fill/provide`, or a localised marker (pflicht, obligatorio/a,
+    obligatoire, obbligatorio, verplicht, obrigatório, 必須, 必填). A bracketed `(required)`, `[required]` or
+    `(mandatory)` always counts. There is one exception: "is/are/be required by/under/pursuant to (the)
+    (applicable) law/regulation/statute/legislation", as in Ashby's recording-consent notice. That phrase is
+    removed before the test, so any other marker in the same text still counts. (This is control review 2 on
+    #91, which replaced an earlier start-or-end-only rule.);
   - a `::before` or `::after` asterisk;
   - API `required: true`.
 
