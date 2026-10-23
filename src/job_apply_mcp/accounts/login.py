@@ -89,7 +89,10 @@ def register_email_verifier(fn: EmailVerifier | None) -> None:
     _email_verifier = fn
 
 
-_TERMS_TEXT = re.compile(r"terms|privacy|policy|consent|agree|data (protection|processing)|gdpr", re.IGNORECASE)
+_TERMS_TEXT = re.compile(r"terms|privacy|policy|data (protection|processing)|gdpr", re.IGNORECASE)
+# Consents the owner did NOT delegate, even when the box also mentions terms or privacy (ADR-0046).
+_NOT_TERMS = re.compile(r"sms|text messag|whatsapp|\bcall|arbitrat|background|drug|certif|attest|"
+                        r"true and (complete|accurate)|marketing", re.IGNORECASE)
 _OPTIONAL_TEXT = re.compile(r"newsletter|marketing|job alert|notify me|send me|promotional|talent (community|pool)|"
                             r"similar (jobs|roles)|future opportunit", re.IGNORECASE)
 
@@ -233,7 +236,7 @@ class AccountManager:
                 continue                                   # optional boxes (alerts, marketing) stay unticked
             if (hit := _stop_hit(t.text, self.s.policy.stop_phrases)):
                 return LoginOutcome(host, "needs_human", f"sign-up attestation: '{hit}'", user)
-            if not _TERMS_TEXT.search(t.text) or _OPTIONAL_TEXT.search(t.text):
+            if not _TERMS_TEXT.search(t.text) or _NOT_TERMS.search(t.text) or _OPTIONAL_TEXT.search(t.text):
                 return LoginOutcome(host, "needs_human", f"required sign-up checkbox is not a terms box: "
                                                          f"{t.text[:80]!r}", user)
             to_accept.append(t)

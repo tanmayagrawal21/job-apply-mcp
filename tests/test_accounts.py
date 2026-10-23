@@ -747,3 +747,85 @@ def test_terms_review_flag_surfaces_in_run_report_and_vault_status(cfg, vault, c
     run(m.handle_wall(FakeOps(kind="signup", terms=[REQ]), HOST, email=USER, dry_run=False))
     st = vault_status(cfg, vault)
     assert "account_created_terms_to_review" in st["run_flags"][HOST]
+
+
+# ------------------------------------------------------------------ reviewer round 3: stale terms index, narrow terms
+
+
+class TermsPage:
+    """Fake page with checkboxes; `insert` puts a new box at index 0 after terms() was read."""
+
+    url = f"https://{HOST}/signup"
+
+    def __init__(self, labels):
+        self.labels = list(labels)
+        self.checked: list[str] = []
+
+    async def evaluate(self, js):
+        return [{"i": i, "text": t, "href": None, "required": True} for i, t in enumerate(self.labels)]
+
+    def locator(self, sel):
+        page = self
+
+        class Boxes:
+            def nth(self, i):
+                class Box:
+                    async def evaluate(self, js):
+                        return page.labels[i]
+
+                    async def get_attribute(self, name):
+                        return None
+
+                    async def check(self, **kw):
+                        page.checked.append(page.labels[i])
+                return Box()
+        return Boxes()
+
+
+def test_accept_terms_refuses_when_index_went_stale():
+    from job_apply_mcp.accounts.browser_ops import PlaywrightLoginOps
+    page = TermsPage([REQ.text])
+    ops = PlaywrightLoginOps(page, lambda: asyncio.sleep(0, result=False), expected_host=page.url, settle_ms=0)
+    (t,) = run(ops.terms())
+    page.labels.insert(0, "I agree to receive SMS job alerts")      # re-render between terms() and accept
+    assert run(ops.accept_terms(t)) is False and ops.last_error == "TermsMoved" and page.checked == []
+
+
+def test_accept_terms_ticks_when_label_unchanged():
+    from job_apply_mcp.accounts.browser_ops import PlaywrightLoginOps
+    page = TermsPage([REQ.text])
+    ops = PlaywrightLoginOps(page, lambda: asyncio.sleep(0, result=False), expected_host=page.url, settle_ms=0)
+    (t,) = run(ops.terms())
+    assert run(ops.accept_terms(t)) is True and page.checked == [REQ.text]
+
+
+def test_terms_moved_removes_keychain_entry_and_submits_nothing(cfg, vault, kr, consent_on, tmp_path):
+    cfg.accounts.auto_create = True
+
+    class Moved(FakeOps):
+        async def accept_terms(self, t):
+            return False
+
+    ops = Moved(kind="signup", terms=[REQ])
+    out = run(mgr(cfg, vault, tmp_path).handle_wall(ops, HOST, email=USER, dry_run=False))
+    assert out.status == "needs_human" and "submit_signup" not in ops.calls and kr.items == {}
+
+
+@pytest.mark.parametrize("label", [
+    "I agree to receive text messages (SMS) about my application per the Privacy Policy",
+    "I consent to a background check as described in the Privacy Policy",
+    "I agree to the Terms of Use, including the arbitration agreement",
+    "I agree to be contacted by call or WhatsApp under the Terms",
+    "I certify that my answers are true and complete (Terms apply)",
+])
+def test_non_terms_consents_hand_off(cfg, vault, kr, consent_on, tmp_path, label):
+    cfg.accounts.auto_create = True
+    ops = FakeOps(kind="signup", terms=[Terms("0", label, True)])
+    out = run(mgr(cfg, vault, tmp_path).handle_wall(ops, HOST, email=USER, dry_run=False))
+    assert out.status == "needs_human" and ops.accepted == [] and kr.items == {} and ops.filled == {}
+
+
+def test_bare_agree_or_consent_is_not_a_terms_box(cfg, vault, kr, consent_on, tmp_path):
+    cfg.accounts.auto_create = True
+    ops = FakeOps(kind="signup", terms=[Terms("0", "I agree", True)])
+    assert run(mgr(cfg, vault, tmp_path).handle_wall(ops, HOST, email=USER, dry_run=False)).status == "needs_human"

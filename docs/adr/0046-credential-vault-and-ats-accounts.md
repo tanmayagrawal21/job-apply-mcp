@@ -39,7 +39,7 @@ unattended needs a credential store whose secrets the calling LLM can never see,
    (default false; guarded `_bool_on`, so only the trusted user config can turn it on), and not `dry_run`. Once per
    host per run. Required checkboxes are ticked only if they read as terms/privacy and match neither
    `policy.stop_phrases` nor optional-type text (alerts, marketing, talent community); any other required box is
-   `needs_human`. Optional boxes stay unticked. The password comes from `secrets` (20-64 chars, default 24; upper,
+   `needs_human`. Optional boxes stay unticked. "Terms" means `terms|privacy|policy|data protection/processing|gdpr`; a box that also mentions SMS/text/WhatsApp/calls, arbitration, background or drug checks, certification/attestation, "true and complete/accurate" or marketing is `needs_human`. Before ticking, the label is re-read and must equal the vetted text, else `TermsMoved`: the keychain entry is removed and nothing is submitted. The password comes from `secrets` (20-64 chars, default 24; upper,
    lower, digit and symbol; no look-alikes, quotes, backslash, whitespace, triples or a leading symbol). It is stored
    in the keychain **before** any field is filled; the DB (`accounts.db`, table `ats_accounts`) records host,
    username, created_at, status and the terms URL, never the password. A failure before submit or an "account

@@ -46,6 +46,10 @@ VERIFY_EMAIL = re.compile(r"verify your (email|e-mail|account)|check your (email
                           r"(email|link) (has been )?sent to|activate your account", re.IGNORECASE)
 EXISTS = re.compile(r"already (exists|registered|in use|have an account)|account with (this|that) e-?mail", re.IGNORECASE)
 
+# Label text of a checkbox; the SAME expression in terms() and accept_terms() so a re-read compares like with like.
+_LABEL_JS = r"""e => { const id = e.id ? document.querySelector('label[for="' + CSS.escape(e.id) + '"]') : null;
+  const lab = id || e.closest('label') || e.parentElement;
+  return ((lab && lab.innerText) || e.getAttribute('aria-label') || '').trim().slice(0, 300); }"""
 _TERMS_JS = r"""() => {
   const shown = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
     return (r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none') ||
@@ -197,6 +201,9 @@ class PlaywrightLoginOps:
     async def accept_terms(self, t: Terms) -> bool:
         el = self.page.locator("input[type=checkbox], [role=checkbox]").nth(int(t.ref))
         try:
+            if (await el.evaluate(_LABEL_JS)) != t.text:   # the index went stale (box inserted/removed): never
+                self.last_error = "TermsMoved"               # tick a box that was not vetted
+                return False
             if await el.get_attribute("role") == "checkbox":
                 if (await el.get_attribute("aria-checked")) != "true":
                     await el.click()
