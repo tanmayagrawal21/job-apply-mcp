@@ -620,3 +620,18 @@ async def test_api_optional_key_matches_exactly(drv):
         GH_FIRST, FormField(key="comments", label="Comments", kind=FieldKind.text, required=False)])
     res = await drv.fill_and_submit(f"{base}/acme/jobs/27", form, {"first_name": "Alex"}, {}, dry_run=True)
     assert res.status == "incomplete", res.detail
+
+
+@pytest.mark.parametrize("label", [
+    "Have you worked with Twilio and do you agree to receive SMS messages about this role",
+    "Do you use Twilio? I agree to receive SMS messages",
+    "Twilio experience; I agree to receive text message updates",
+])
+@pytest.mark.parametrize("wrapped", [True, False])
+async def test_compound_question_with_consent_clause_is_never_exempt(drv, label, wrapped):
+    """Control review 5: no free-text lead-in before the consent verb; a second clause disqualifies the exemption."""
+    block = (f"<fieldset><legend>{label}</legend>{RADIOS}</fieldset>" if wrapped else f"<div><p>{label}</p>{RADIOS}</div>")
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/28", ApplicationForm(ref="greenhouse:acme:28", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", (label, res.detail)

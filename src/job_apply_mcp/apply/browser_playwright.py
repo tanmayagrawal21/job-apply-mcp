@@ -461,13 +461,19 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   // Explicit allowlist of groups that are not application questions (left empty on purpose; logged by the caller).
   // Exempt ONLY a field whose OWN label/legend states a consent intent (never a bare word, never container text),
   // and ONLY when no required markup and no API required:true applies (control review 4).
-  // ANCHORED: the whole question must be an opt-in statement (a short lead-in such as "Check Yes or No to indicate
-  // your" is allowed), never a question that merely mentions marketing / SMS / newsletters / promotions.
+  // ANCHORED, FAIL CLOSED: the whole label must be an opt-in statement. The only lead-ins allowed are a FIXED set
+  // ("check yes or no to indicate your", "yes,", "i", "we", "you" ...); no free-text prefix, so a compound question
+  // ("Have you worked with X and do you agree to receive SMS ...") never qualifies. A second clause (and / or / ;
+  // / a question mark followed by more text) before the consent verb is rejected as well.
+  const LEAD = '^(?:(?:please )?(?:check|select|tick) (?:yes|no|yes or no|the box)(?: to indicate)?(?: (?:your|if you|that you))?|yes,?|i|we|you)?\\\\s*';
   const CONSENT_RE = [
-    /^[^.?!]{0,60}?\\b(agree(ment)?|consent(ing)?|opt(ing)?[ -]?in|subscrib(e|ing)|sign(ing)? (me )?up|(would|'d) like) to (receive|get|be sent|be contacted)\\b[^?]*\\b(text|sms|messages?|marketing|newsletters?|job alerts?|updates|e-?mails?|communications?)\\b/,
+    new RegExp(LEAD + "(agree(ment)?|consent(ing)?|opt(ing)?[ -]?in|subscrib(e|ing)|sign(ing)? (me )?up|(would|'d) like) to (receive|get|be sent|be contacted)\\\\b[^?]*\\\\b(text|sms|messages?|marketing|newsletters?|job alerts?|updates|e-?mails?|communications?)\\\\b"),
     /^(please )?(create (a )?job alert|(send me|get|receive) job alerts?|subscribe to (our |the )?(newsletter|mailing list)|join (our )?talent (community|network))\\b/,
-    /^[^.?!]{0,40}\\b(may|can) contact me (by|via) (text|sms)\\b/];
-  const CONSENT = { test: t => CONSENT_RE.some(r => r.test((t || '').toLowerCase().replace(/\\s+/g, ' ').trim())) };
+    new RegExp(LEAD + '(may|can) contact me (by|via) (text|sms)\\\\b')];
+  const CONSENT = { test: raw => { const t = (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    if (!CONSENT_RE.some(r => r.test(t))) return false;
+    const lead = (t.match(new RegExp(LEAD)) || [''])[0].replace('yes or no', '');
+    return !/(\\band\\b|\\bor\\b|;|\\?.)/.test(lead); } };
   const REQ_ATTR = n => n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
     || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false') || /(^|[\\s_-])required([\\s_-]|$)/i.test(String(n.className || ''));
   const markedRequired = (members, container, headEl, text) => {
