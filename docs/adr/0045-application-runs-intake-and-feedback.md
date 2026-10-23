@@ -1,5 +1,7 @@
 # ADR-0045: Application runs: link intake, run reports and feedback
 
+Amended by ADR-0049 (run cap in dry mode, run statuses, plan paging).
+
 ## Context
 Discovery (`search_jobs`) is not the only way a user finds jobs. Users also mail job links to themselves, or have
 a list of URLs ready. `apply_batch` takes refs, but it has no notion of where a link came from or of a per-run

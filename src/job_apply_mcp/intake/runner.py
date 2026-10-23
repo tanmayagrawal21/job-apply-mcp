@@ -5,9 +5,12 @@ Order of a run:
   2. collect candidates in priority order: explicit links > emailed links > discovery
   3. adapter detection (an unknown host becomes an `unsupported_site` row; it never costs a plan slot)
   4. plan every candidate concurrently with prose deferred (writing.mode="deferred" for this task only)
-  5. submit the first `max_applications` ready ones: concurrently across hosts, at most 1 per host, under
-     intake.submit_parallel; the engine's gates, dedupe, approvals, control layer and dry_run all still apply
-  6. write the run report (items + summary) and mark fully handled mail messages as processed
+  5. take the first `max_applications` eligible postings (ready to submit, or needing the owner), the same way in
+     dry and live mode (ADR-0049); skipped and ineligible ones never count. Submit the ready ones concurrently
+     across hosts, at most 1 per host, under intake.submit_parallel; the engine's gates, dedupe, approvals, control
+     layer and dry_run all still apply
+  6. write the run report (items + summary; one status per posting, see store.CATEGORIES) and mark fully handled
+     mail messages as processed. A dry run also previews what the live quota would do (`live_preview`).
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ from ..core.concurrency import bounded_gather
 from ..core.models import Decision
 from .feedback import FeedbackError, apply_overlays, describe, needs_confirmation, normalize
 from .links import JobUrlFilter, clean_url, make_link_source, resolve_filter
-from .store import CATEGORIES, IntakeStore
+from .store import CATEGORIES, LEGACY_STATUS, IntakeStore
 
 SOURCES = ("links", "mail", "discovery")
 _RUN_LOCKS: dict[str, asyncio.Lock] = {}   # one run at a time per data dir (process-wide)
@@ -37,9 +40,22 @@ def site_key(host: str) -> str:
     parts = host.lower().rstrip(".").split(".")
     n = 3 if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SLD else 2
     return ".".join(parts[-n:])
-_SUBMIT_MAP = {"submitted": "submitted", "dry_run": "dry_run", "duplicate": "skipped", "needs_human": "handed_off",
-               "handoff": "handed_off", "incomplete": "handed_off", "awaiting_code": "handed_off",
-               "roadblock": "unknown", "error": "failed"}
+_SUBMIT_MAP = {"submitted": "submitted", "dry_run": "dry_run_ok", "duplicate": "skipped", "needs_human": "needs_human",
+               "handoff": "needs_human", "incomplete": "needs_human", "awaiting_code": "needs_human",
+               "needs_review": "needs_human", "roadblock": "unknown", "error": "failed"}
+
+
+def check_max_applications(v: Any) -> str | None:
+    """None (use the default) or a whole number >= 1; anything else is an error, never silently replaced."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        return f"max_applications must be a whole number >= 1 (got {v!r}); omit it to use the default"
+    return None
+
+
+def _quota_hit(detail: str) -> bool:
+    return "quota reached" in (detail or "")
 
 
 @dataclass
@@ -205,6 +221,9 @@ class IntakeRunner:
                   messages: list[dict[str, Any]] | None = None,
                   discovery: dict[str, Any] | None = None) -> dict[str, Any]:
         lock = _RUN_LOCKS.setdefault(str(self.s.paths.data_dir), asyncio.Lock())
+        bad_n = check_max_applications(max_applications)
+        if bad_n:
+            return {"error": bad_n}
         if lock.locked():   # max_applications is per run: two concurrent runs must not each submit n
             return {"error": "another run_applications is in progress; wait for it, then retry"}
         async with lock:
@@ -238,15 +257,21 @@ class IntakeRunner:
         applied: list[str] = []
         fb_notes: list[str] = []
         pending_pa: list[dict[str, Any]] = []
+        n = 0
+        preview: dict[str, Any] | None = None
         try:
             run_size, applied, fb_notes, problems = await self._apply_feedback(run_id)
             delivered, pending_pa = await self._deliver_profile_answers(problems)
             applied += delivered
             notes += problems
-            n = max(1, min(cfg.max_applications_cap, max_applications or run_size or cfg.max_applications))
+            want = max_applications if max_applications is not None else (run_size or cfg.max_applications)
+            n = max(1, min(cfg.max_applications_cap, want))
+            if want > n:
+                notes.append(f"max_applications={want} is above intake.max_applications_cap={n}; using {n}")
             pool_size = math.ceil(n * cfg.plan_factor)
             cands = await self._collect(explicit, srcs, mail, messages, discovery, pool_size, notes)
             await self._plan_and_submit(cands, n, dry)
+            preview = self._live_preview(cands) if dry else None
         finally:
             done = self._processed_messages(cands)
             if done:
@@ -261,7 +286,11 @@ class IntakeRunner:
                    "awaiting_confirmation": getattr(self, "_awaiting", [])}
             rep = self._build(run_id, rows, cfg.report_rows)
             await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live"})
-        return {**rep, "mode": "dry_run" if dry else "live", "plan_context": {k: v for k, v in ctx.items() if v}}
+        out = {**rep, "mode": "dry_run" if dry else "live", "max_applications": n or None,
+               "plan_context": {k: v for k, v in ctx.items() if v}}
+        if preview:
+            out["live_preview"] = preview
+        return {k: v for k, v in out.items() if v is not None}
 
     async def _collect(self, explicit: list[str], srcs: list[str], mail: dict[str, Any] | None,
                        messages: list[dict[str, Any]] | None, discovery: dict[str, Any] | None, pool_size: int,
@@ -324,7 +353,7 @@ class IntakeRunner:
             outs = await bounded_gather((self.engine.plan(c.target) for c in pool), max(1, len(pool)))
         finally:
             WRITE_MODE.reset(tok)
-        ready: list[Cand] = []
+        eligible: list[Cand] = []   # in priority order; status "" = ready to submit
         postings: set[str] = set()
         for c, out in zip(pool, outs, strict=True):
             if isinstance(out, BaseException):
@@ -336,8 +365,10 @@ class IntakeRunner:
             g = out.plan.gate
             c.approval_id = out.approval_id
             if g.decision != Decision.submit:
-                c.status = "skipped" if g.decision == Decision.skip else "handed_off"
+                c.status = "skipped" if g.decision == Decision.skip else "needs_human"
                 c.why = "; ".join(g.reasons) or g.decision.value
+                if c.status == "needs_human":
+                    eligible.append(c)
                 continue
             if out.plan.unresolved:
                 human = [t["key"] for t in out.client_tasks if t.get("needs_human")]
@@ -347,17 +378,20 @@ class IntakeRunner:
                     c.status = "skipped"
                     c.why = f"required prose not approved yet: {prose[:4]} (draft_answers, then submit)"
                 else:
-                    c.status, c.why = "handed_off", f"unresolved required fields: {out.plan.unresolved[:6]}"
+                    c.status, c.why = "needs_human", f"unresolved required fields: {out.plan.unresolved[:6]}"
+                    eligible.append(c)
                 continue
             pid = cached.posting.ref if cached is not None else _key(c.target)
             if pid in postings:
                 c.status, c.why = "skipped", "duplicate: same posting earlier in this run"
                 continue
             postings.add(pid)
-            ready.append(c)
-        for c in ready[n:]:
+            eligible.append(c)
+        # The cap counts every eligible posting (ready, or needing the owner) in priority order, in dry and live mode
+        # alike (ADR-0049). Skipped, failed and unsupported postings never take a slot.
+        for c in eligible[n:]:
             c.status, c.why, c.deferred = "skipped", f"max_applications={n} reached", True
-        await self._submit_all(ready[:n], dry)
+        await self._submit_all([c for c in eligible[:n] if not c.status], dry)
 
     async def _submit_all(self, todo: list[Cand], dry: bool) -> None:
         by_host: OrderedDict[str, list[Cand]] = OrderedDict()
@@ -368,7 +402,7 @@ class IntakeRunner:
 
         async def one(c: Cand) -> None:
             if manual:   # same rule as apply_batch: a live submit needs its approval first (ADR-0021)
-                c.status = "handed_off"
+                c.status = "needs_human"
                 c.why = f"awaiting_approval: run `job-apply-mcp approve {c.approval_id}`, then submit"
                 return
             try:
@@ -377,6 +411,8 @@ class IntakeRunner:
                 c.status, c.why = "failed", f"{type(e).__name__}: {e}"
                 return
             c.status = _SUBMIT_MAP.get(r.status, "unknown")
+            if c.status == "needs_human" and _quota_hit(r.detail or ""):
+                c.status = "quota_blocked"   # the engine's control layer refused it; nothing was sent
             c.why = f"{r.status}: {r.detail}" if r.detail and c.status != "submitted" else (r.detail or "")
             st = None
             with contextlib.suppress(Exception):
@@ -391,6 +427,66 @@ class IntakeRunner:
 
         await asyncio.gather(*(host_worker(v) for v in by_host.values()))
 
+    def _live_preview(self, cands: list[Cand]) -> dict[str, Any] | None:
+        """Dry run only: what a live run of the dry_run_ok rows would do under the current quotas and approval mode.
+        Read-only: it reads the control layer's usage (trusted config) and never changes a limit (ADR-0049)."""
+        ok = [c for c in cands if c.status == "dry_run_ok"]
+        if not ok:
+            return None
+        out: dict[str, Any] = {}
+        notes: list[str] = []
+        if self.s.dry_run:
+            notes.append("global dry_run is on: a live run is refused until dry_run=false in the user config")
+        if not self.s.apply.auto_approve_active:
+            notes.append("approval_mode needs a human: a live run hands each one off for approval "
+                         "(needs_human, awaiting_approval)")
+        st: dict[str, Any] = {}
+        status = getattr(getattr(self.engine, "control", None), "daily_limit_status", None)
+        if callable(status):
+            try:
+                st = status() or {}
+            except Exception as e:  # noqa: BLE001 - a preview must never fail the run
+                notes.append(f"quota usage unreadable ({type(e).__name__}); the live run still enforces it")
+        if st.get("error"):
+            notes.append(f"quota config error: {st['error'][:160]} (a live run blocks every submit)")
+        lim, used = st.get("limit") or {}, st.get("used") or {}
+        if lim:
+            day_left = None if lim.get("day") is None else max(0, lim["day"] - used.get("day", 0))
+            run_left = None if lim.get("run") is None else max(0, lim["run"] - used.get("run", 0))
+            plat_used = dict(used.get("platform") or {})
+            would, blocked = 0, []
+            for c in ok:
+                cached = self._cached(c.target)
+                plat = (cached.posting.platform if cached is not None else "") or c.target.split(":")[0]
+                pu = plat_used.get(plat, 0)
+                by = ("day" if day_left is not None and day_left <= 0 else
+                      "run" if run_left is not None and run_left <= 0 else
+                      f"platform:{plat}" if lim.get("platform") is not None and pu >= lim["platform"] else "")
+                if by:
+                    blocked.append({"ref": c.target, "by": by})
+                    continue
+                would += 1
+                plat_used[plat] = pu + 1
+                day_left = None if day_left is None else day_left - 1
+                run_left = None if run_left is None else run_left - 1
+            out["would_submit"] = would
+            if blocked:
+                out["quota_blocked"] = len(blocked)
+                out["blocked"] = blocked[: self.s.intake.report_rows]
+                caps = sorted({b["by"] for b in blocked})
+                used_s = []
+                for b in caps:
+                    if b.startswith("platform:"):
+                        p = b.split(":", 1)[1]
+                        used_s.append(f"{p} {used.get('platform', {}).get(p, 0)}/{lim['platform']}")
+                    else:
+                        used_s.append(f"{b} {used.get(b, 0)}/{lim[b]}")
+                notes.append(f"live quota would block {len(blocked)} of {len(ok)} ({', '.join(used_s)}); a live "
+                             f"run would submit {would} and report the rest as quota_blocked")
+        if notes:
+            out["warning"] = notes
+        return out or None
+
     @staticmethod
     def _processed_messages(cands: list[Cand]) -> dict[str, int]:
         per: dict[str, list[Cand]] = {}
@@ -403,13 +499,14 @@ class IntakeRunner:
     # ------------------------------------------------------------------------------------------ report
     @staticmethod
     def _build(run_id: str, rows: list[dict[str, Any]], limit: int, category: str = "") -> dict[str, Any]:
+        rows = [{**r, "status": LEGACY_STATUS.get(r["status"], r["status"])} for r in rows]
         rows = [r for r in rows if r["status"] in CATEGORIES]
         cats: dict[str, list[dict[str, Any]]] = {k: [] for k in CATEGORIES}
         for r in rows:
             cats[r["status"]].append({k: v for k, v in (("ref", r["ref"]), ("src", r["source"]), ("co", r.get("co")),
                                                         ("title", r.get("title")), ("why", r.get("why")),
                                                         ("approval_id", r.get("approval_id")
-                                                         if r["status"] == "handed_off" else None)) if v})
+                                                         if r["status"] == "needs_human" else None)) if v})
         out: dict[str, Any] = {"run_id": run_id, "counts": {k: len(v) for k, v in cats.items() if v}}
         for k, v in cats.items():
             if not v or (category and k != category):
@@ -424,11 +521,15 @@ class IntakeRunner:
         if run is None:
             return {"error": f"unknown run {run_id!r}" if run_id else "no runs yet"}
         items = await self.store.items(run["run_id"])
+        category = LEGACY_STATUS.get(category, category)
+        if category and category not in CATEGORIES:
+            return {"error": f"unknown category {category!r}; use one of {list(CATEGORIES)}"}
         book = None
         with contextlib.suppress(Exception):
             book = self.engine.approvals
         for it in items:   # reconciliation may have confirmed a submission since the run ended (ADR-0025)
-            if book is not None and it["status"] in ("submitted", "unknown", "handed_off"):
+            if book is not None and LEGACY_STATUS.get(it["status"], it["status"]) in ("submitted", "unknown",
+                                                                                         "needs_human"):
                 st = book.state(it["ref"])
                 if st and st.get("state") == "confirmed":
                     it["status"] = "confirmed"

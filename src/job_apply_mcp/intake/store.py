@@ -54,7 +54,16 @@ CREATE TABLE IF NOT EXISTS intake_feedback(
 );
 """
 
-CATEGORIES = ("submitted", "dry_run", "confirmed", "handed_off", "unknown", "skipped", "unsupported_site", "failed")
+# One status per posting in a run report (ADR-0049). Documented in README.md and the run_applications docstring:
+#   submitted       live submit sent (confirmation may follow)       confirmed   reconciliation confirmed it
+#   dry_run_ok      dry run complete: a live run would submit it      needs_human the owner must act; `why` says what
+#   quota_blocked   a daily / per-platform / per-run quota blocked the live submit
+#   skipped         not attempted; `why` says why (policy, duplicate, prose not approved, max_applications reached)
+#   unsupported_site  no enabled adapter handles the host           unknown     outcome unclear; verify by hand
+#   failed          an error
+CATEGORIES = ("submitted", "confirmed", "dry_run_ok", "needs_human", "quota_blocked", "skipped", "unsupported_site",
+              "unknown", "failed")
+LEGACY_STATUS = {"handed_off": "needs_human", "dry_run": "dry_run_ok"}   # rows stored before ADR-0049
 
 
 def _now() -> str:

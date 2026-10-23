@@ -24,19 +24,25 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
         """Apply from any mix of sources in one run: explicit `links` (or `links_file`, one URL per line), job links
         the user emailed to themselves (read-only mail; sender, recipient and label come from config only; `mail`
         may only narrow with {query, since, since_days}), and discovery (`discovery` = search_jobs arguments). Priority: links,
-        then mail, then discovery. `sources` subsets ["links","mail","discovery"]. `max_applications` caps submits
-        (default intake.max_applications or run_size feedback). Every URL goes through adapter detection, plan, gates,
-        dedupe and submit; unknown hosts are reported as unsupported_site. Prose is deferred: jobs needing unapproved
+        then mail, then discovery. `sources` subsets ["links","mail","discovery"]. `max_applications` (whole number
+        >= 1; default intake.max_applications or run_size feedback, capped at intake.max_applications_cap) caps the
+        eligible postings handled, the same in dry and live mode; skipped and ineligible ones do not count. Every URL
+        goes through adapter detection, plan, gates, dedupe and submit. Prose is deferred: jobs needing unapproved
         prose are skipped, not blocking. With the client mail source pass `messages` [{id, from, to, subject, date,
-        body}]. Pending feedback is applied first (see plan_context). Returns the run report."""
+        body}]. Pending feedback is applied first (see plan_context). Returns the run report: one status per posting,
+        each with `why`: submitted, confirmed, dry_run_ok (a live run would submit it), needs_human (the owner must
+        act: unresolved fields, review gate, awaiting approval), quota_blocked (a live quota refused it), skipped
+        (policy, duplicate, prose not approved, max_applications reached), unsupported_site, unknown (verify by
+        hand), failed. A dry run adds `live_preview` (would_submit, quota_blocked, warning) from the live quotas."""
         return _dump(await runner().run(links=links, links_file=links_file, sources=sources,
                                         max_applications=max_applications, dry_run=dry_run, mail=mail,
                                         messages=messages, discovery=discovery))
 
     @mcp.tool()
     async def run_report(run_id: str = "", category: str = "", limit: int = 20) -> str:
-        """Report of a run (default: the latest): counts plus rows per category (submitted, dry_run, confirmed,
-        handed_off, unknown, skipped, unsupported_site, failed), each with `why`. `category` shows one only."""
+        """Report of a run (default: the latest): counts plus rows per status (submitted, confirmed, dry_run_ok,
+        needs_human, quota_blocked, skipped, unsupported_site, unknown, failed; see run_applications), each with
+        `why`. `category` shows one only (the old names handed_off and dry_run still work)."""
         return _dump(await runner().report(run_id, category, limit))
 
     @mcp.tool()
