@@ -306,7 +306,9 @@ def _blocking_refs(d: Path) -> set[str]:
         try:
             con = _ro(f)
             try:
-                refs |= {r[0] for r in con.execute(q, tuple(args))}
+                tbl = "submissions" if fn == "approvals.db" else "applications"
+                if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone():
+                    refs |= {r[0] for r in con.execute(q, tuple(args))}
             finally:
                 con.close()
         except sqlite3.Error:
