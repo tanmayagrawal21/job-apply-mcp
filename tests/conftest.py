@@ -25,6 +25,7 @@ _REAL_DATA_DIR: Path | None = None
 _REAL_CONFIG_DIR: Path | None = None
 _VIOLATIONS: list[str] = []
 _REAL_LISTING: list[str] = []
+_TOUCHED: set[str] = set()  # top-level names under the real data dir that THIS process referenced in any audited call
 
 
 def _listing(root: Path | None) -> list[str]:
@@ -44,9 +45,27 @@ def _is_under(path, root: Path | None) -> bool:
     return root is not None and (p == root or root in p.parents)
 
 
+def _own_new_entries(baseline: list[str], current: list[str], touched: set[str]) -> list[str]:
+    """Entries that appeared since `baseline` AND that this process referenced. Entries a foreign process
+    (a live dev server, another agent's dry run) created are ignored (#64)."""
+    return sorted((set(current) - set(baseline)) & touched)
+
+
+def _note_touch(path) -> None:
+    try:
+        p = Path(os.fsdecode(path)).expanduser().absolute()
+    except (TypeError, ValueError):
+        return
+    if _REAL_DATA_DIR is not None and _REAL_DATA_DIR in p.parents:
+        _TOUCHED.add(p.relative_to(_REAL_DATA_DIR).parts[0])
+
+
 def _audit(event, args):
     """Record and BLOCK (raise before the filesystem call) any write-ish access to the real data dir by THIS process.
     Process-local on purpose: another process (e.g. a live server) may legitimately use that dir meanwhile."""
+    if args and isinstance(args[0], (str, bytes, os.PathLike)) and (
+            event == "open" or event.startswith(("os.", "shutil.", "glob."))):
+        _note_touch(args[0])
     if event == "open":
         path, mode, flags = args
         writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (
@@ -88,7 +107,8 @@ def pytest_configure(config):
 def _real_data_dir_untouched():
     """Fail the session if this process wrote to the developer's real data dir."""
     yield
-    assert _listing(_REAL_DATA_DIR) == _REAL_LISTING, f"real data dir listing changed: {_REAL_DATA_DIR}"
+    own = _own_new_entries(_REAL_LISTING, _listing(_REAL_DATA_DIR), _TOUCHED)
+    assert not own, f"this process created entries in the real data dir {_REAL_DATA_DIR}: {own}"
     assert not _VIOLATIONS, f"test suite touched the real data dir {_REAL_DATA_DIR}: {_VIOLATIONS[:5]}"
 
 
