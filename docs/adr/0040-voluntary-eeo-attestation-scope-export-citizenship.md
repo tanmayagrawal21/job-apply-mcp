@@ -97,6 +97,10 @@ A QA round (issues #47, #48, #51) found:
   pre-settled status or Stamp 4, working hours, driving licence, ...) stays with the owner. `never_llm` and the
   engine's sensitive checks remain as defence in depth. US citizenship comes from the US facts: the flat `citizen` key
   counts only when `home_country` is US, otherwise `[authorization.US].citizen`.
+- **With the gap collector (ADR-0047).** A per-country authorization gap is recorded as
+  `authorization.<ISO-2>.<fact>`; that field is not passed to the collector as the unscoped home-country key, so an
+  owner's answer to a Canadian question can never become a US fact. A free-text EEO box is left blank even when the
+  profile declines (stored or persona answers never fill it).
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an

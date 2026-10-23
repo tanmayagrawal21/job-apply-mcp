@@ -84,3 +84,21 @@ disability_status = "Decline to self-identify"
 expected = 80000
 text = "Open to discussion based on the full scope of the role."
 currency = "USD"
+
+# ADR-0047: policies the tool applies for you. Each accepts a table (below) or a plain note.
+[persona.experience_counting]
+mode = "full_time_only"          # or "include_internships" / "all"
+# count_from = "2019-01"         # ignore roles that started earlier
+
+[persona.salary_policy]
+mode = "midpoint"                # of the posted range, never below the floor
+floor = 90000
+fixed = 100000                   # entered when a posting shows no range
+
+[persona.exceptional_work]
+projects = [
+  {name = "Fleet scheduler", summary = "Dispatch optimizer for 40 warehouse robots.", keywords = ["robots", "scheduling"]},
+]
+
+[persona.answers]
+ai_tools = "An AI coding assistant for boilerplate; I review every line."

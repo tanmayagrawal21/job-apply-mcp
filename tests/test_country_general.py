@@ -188,3 +188,19 @@ def test_short_llm_allowlist():
                   "What tools do you use?", "GitHub URL", "How did you hear about us?", "Earliest start date"]:
         assert llm_safe_short(F("k", label, FieldKind.text, max_length=80)), label
     assert e._is_short(F("k", "Favorite build tool", FieldKind.text, max_length=80))
+
+
+async def test_country_gaps_are_recorded_with_their_country(tmp_path):
+    from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeStore, settings
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    from job_apply_mcp.core.models import ApplicationForm
+    from job_apply_mcp.persona.gaps import ProfileDB
+    form = ApplicationForm(ref=POSTING.ref, fields=[
+        F("q", "Do you require sponsorship to work in Canada?", FieldKind.select, options=YN, required=True)])
+    e = ApplyEngine(settings(), resolve_adapter=lambda ref: FakeAdapter(form=form), profile=FakeProfile(), router=None,
+                    gates=FakeGates(), store=FakeStore(), driver_factory=lambda n: None)
+    e.gaps = ProfileDB(tmp_path)
+    await e.plan(POSTING.ref)
+    assert e.gaps.gap("authorization.CA.requires_sponsorship") is not None
+    assert e.gaps.gap("requires_sponsorship") is None          # never the unscoped home-country key

@@ -1157,7 +1157,7 @@ def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any
         return None
     if _is_decline(v):
         if not f.options:
-            return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
+            return None             # a free-text EEO box is left blank (listed as skipped_voluntary when optional)
         got = decline_option(f.options)
     elif not f.options:
         if not demographic_label_ok(f.label, ck):
@@ -1292,7 +1292,7 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: s
 
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
-               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (),
+               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
                job_in_us: bool = False, job_country: str | None = None) -> MapResult:
     """`job_country`: the job's confirmed ISO-2 country (see job_country()); `job_in_us=True` is the old alias for "US"."""
     if job_country is None and job_in_us:
@@ -1372,6 +1372,10 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                     res.answers.append(Answer(key=f.key, value=c, source=f"rule:{ck}"))
                 continue
         value: Any | None = profile.lookup(ck) if ck else None
+        persona_src = False
+        if value is None and ck is None and persona is not None:   # ADR-0047: after every sensitive guard above
+            value = persona.claim(f.label, ck, stop_phrases)
+            persona_src = value is not None
         if value is None:
             value = profile.lookup(normalize(f.label))
         coerced = _coerce(f, value, min_score) if value is not None else None
@@ -1381,7 +1385,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         if coerced is None or coerced == "":
             res.unresolved.append(f)
         else:
-            res.answers.append(Answer(key=f.key, value=coerced, source="profile" if ck is None else f"rule:{ck}"))
+            res.answers.append(Answer(key=f.key, value=coerced, source="persona:answer" if persona_src else "profile" if ck is None else f"rule:{ck}"))
     # ADR-0040 option domain: outside the EEO path, a chosen option may never name a demographic category
     by_key = {f.key: f for f in fields}
     keep: list[Answer] = []

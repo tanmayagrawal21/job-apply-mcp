@@ -231,6 +231,8 @@ class ApplyEngine:
         self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
         self.timings: dict[str, dict[str, int]] = {}
         self._exemplar: str | None = None
+        self.persona: Any = None      # PersonaPolicy (ADR-0047); set by the factory
+        self.gaps: Any = None         # ProfileDB gap collector; set by the factory
         self._reviewed: set[str] = set()     # digests of (ref, key, text) client prose that passed review (ADR-0044)
 
     # ---------------------------------------------------------------- helpers
@@ -323,7 +325,8 @@ class ApplyEngine:
                 d[k] = d.get(k, 0) + v
 
     async def _plan_ctx(self, ref: str, ctx: _Ctx) -> PlanOut:
-        with self._llm_timings(ref):
+        from ..persona import posting_scope
+        with self._llm_timings(ref), posting_scope(ctx.posting.company, ctx.posting.title, ctx.summary):
             out = await self._plan_inner(ref, ctx)
         out.timings = dict(self.timings.get(ref, {}))
         return out
@@ -334,7 +337,7 @@ class ApplyEngine:
             return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
         audit: dict[str, Any] = {}
         sal_answers: list[Answer] = []
-        sal_decision = compute_ask(self.s.policy, ctx.posting)
+        sal_decision = self._salary(ctx.posting)
         rest: list[FormField] = []
         for f in ctx.form.fields:
             v = format_ask(f, sal_decision.ask) if sal_decision and is_salary_field(f) else None
@@ -349,7 +352,7 @@ class ApplyEngine:
                                 min_score=self.s.apply.option_min_score,
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
-                                company_aliases=self._company_aliases(ctx.posting.company),
+                                company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona,
                                 job_country=job_country(ctx.posting.location, ctx.posting.countries,
                                                         ctx.posting.locations))
         answers = sal_answers + list(mapped.answers)
@@ -394,6 +397,11 @@ class ApplyEngine:
             unresolved_keys.append(f.key)
             tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
+        # ADR-0040 x ADR-0047: a per-country authorization gap is recorded with its country
+        # ("authorization.CA.requires_sponsorship"), never as the unscoped home-country key
+        country_gaps = [g for g in (profile_gaps or []) if g.get("key") in unresolved_keys]
+        scoped = {g["key"] for g in country_gaps}
+        self._record_gaps(ref, ctx, answers, [k for k in unresolved_keys if k not in scoped], country_gaps)
         planned = {a.key: a.value for a in answers}
         self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
                                    time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary,
@@ -406,6 +414,30 @@ class ApplyEngine:
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}),
                        skipped_voluntary=voluntary or {}, profile_gaps=list(profile_gaps or []))
+
+    def _salary(self, posting: Posting):
+        """Persona salary policy when wired (ADR-0047); otherwise the deterministic rule from PolicyCfg."""
+        if self.persona is None:
+            return compute_ask(self.s.policy, posting)
+        exp = getattr(getattr(getattr(self.profile, "p", None), "salary", None), "expected", None)
+        return self.persona.salary(self.s.policy, posting, exp)
+
+    def _record_gaps(self, ref: str, ctx: _Ctx, answers: list[Answer], unresolved: list[str],
+                     country_gaps: list[dict[str, Any]] | None = None) -> None:
+        """Record unresolved fields and default-used answers as profile gaps; must never break planning."""
+        if self.gaps is None:
+            return
+        try:
+            from ..persona.collector import collect_gaps
+            collect_gaps(self.gaps, self.persona, self.profile, ref=ref, posting=ctx.posting,
+                         fields=ctx.form.fields, answers=answers, unresolved=unresolved)
+            labels = {f.key: (f.label, f.required) for f in ctx.form.fields}
+            for g in country_gaps or []:
+                label, required = labels.get(g["key"], ("", False))
+                self.gaps.record_hit(f"authorization.{g['country']}.{g['fact']}", label, ref=ref, kind="unresolved",
+                                     blocked=bool(required), company=ctx.posting.company, title=ctx.posting.title)
+        except Exception:  # noqa: BLE001, S110
+            pass
 
     def _company_aliases(self, company: str) -> list[str]:
         """dedupe.company_aliases names that are the same employer as the posting company (ADR-0038)."""
@@ -638,7 +670,9 @@ class ApplyEngine:
                 return out
         ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)
         open_ = [f for f in ctx.form.fields if f.key in cached.unresolved]
-        with self._llm_timings(ref), self._stage(ref, "llm"):
+        from ..persona import posting_scope
+        with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
+                ctx.posting.company, ctx.posting.title, ctx.summary):
             written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
         out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit)
         out.timings = dict(self.timings.get(ref, {}))
