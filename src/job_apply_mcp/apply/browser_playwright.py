@@ -280,7 +280,7 @@ _DECLINE_SYNONYMS = frozenset(normalize(x) for x in (
     "i don't wish to self identify", "i do not wish to self identify", "i don't wish to self-identify",
     "i do not wish to self-identify"))
 # Options the driver never ticks unless the planned field ITSELF is about them.
-_CONSENT_WORDS = re.compile(r"consent|\bsms\b|text messag|marketing|newsletter|promotion|opt[ -]?in\b", re.IGNORECASE)
+_CONSENT_WORDS = re.compile(r"consent|\bsms\b|text messag|whats ?app|marketing|newsletter|promotion|opt[ -]?in\b", re.IGNORECASE)
 
 
 def exact_choice(value: Any, options: list[str]) -> str | None:
@@ -431,7 +431,7 @@ _IS_GROUP_JS = """e => !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tag
 # those count (a wrapper may also hold another question or an SMS consent block); consent / SMS / marketing options are
 # dropped unless the planned field's own label is about consent. Returns index, option text, value and checked state.
 _MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
-  const CONS = /consent|\\bsms\\b|text messag|marketing|newsletter|promotion|opt[ -]?in\\b/i;
+  const CONS = /consent|\\bsms\\b|text messag|whats ?app|marketing|newsletter|promotion|opt[ -]?in\\b/i;
   let rows = els.map((e, i) => ({i, name: e.name || '', id: e.id || '', value: e.value || '', checked: !!e.checked,
     text: ((e.labels && e.labels[0] ? e.labels[0].innerText : '') || (e.closest('label') || {}).innerText
            || e.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim()}));

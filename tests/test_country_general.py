@@ -14,6 +14,7 @@ YN = ["Yes", "No"]
 
 
 def view(**auth):
+    auth = {"home_country": "US"} | auth           # ADR-0050: no implicit US default; these tests are US-home
     return ProfileView(Profile(contact=Contact(first_name="Alex", city="Springfield"),
                                authorization=Authorization.model_validate(auth)), Settings())
 
@@ -75,7 +76,7 @@ def test_job_country_any_country():
 
 # ---------------------------------------------------------------- per-country authorization facts
 def test_flat_keys_are_the_home_country():
-    p = view(work_authorized=True, requires_sponsorship=False)            # old config: home_country defaults to US
+    p = view(work_authorized=True, requires_sponsorship=False)            # home_country = "US"
     assert ans("Will you require sponsorship?", p, "US")[0] == "No"
     assert ans("Are you authorized to work in the United States?", p)[0] == "Yes"
     assert ans("Will you require sponsorship?", p, "CA") == (None, [{"country": "CA", "fact": "requires_sponsorship",
@@ -125,7 +126,7 @@ def test_place_less_and_contradictions_stay_unresolved():
 
 def test_fake_profiles_keep_working():
     class P(FakeProfile):
-        VALUES = {"work_authorized": "Yes", "requires_sponsorship": "No"}   # noqa: RUF012
+        VALUES = {"home_country": "US", "work_authorized": "Yes", "requires_sponsorship": "No"}   # noqa: RUF012
     r = map_fields([F("q", "Will you require sponsorship?", FieldKind.select, options=YN)], P(), job_in_us=True)
     assert [a.value for a in r.answers] == ["No"]
 

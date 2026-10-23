@@ -42,7 +42,7 @@ class FakeProfile:
     VALUES: ClassVar[dict] = {"first_name": "Ada", "last_name": "Rivera", "email": "ada@example.com", "gender": "decline"}
 
     def lookup(self, key):
-        return self.VALUES.get(key)
+        return self.VALUES.get(key.removeprefix("structured:"))   # VALUES stand in for structured facts
 
     def facts(self, topic="", limit=12):
         return ["Built a fleet scheduler in Python at Initech (2023-2025).", "Skills: Python, Rust, SQL"][:limit]

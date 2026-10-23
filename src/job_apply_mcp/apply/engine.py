@@ -44,6 +44,7 @@ from .mapper import (
     SEMANTIC_SENSITIVE,
     best_option,
     canonical_key,
+    contact_permission_channels,
     eeo_class,
     geo_kind,
     job_country,
@@ -131,7 +132,9 @@ _INJECT_TEXT = re.compile(
     r"previous|prior)\b|<<<|>>>",
     re.IGNORECASE)
 # Consent / opt-in labels: like attestations, never set by the client in agent mode (ADR-0044).
-_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|marketing|opt[\s-]?in|subscribe|newsletter|"
+# ADR-0050: plus every contact-permission question (mapper.contact_permission_channels), whatever its wording
+_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|\btext(?:ed|ing)? (?:you|your|me)\b|\ba text\b|"
+                            r"\b(?:call|ring) or text\b|whats ?app|marketing|opt[\s-]?in|subscribe|newsletter|"
                             r"terms (?:and|&) conditions|i agree|i accept", re.IGNORECASE)
 _EXACT_VALUE = re.compile(
     r"(?:https?://|www\.)\S+|[+-]?\d[\d,]*(?:\.\d+)?\s?%?|\d{4}-\d{2}(?:-\d{2})?|\d{1,2}/\d{1,2}/\d{2,4}|"
@@ -844,7 +847,8 @@ class ApplyEngine:
                 failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
                     f"[type] answer must be a string, bool, number or list of strings, got {type(v).__name__}"]}))
                 continue
-            if self._needs_human(f) or _CONSENT_LABEL.search(f.label):
+            if self._needs_human(f) or _CONSENT_LABEL.search(f.label) or contact_permission_channels(
+                    f.label, choice=f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)):
                 failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
                     "[attestation] attestation/consent field: only a profile answer or a human may set it"]}))
                 continue

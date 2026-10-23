@@ -122,7 +122,9 @@ class ProfileView:
 
     def _structured(self, key: str) -> bool | None:
         a, pr = self.p.authorization, self.p.preferences
-        return {"work_authorized": a.work_authorized, "requires_sponsorship": a.requires_sponsorship,
+        home = a.facts_for(a.home_country) if a.home_country else None   # ADR-0050: flat keys need a home country
+        return {"work_authorized": home and home.work_authorized,
+                "requires_sponsorship": home and home.requires_sponsorship,
                 # ADR-0040: US citizenship comes from the US facts (flat `citizen` only when home_country is US)
                 "us_citizen": a.facts_for("US").citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
@@ -152,7 +154,7 @@ class ProfileView:
         if key == "derived:region":                 # ADR-0040: state/region for the continental-US rule
             return self.p.contact.region or None
         if key == "home_country":
-            return self.p.authorization.home_country.upper()
+            return self.p.authorization.home_country.upper() or None   # ADR-0050: no US default
         if key.startswith("auth:"):                 # ADR-0040: "auth:<ISO-2>:<fact>" per-country authorization facts
             _, cc, fact = key.split(":", 2)
             a = self.p.authorization
@@ -198,12 +200,20 @@ class ProfileView:
             st = self._structured(key)
             if st is not None:
                 return self._TRI[st]
+            if key in ("work_authorized", "requires_sponsorship"):
+                return None                        # ADR-0050: never a flat [answers] pattern
             for q in self._ANSWER_PHRASES.get(key, ()):
                 if (v := self.p.answer_for(q)) is not None:
                     return v
         return None
 
     def lookup(self, key: str) -> Any | None:
+        if key.startswith("structured:"):   # ADR-0050: the [authorization]/[preferences] value only, never [answers]
+            st = self._structured(key[11:])
+            return None if st is None else self._TRI[st]
+        if key.startswith("optin:"):      # ADR-0050: only the owner's exact [answers] key, never a stored/persona answer
+            want = key.lower()
+            return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
         v = self._lookup(key)
         if self.persona is not None and (v is None or v == "") and " " not in key:   # canonical keys only
             s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile

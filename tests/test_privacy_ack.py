@@ -71,8 +71,8 @@ def test_exclusions_stay_unresolved_even_when_true(label):
     assert run(F("q", label, FieldKind.boolean)) is None, label
 
 
-def test_marketing_optin_stays_no():
-    assert run(sel("Sign up for our newsletter", ["Yes", "No"])) == "No"
+def test_marketing_optin_is_never_acknowledged_or_auto_declined():
+    assert run(sel("Sign up for our newsletter", ["Yes", "No"])) is None     # ADR-0050: owner-only
 
 
 def test_policy_stop_phrases_are_respected():

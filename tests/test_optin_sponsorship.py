@@ -1,0 +1,422 @@
+"""ADR-0050 (#70): messaging/marketing opt-ins fail closed; flat [answers] never answer authorization or sponsorship
+on a foreign or unconfirmed-country job. Fictional profile only (Alex Rivera, Springfield)."""
+import pytest
+from apply_fakes import F
+
+from job_apply_mcp.apply.adapters import ProfileView
+from job_apply_mcp.apply.mapper import map_fields, optin_channels
+from job_apply_mcp.config import Settings
+from job_apply_mcp.core.models import FieldKind
+from job_apply_mcp.profile import Authorization, Contact, Profile
+
+YN = ["Yes", "No"]
+# flat patterns a real profile may hold: "opt" is the US work program, "now or in the future" a sponsorship answer
+FLAT = {"opt": "Yes", "now or in the future": "Yes", "require sponsorship": "Yes", "sms": "No",
+        "text message": "No", "recruiting": "Yes", "receive": "Yes", "whatsapp": "Yes"}
+
+
+def view(answers=None, country="United States", **auth):
+    a = {"work_authorized": True, "requires_sponsorship": True} | auth
+    return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city="Springfield",
+                                               country=country),
+                               authorization=Authorization.model_validate(a), answers=dict(FLAT) | (answers or {})),
+                       Settings())
+
+
+def run(label, kind=FieldKind.select, options=YN, required=True, p=None, job="US", company="Acme Robotics"):
+    f = F("q", label, kind, required=required, options=list(options) if options else None)
+    r = map_fields([f], p or view(), company=company, job_country=job)
+    got = {a.key: (a.value, a.source) for a in r.answers}.get("q")
+    run.gaps = r.profile_gaps
+    return got, [x.key for x in r.unresolved], [x.key for x in r.omitted]
+
+
+WHATSAPP = [
+    "Do you opt-in to receive WhatsApp messages from Acme Recruiting?",
+    "Do you opt in to receive Whatsapp messages from Acme Recruiting?",
+    "Opt-in to WhatsApp updates",
+    "I would like to receive updates via WhatsApp",
+    "Can we contact you on Whats App about your application?",
+    "WHATSAPP: may we message you about this role?",
+]
+OTHER_CHANNELS = [
+    "Do you consent to receive SMS messages about your application?",
+    "I agree to receive text messages from Acme Robotics",
+    "Can we send you text alerts about interview scheduling?",
+    "Would you like to receive recruiting updates by text?",
+    "Opt in to mobile messaging from our recruiting team",
+    "Sign me up for the Acme newsletter",
+    "Would you like to receive marketing communications from Acme?",
+    "Do you opt-in to receive Telegram messages from Acme?",
+]
+
+
+def owner_only(label, p, **kw):
+    """Owner-only: never answered, unresolved whether required or optional (ADR-0050, descoped)."""
+    for req in (True, False):
+        assert run(label, p=p, required=req, **kw)[:2] == (None, ["q"]), (label, req)
+        assert run(label, FieldKind.boolean, options=None, p=p, required=req, **kw)[:2] == (None, ["q"]), (label, req)
+
+
+@pytest.mark.parametrize("label", WHATSAPP + OTHER_CHANNELS)
+@pytest.mark.parametrize("job", ["US", "CA", None])
+def test_optin_without_stored_answer_is_owner_only_never_yes_or_no(label, job):
+    owner_only(label, view(), job=job)
+    assert run(label, options=["Yes, opt me in", "No, thank you"], job=job)[:2] == (None, ["q"])
+
+
+@pytest.mark.parametrize("label", ["Do you opt-in to receive WhatsApp messages from Acme Recruiting?",
+                                   "Opt-in to WhatsApp updates",
+                                   "Can we contact you on Whats App about your application?"])
+def test_stored_optin_is_the_owners_own_answer(label):
+    assert run(label, p=view({"optin:whatsapp": "Yes"}))[0] == ("Yes", "rule:messaging_optin")
+    assert run(label, p=view({"optin:whatsapp": "No"}), required=False)[0] == ("No", "rule:messaging_optin")
+    assert run(label, FieldKind.boolean, options=None, p=view({"optin:whatsapp": "No"}))[0] == \
+        (False, "rule:messaging_optin")
+    assert run(label, options=["Yes, opt me in", "No, thank you"], p=view({"optin:whatsapp": "No"}))[0] == \
+        ("No, thank you", "rule:messaging_optin")
+
+
+def test_only_an_exact_channel_value_counts():
+    yes_wa = view({"optin:whatsapp": "Yes"})
+    owner_only(OTHER_CHANNELS[0], yes_wa)                                      # SMS question, WhatsApp key
+    owner_only("Can we email you about future roles?", view({"optin:email": "Yes"}))   # every channel needs a value
+    assert run("Can we email you about future roles?",
+               p=view({"optin:email": "Yes", "optin:marketing": "Yes"}))[0] == ("Yes", "rule:messaging_optin")
+    assert run("Can we email you about future roles?",
+               p=view({"optin:email": "Yes", "optin:marketing": "No"}))[0] == ("No", "rule:messaging_optin")
+    # two channels joined by "and" is a second clause: never answered from stored values
+    owner_only("Do you agree to receive WhatsApp and SMS messages?", view({"optin:whatsapp": "Yes", "optin:sms": "Yes"}))
+    owner_only(WHATSAPP[0], view({"opt in whatsapp": "Yes", "re:whatsapp": "Yes"}))   # flat patterns never count
+
+
+def test_optout_and_unclear_options_stay_with_the_owner():
+    assert run("Do you want to opt out of WhatsApp messages?") == (None, ["q"], [])
+    assert run("Do you opt-in to receive WhatsApp messages?", options=["Sure", "Maybe later"]) == (None, ["q"], [])
+
+
+@pytest.mark.parametrize("label,kind", [
+    ("WhatsApp number", FieldKind.text),
+    ("Do you have marketing experience?", FieldKind.select),
+    ("How many years of SMS gateway experience do you have?", FieldKind.select),
+])
+def test_channel_word_alone_is_not_an_optin(label, kind):
+    assert optin_channels(F("q", label, kind, options=YN if kind == FieldKind.select else None)) is None
+
+
+def test_flat_opt_pattern_never_matches_opt_in():
+    p = view()
+    assert p.p.answer_for("Do you opt-in to the Acme talent survey?") is None
+    assert p.p.answer_for("Are you on OPT?") == "Yes"
+
+
+# ---------------------------------------------------------------- sponsorship on a non-home-country job
+SPONSOR = ("Will you require Acme to sponsor you for a work permit now or in the future for the location(s) you "
+           "selected in your previous response?")
+
+
+@pytest.mark.parametrize("label", [
+    SPONSOR,
+    "Will you now or in the future require sponsorship to work in this role?",
+    "Do you need a visa to work here, now or in the future?",
+    "Would you require Acme to sponsor you?",
+])
+@pytest.mark.parametrize("job", ["CA", None])
+def test_flat_answers_never_answer_sponsorship_on_foreign_or_unconfirmed_job(label, job):
+    got, unresolved, _ = run(label, job=job)
+    assert got is None and unresolved == ["q"]
+
+
+def test_canada_job_uses_only_canada_facts():
+    p = view(CA={"work_authorized": True, "requires_sponsorship": False})
+    assert run("Will you now or in the future require sponsorship to work in this role?", p=p, job="CA")[0] == \
+        ("No", "rule:requires_sponsorship")
+    assert run("Would you require Acme to sponsor you?", p=p, job="CA")[:2] == (None, ["q"])   # company name: owner
+
+
+def test_non_yes_no_sponsorship_options_on_a_foreign_job_stay_unresolved():
+    opts = ["I will need sponsorship", "I hold an open work permit"]
+    assert run("Visa sponsorship status", options=opts, job="CA")[:2] == (None, ["q"])
+
+
+STRIPE_STYLE = ("Will you require Acme Robotics to sponsor you for a work permit now or in the future for the "
+                "location(s) you selected in in your previous response?")
+
+
+def test_us_job_answers_sponsor_you_wording_from_the_structured_fact():
+    for auth in ({"requires_sponsorship": True}, {"US": {"requires_sponsorship": True}}):
+        p = view(**auth)
+        assert run(STRIPE_STYLE, p=p, job="US")[0] == ("Yes", "rule:requires_sponsorship")
+        assert run("Will you now or in the future require sponsorship to work in this role?", p=p, job="US")[0] == \
+            ("Yes", "rule:requires_sponsorship")
+    p = view(requires_sponsorship=False)
+    assert run(STRIPE_STYLE, p=p, job="US")[0] == ("No", "rule:requires_sponsorship")
+    assert run(STRIPE_STYLE, FieldKind.boolean, options=None, p=p, job="US")[0] == (False, "rule:requires_sponsorship")
+
+
+def test_us_job_without_a_structured_fact_is_unresolved_despite_flat_answers():
+    p = view(requires_sponsorship=None)               # FLAT still holds "now or in the future" / "require sponsorship"
+    assert run(STRIPE_STYLE, p=p, job="US")[:2] == (None, ["q"])
+    assert run("Will you now or in the future require sponsorship?", p=p, job="US")[:2] == (None, ["q"])
+
+
+def test_ca_job_with_only_a_us_fact_is_unresolved():
+    p = view(requires_sponsorship=False)
+    assert run(STRIPE_STYLE, p=p, job="CA")[:2] == (None, ["q"])
+    assert run(STRIPE_STYLE, p=p, job=None)[:2] == (None, ["q"])
+
+
+def test_home_job_relaxation_never_covers_another_named_country():
+    p = view(requires_sponsorship=False)
+    assert run("Will you require Acme Robotics to sponsor you for a work permit in Canada?", p=p, job="US")[:2] == \
+        (None, ["q"])
+
+
+# ---------------------------------------------------------------- home country: no US default (ADR-0050)
+@pytest.mark.parametrize("country", ["Canada", "CA", "canada"])
+def test_contact_country_sets_the_home_country(country):
+    p = view(country=country, requires_sponsorship=False)
+    assert p.lookup("home_country") == "CA"
+    assert run("Will you now or in the future require sponsorship?", p=p, job="CA")[0] == \
+        ("No", "rule:requires_sponsorship")
+    assert run("Will you now or in the future require sponsorship?", p=p, job="US")[:2] == (None, ["q"])
+    assert run.gaps == [{"country": "US", "fact": "requires_sponsorship", "key": "q"}]
+
+
+def test_explicit_home_country_wins_over_contact_country():
+    p = view(country="Canada", home_country="United States", requires_sponsorship=False)
+    assert p.lookup("home_country") == "US"
+    assert run(STRIPE_STYLE, p=p, job="US")[0] == ("No", "rule:requires_sponsorship")
+
+
+@pytest.mark.parametrize("country", ["", "Springfield", "Atlantis"])
+def test_no_confirmed_country_means_no_home_and_unresolved(country):
+    p = view(country=country, requires_sponsorship=False, work_authorized=True)
+    assert p.lookup("home_country") is None
+    for job in ("US", "CA"):
+        assert run("Will you now or in the future require sponsorship?", p=p, job=job)[:2] == (None, ["q"])
+        assert run.gaps == [{"country": job, "fact": "requires_sponsorship", "key": "q"}]
+        assert run("Are you authorized to work in this country?", p=p, job=job)[:2] == (None, ["q"])
+    assert p.lookup("requires_sponsorship") is None and p.lookup("work_authorized") is None
+    # a per-country table still answers for its own country
+    q = view(country=country, requires_sponsorship=None, US={"requires_sponsorship": False})
+    assert run("Will you now or in the future require sponsorship?", p=q, job="US")[0] == \
+        ("No", "rule:requires_sponsorship")
+
+
+# ---------------------------------------------------------------- control round (#73): deny-by-default contact asks
+# flat patterns that answered these Yes before (word-boundary hits): each is a channel or contact word
+CONTROL_FLAT = {"text": "Yes", "whatsapp": "Yes", "signal": "Yes", "contact": "Yes", "email": "Yes", "call": "Yes",
+                "updates": "Yes", "future roles": "Yes", "texted": "Yes", "reach": "Yes"}
+CONTROL_LABELS = [
+    ("Is it OK to text you?", ["sms"]),
+    ("May we text your mobile?", ["sms"]),
+    ("Do you agree to be texted?", ["sms"]),
+    ("Can we send you a text?", ["sms"]),
+    ("Can we text you about interview scheduling?", ["sms"]),
+    ("Can recruiters call or text you?", ["sms", "phone"]),
+    ("Okay to WhatsApp you?", ["whatsapp"]),
+    ("Would you like Signal updates?", ["signal"]),
+    ("Can we reach you on Signal?", ["signal"]),
+    ("Can we contact you with updates?", ["contact"]),          # generic contact: owner-only (review round 3)
+    ("Can we email you about future roles?", ["email", "marketing"]),
+]
+
+
+# labels whose stored optin value is used (narrow ask about a contact); the rest stay owner-only even when stored
+# whole label is one permission clause (is_single_permission_ask); "Can recruiters call or text you?" (second clause)
+# and "... about interview scheduling?" (tail outside the template) stay unresolved even when stored
+STORED_APPLIES = {"Is it OK to text you?", "May we text your mobile?", "Do you agree to be texted?",
+                  "Can we send you a text?", "Okay to WhatsApp you?", "Can we reach you on Signal?",
+                  "Can we email you about future roles?"}
+
+
+@pytest.mark.parametrize("label,chans", CONTROL_LABELS)
+def test_control_labels_fail_closed(label, chans):
+    f = F("q", label, FieldKind.select, options=YN)
+    assert optin_channels(f) == chans
+    owner_only(label, view(CONTROL_FLAT))
+    stored = view(CONTROL_FLAT | {f"optin:{c}": "Yes" for c in chans})
+    if label in STORED_APPLIES:
+        assert run(label, p=stored)[0] == ("Yes", "rule:messaging_optin")
+        if len(chans) > 1:              # every named channel needs its own Yes
+            assert run(label, p=view(CONTROL_FLAT | {f"optin:{chans[0]}": "Yes"}))[:2] == (None, ["q"])
+    else:
+        owner_only(label, stored)
+
+
+@pytest.mark.parametrize("label", [
+    "Do you have experience with Twilio SMS?",
+    "Have you built SMS gateways?",
+    "How many years of email marketing experience do you have?",
+    "Can we contact your references?",
+    "Can we contact your current employer?",
+    "Have you previously been contacted by one of our recruiters?",
+    "Are you comfortable being on call?",
+    "Are you available for a phone screen this week?",
+    "Do you know anyone who works at Acme Robotics?",
+])
+def test_skills_facts_and_other_rules_are_not_optins(label):
+    assert optin_channels(F("q", label, FieldKind.select, options=YN)) is None
+
+
+def test_open_to_receiving_newsletter_is_owner_only():
+    # not narrow permission wording: owner-only (unresolved), never a flat answer
+    assert run("Are you open to receiving our newsletter?", required=False, p=view({"newsletter": "Yes"})) == \
+        (None, ["q"], [])
+    assert run("Are you open to receiving our newsletter?", p=view({"newsletter": "Yes"}))[:2] == (None, ["q"])
+
+
+@pytest.mark.parametrize("tail", ["for the location you selected", "for the locations you selected",
+                                  "for the location(s) you selected in your previous response",
+                                  "in the locations that you have selected"])
+def test_selected_places_wording_on_a_us_job(tail):
+    p = view(requires_sponsorship=False)
+    assert run(f"Will you require Acme Robotics to sponsor you {tail}?", p=p, job="US")[0] == \
+        ("No", "rule:requires_sponsorship")
+    assert run(f"Will you require Acme Robotics to sponsor you {tail}?", p=p, job="CA")[:2] == (None, ["q"])
+
+
+def test_engine_guard_covers_every_wording():
+    from job_apply_mcp.apply.mapper import contact_permission_channels
+    for label, chans in CONTROL_LABELS:
+        assert contact_permission_channels(label) == chans
+    assert contact_permission_channels("WhatsApp number") == []
+    assert contact_permission_channels("Have you built SMS gateways?") == []
+    assert contact_permission_channels("WhatsApp updates", choice=True) == ["whatsapp"]
+
+
+# ---------------------------------------------------------------- review round 3: broad marks owner-only, never answers
+EVERY_FLAT = CONTROL_FLAT | {"experience": "Yes", "on call": "Yes", "available": "Yes", "platform": "Yes",
+                             "tools": "Yes", "manager": "Yes", "managed": "Yes", "cold calls": "Yes",
+                             "valid email": "Yes", "push": "Yes", "messages": "Yes", "clients": "Yes",
+                             "phone calls": "Yes", "customer calls": "Yes", "status updates": "Yes", "receive": "Yes",
+                             "job alerts": "Yes", "campaigns": "Yes"}
+REVIEWER_9 = [
+    "Are you comfortable communicating with clients daily?",
+    "Will you be able to answer customer calls during business hours?",
+    "Are you comfortable sending weekly status updates to stakeholders?",
+    "Do you have a valid email address?",
+    "Can you handle a high volume of phone calls?",
+    "Are you comfortable making cold calls?",
+    "Will you respond to messages from the team promptly?",
+    "Are you willing to push code to production on weekends?",
+    "Have you managed email marketing campaigns?",
+]
+
+
+@pytest.mark.parametrize("label", REVIEWER_9)
+def test_ordinary_job_questions_are_never_auto_answered(label):
+    for p in (view(), view(EVERY_FLAT)):
+        for req in (True, False):
+            assert run(label, p=p, required=req)[:2] == (None, ["q"]), (label, req)
+            assert run(label, FieldKind.boolean, options=None, p=p, required=req)[:2] == (None, ["q"])
+
+
+# control round 3: exceptions remove only their own words; label -> answer when required without optin
+CONTROL_12 = [
+    ("Are you OK being on call and receiving texts?", None),
+    ("Are you available to receive texts from our recruiters?", None),
+    ("Can we email you about future engineering roles?", "No"),
+    ("Do you want job alerts for our platform?", None),
+    ("Can we text you about our tools?", "No"),
+    ("Can we contact your manager and also text you?", None),
+    ("Is it OK to text your emergency contact and you?", None),
+    ("Have you been contacted by us before, and may we text you?", "No"),
+    ("Can we text you using WhatsApp?", "No"),
+    ("Can we contact you about a phone screen?", None),
+    ("Can we text you about your availability?", "No"),
+    ("Do you have WhatsApp experience, and may we message you there?", None),
+]
+
+
+@pytest.mark.parametrize("label,_was", CONTROL_12)
+def test_compound_labels_are_owner_only(label, _was):
+    owner_only(label, view(EVERY_FLAT))
+    from job_apply_mcp.apply.mapper import never_llm
+    assert never_llm(F("q", label, FieldKind.select, options=YN))   # owner-only: never a model
+
+
+def test_narrow_optin_with_stored_yes_for_every_channel():
+    p = view(EVERY_FLAT | {"optin:whatsapp": "Yes", "optin:sms": "Yes"})
+    assert run("Can we text you?", p=p)[0] == ("Yes", "rule:messaging_optin")
+    owner_only("Can we text you using WhatsApp?", p)                  # "using" is outside the single-clause template
+    assert run("Are you comfortable making cold calls?", p=view({"optin:phone": "Yes"}))[:2] == (None, ["q"])
+
+
+# control round 4: job questions about marketing / promotions / SMS products are not opt-ins and never get "No"
+MARKETING_JOBS = [
+    "Would you like to join our marketing team?",
+    "Would you like to lead marketing?",
+    "Would you like a marketing role?",
+    "Would you like to be considered for marketing roles?",
+    "Would you like to work on marketing promotions?",
+    "Would you like to lead promotions?",
+    "Do you consent to a marketing role with travel?",
+    "Would you like to own our SMS product?",
+]
+
+
+@pytest.mark.parametrize("label", MARKETING_JOBS)
+def test_marketing_and_sms_job_questions_stay_unresolved(label):
+    for p in (view(), view(EVERY_FLAT | {"marketing": "Yes", "promotions": "Yes", "sms product": "Yes"})):
+        for req in (True, False):
+            got, unresolved, _ = run(label, p=p, required=req)
+            assert (got, unresolved) == (None, ["q"]), (label, req)
+            assert run(label, FieldKind.boolean, options=None, p=p, required=req)[:2] == (None, ["q"])
+
+
+@pytest.mark.parametrize("label", [
+    "Would you like to receive marketing emails from Acme?",
+    "Do you consent to receive SMS messages?",
+    "I agree to receive promotional emails",
+    "Subscribe to our newsletter",
+    "Sign me up for the Acme newsletter",
+    "Opt in to WhatsApp updates",
+])
+def test_permission_asks_are_never_auto_declined(label):
+    owner_only(label, view())
+
+
+# control round 5: ordinary questions that look like opt-ins (and the older marketing_optin rule) stay unresolved
+@pytest.mark.parametrize("label", ["Would you like to receive WhatsApp training?",
+                                   "Do you have experience writing newsletters?"])
+def test_round5_labels_stay_unresolved(label):
+    owner_only(label, view(EVERY_FLAT | {"newsletters": "Yes", "training": "Yes"}))
+    owner_only(label, view(EVERY_FLAT | {"optin:whatsapp": "Yes", "optin:marketing": "Yes"}))
+
+
+@pytest.mark.parametrize("label", ["Would you like to join our talent network?", "Sign up for our newsletter",
+                                   "Select 'Yes' to join Acme Robotics's Talent Community and receive newsletters"])
+def test_older_marketing_optin_rule_no_longer_answers(label):
+    owner_only(label, view())
+
+
+# control round 6: a second clause or a legal / third-party term never takes a stored optin
+ALL_OPTINS = {f"optin:{c}": "Yes" for c in ("whatsapp", "sms", "phone", "email", "signal", "telegram", "wechat", "line",
+                                            "viber", "imessage", "push", "marketing", "contact")}
+
+
+@pytest.mark.parametrize("label", [
+    "Have you been arrested, and may we text you?",
+    "May we text you? Are you a US citizen?",
+    "Can we text you and confirm you are over 18?",
+    "Have you been contacted by us before, and may we text you?",
+    "Can we text you or your references?",
+])
+def test_compound_labels_never_take_a_stored_optin(label):
+    from job_apply_mcp.apply.mapper import is_single_permission_ask
+    assert is_single_permission_ask(label, "Acme Robotics") is None
+    owner_only(label, view(EVERY_FLAT | ALL_OPTINS))
+
+
+@pytest.mark.parametrize("label,chans", [
+    ("Do you opt-in to receive WhatsApp messages from Acme Recruiting?", ["whatsapp"]),
+    ("Is it OK to text you?", ["sms"]),
+    ("Can we email you about future roles?", ["email", "marketing"]),
+    ("Do you consent to receive SMS messages about your application?", ["sms"]),
+])
+def test_single_permission_ask_template(label, chans):
+    from job_apply_mcp.apply.mapper import is_single_permission_ask
+    assert is_single_permission_ask(label, "Acme Robotics") == chans
+    assert run(label, p=view({f"optin:{c}": "Yes" for c in chans}))[0] == ("Yes", "rule:messaging_optin")

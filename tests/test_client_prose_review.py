@@ -621,3 +621,23 @@ def test_ordinary_career_prose_not_flagged_by_consent_words(text):
     e, _ = engine(R())
     hit = e._text_guard(text)
     assert hit is None or "rubric" in text, (text, hit)
+
+
+# ADR-0050 (#73): every contact-permission question, whatever the wording, refuses a client-supplied answer
+OPTIN_FORM = ApplicationForm(ref=POSTING.ref, fields=[
+    F("first_name", "First Name"),
+    F("q_ok", "Is it OK to text you?", FieldKind.boolean, required=False),
+    F("q_may", "May we text you updates?", FieldKind.select, required=False, options=["Yes", "No"]),
+    F("q_sched", "Can we text you about interview scheduling?", FieldKind.select, required=False,
+      options=["Yes", "No"]),
+    F("q_signal", "Can we reach you on Signal?", FieldKind.select, required=False, options=["Yes", "No"]),
+])
+
+
+@pytest.mark.parametrize(("key", "value"), [("q_ok", True), ("q_may", "Yes"), ("q_sched", "Yes"), ("q_signal", "Yes")])
+async def test_client_cannot_opt_the_user_in_to_messaging(key, value):
+    e, ad = engine(R(), form=OPTIN_FORM)
+    out = await e.plan(POSTING.ref)
+    res = await e.submit(POSTING.ref, {key: value}, out.approval_id, dry_run=False)
+    assert res.status == "needs_review" and not ad.submits
+    assert res.client_tasks[0]["key"] == key and res.client_tasks[0]["violations"][0].startswith("[attestation]")
