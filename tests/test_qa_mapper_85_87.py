@@ -263,6 +263,12 @@ def test_us_person_from_a_project_file_or_env_is_never_a_fact(tmp_path, monkeypa
     assert run(USP_Q, FieldKind.select, USP_OPTS, p=view(settings=s, citizenship="Canada")) is None
 
 
+def test_us_person_from_an_untrusted_user_file_is_never_a_fact(tmp_path, monkeypatch):
+    from test_approvals import _cfg
+    s = _cfg(tmp_path, monkeypatch, user="[policy]\nus_person = true\n", via_env=True)   # JOB_APPLY_MCP_CONFIG
+    assert run(ITAR_Q, p=view(settings=s)) is None
+
+
 @pytest.mark.parametrize("key,raw", [("us_citizen", "true"), ("requires_sponsorship", "false"),
                                      ("has_clearance", "true")])
 def test_policy_legal_facts_cannot_be_set_outside_the_trusted_user_config(tmp_path, monkeypatch, key, raw):
