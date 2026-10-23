@@ -82,6 +82,19 @@ async def test_dry_run_previews_live_quota_block(tmp_path):
     assert any("greenhouse 25/25" in w and "quota_blocked" in w for w in pv["warning"])
 
 
+async def test_dry_run_preview_present_without_dry_run_ok_rows_and_read_only(tmp_path):
+    """#78: a dry run always carries live_preview with remaining quota, even when nothing is dry_run_ok."""
+    r, _ad, eng = make(tmp_path)
+    eng.control = FakeControl()
+    before = {"day": 48, "platform": {"greenhouse": 25}, "run": 0}
+    rep = await r.run(links=["https://careers.example.com/jobs/1"], sources=["links"])
+    assert "dry_run_ok" not in rep["counts"]
+    pv = rep["live_preview"]
+    assert pv["would_submit"] == 0 and pv["quota_blocked"] == 0
+    assert pv["remaining"] == {"day": 2, "platform": {"greenhouse": 0}}
+    assert eng.control.used == before
+
+
 async def test_dry_run_preview_counts_day_quota(tmp_path):
     r, _ad, eng = make(tmp_path)
     eng.control = FakeControl(platform_used=0, day_used=49)

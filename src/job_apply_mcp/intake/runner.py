@@ -289,7 +289,7 @@ class IntakeRunner:
             await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live"})
         out = {**rep, "mode": "dry_run" if dry else "live", "max_applications": n or None,
                "plan_context": {k: v for k, v in ctx.items() if v}}
-        if preview:
+        if preview is not None:
             out["live_preview"] = preview
         return {k: v for k, v in out.items() if v is not None}
 
@@ -433,9 +433,7 @@ class IntakeRunner:
         """Dry run only: what a live run of the dry_run_ok rows would do under the current quotas and approval mode.
         Read-only: it reads the control layer's usage (trusted config) and never changes a limit (ADR-0049)."""
         ok = [c for c in cands if c.status == "dry_run_ok"]
-        if not ok:
-            return None
-        out: dict[str, Any] = {}
+        out: dict[str, Any] = {"would_submit": 0, "quota_blocked": 0}   # always present on a dry run (#78)
         notes: list[str] = []
         if self.s.dry_run:
             notes.append("global dry_run is on: a live run is refused until dry_run=false in the user config")
@@ -472,6 +470,11 @@ class IntakeRunner:
                 day_left = None if day_left is None else day_left - 1
                 run_left = None if run_left is None else run_left - 1
             out["would_submit"] = would
+            plats = sorted({*(used.get("platform") or {}), *plat_used})
+            out["remaining"] = {"day": None if lim.get("day") is None else max(0, lim["day"] - used.get("day", 0)),
+                                "platform": {p: None if lim.get("platform") is None
+                                             else max(0, lim["platform"] - (used.get("platform") or {}).get(p, 0))
+                                             for p in plats}}
             if blocked:
                 out["quota_blocked"] = len(blocked)
                 out["blocked"] = blocked[: self.s.intake.report_rows]
@@ -487,7 +490,7 @@ class IntakeRunner:
                              f"run would submit {would} and report the rest as quota_blocked")
         if notes:
             out["warning"] = notes
-        return out or None
+        return out
 
     @staticmethod
     def _processed_messages(cands: list[Cand]) -> dict[str, int]:
