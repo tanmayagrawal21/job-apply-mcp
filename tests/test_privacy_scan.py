@@ -103,11 +103,11 @@ def test_allow_file_accepts_and_never_prints(tmp_path, capsys):
     assert ps.main(base) == 1  # no allow file: unchanged behaviour
     capsys.readouterr()
     allow = tmp_path / "allow.txt"
-    allow.write_text("# comment\n@salt s3cr3t-salt\n@urls\n")
+    allow.write_text("# comment\n@salt 9f2c4e7a1b3d5f6081a2c3e4f5061728\n@urls\n")
     assert ps.main([*base, "--allow", str(allow), "--fingerprint", "1"]) == 0
     fp = capsys.readouterr().out.strip()
-    assert fp == ps.fingerprint("s3cr3t-salt", "quokka fernbrook") and "quokka" not in fp
-    allow.write_text(f"# comment\n@salt s3cr3t-salt\nLICENSE\t{fp}\n@urls\n")
+    assert fp == ps.fingerprint("9f2c4e7a1b3d5f6081a2c3e4f5061728", "quokka fernbrook") and "quokka" not in fp
+    allow.write_text(f"# comment\n@salt 9f2c4e7a1b3d5f6081a2c3e4f5061728\nLICENSE\t{fp}\n@urls\n")
     assert ps.main([*base, "--allow", str(allow)]) == 0
     cap = capsys.readouterr()
     out = cap.out + cap.err
@@ -132,8 +132,8 @@ def test_allow_file_partial_still_fails(tmp_path, capsys):
 
 
 def test_allow_rules_scope_and_reorder():
-    fp = ps.fingerprint("pepper", "wombatico")
-    rules = ps.AcceptRules([("docs/*.md", fp)], salt="pepper")
+    fp = ps.fingerprint("c0ffee42beef1337d00dfacecafe9a8b", "wombatico")
+    rules = ps.AcceptRules([("docs/*.md", fp)], salt="c0ffee42beef1337d00dfacecafe9a8b")
     rules.bind(["otherterm", "wombatico"])
     assert rules.accepts("docs/a.md", "private term #2", (0, 3), "abc")
     assert not rules.accepts("docs/a.md", "private term #1", (0, 3), "abc")
@@ -179,3 +179,30 @@ def test_diff_and_staged_ignore_allow_file(tmp_path, capsys):
     assert ps.main(args) == 0  # whole tree: accepted
     out = capsys.readouterr()
     assert out.out.count("README.md:2: [private term #1]") == 2 and "quokkaf" not in (out.out + out.err)
+
+
+def test_allow_file_inside_git_worktree_is_refused(tmp_path, capsys):
+    repo = _repo(tmp_path, {"README.md": "ok\n"})
+    inside = repo / "sub" / "privacy_allow.txt"
+    inside.parent.mkdir()
+    inside.write_text("@urls\n")
+    assert ps.main(["--root", str(repo), "--allow", str(inside)]) == 2
+    assert "inside a git work tree" in capsys.readouterr().err
+
+
+def test_short_or_weak_salt_is_refused(tmp_path, capsys):
+    repo = _repo(tmp_path, {"README.md": "ok\n"})
+    allow = tmp_path / "allow.txt"
+    for salt in ("pepper", "0123456789abcdef", "a" * 64, "c2hvcnQ="):
+        allow.write_text(f"@salt {salt}\n@urls\n")
+        assert ps.main(["--root", str(repo), "--allow", str(allow)]) == 2, salt
+        assert "salt" in capsys.readouterr().err
+    allow.write_text(f"LICENSE\t{'ab' * 6}\n")  # fingerprint rule without a salt
+    assert ps.main(["--root", str(repo), "--allow", str(allow)]) == 2
+
+
+def test_long_salts_accepted():
+    assert ps.salt_ok("9f2c4e7a1b3d5f6081a2c3e4f5061728")  # 16 bytes hex
+    assert ps.salt_ok("q83vEjRWeJq83vEjRWeJqw==")  # 16 bytes base64
+    assert ps.salt_ok("q83vEjRWeJq83vEjRWeJq-_x")  # url-safe base64
+    assert not ps.salt_ok("9f2c4e7a1b3d5f6081a2c3e4f50617")  # 15 bytes

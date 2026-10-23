@@ -7,3 +7,4 @@ dist/
 .env
 *.local.toml
 profile.toml
+privacy_allow*.txt

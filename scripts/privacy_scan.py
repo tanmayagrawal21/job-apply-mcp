@@ -15,6 +15,8 @@ Exit 0 when every finding is accepted, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import fnmatch
 import hashlib
 import math
@@ -114,12 +116,44 @@ def fingerprint(salt: str, term: str) -> str:
     return hashlib.sha256(f"{salt}\0{term.strip().lower()}".encode()).hexdigest()[:12]
 
 
+class AllowFileError(Exception):
+    """The allow file is unsafe to use (inside a git work tree, or a weak salt). Message holds no secret."""
+
+
+MIN_SALT_BYTES = 16
+
+
+def salt_ok(salt: str) -> bool:
+    """At least 16 bytes as hex or base64, and not an obviously non-random string."""
+    if len(set(salt)) < 8:
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]+", salt) and len(salt) % 2 == 0:
+        return len(salt) // 2 >= MIN_SALT_BYTES
+    std = salt.replace("-", "+").replace("_", "/")  # accept url-safe base64 too
+    try:
+        return len(base64.b64decode(std + "=" * (-len(std) % 4), validate=True)) >= MIN_SALT_BYTES
+    except (binascii.Error, ValueError):
+        return False
+
+
+def in_git_worktree(p: Path) -> bool:
+    try:
+        r = subprocess.run(["git", "-C", str(p.parent), "rev-parse", "--is-inside-work-tree"],
+                           capture_output=True, text=True, check=False)
+    except OSError:
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
 def load_accept(path: str | None) -> AcceptRules | None:
     p = Path(path).expanduser() if path else DEFAULT_ACCEPT_FILE.expanduser()
     if not p.exists():
         if path:
             print(f"note: allow file {path} not found; no findings accepted", file=sys.stderr)
         return None
+    if in_git_worktree(p.resolve()):
+        raise AllowFileError(f"allow file {p} is inside a git work tree; keep it outside every repo "
+                             "(its salt makes fingerprints guessable if published)")
     rules = AcceptRules([])
     for no, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
         raw = raw.strip()
@@ -128,14 +162,19 @@ def load_accept(path: str | None) -> AcceptRules | None:
         if raw == "@urls":
             rules.urls = True
             continue
-        if raw.startswith("@salt "):
-            rules.salt = raw[6:].strip()
+        if raw.startswith("@salt"):
+            rules.salt = raw[5:].strip()
+            if not salt_ok(rules.salt):
+                raise AllowFileError(f"allow file line {no}: salt must be at least {MIN_SALT_BYTES} random bytes "
+                                     "as hex or base64 (e.g. python -c 'import secrets;print(secrets.token_hex(16))')")
             continue
         parts = raw.split("\t")
         if len(parts) != 2 or not (parts[1].strip() == "*" or FP_RE.fullmatch(parts[1].strip())):
             print(f"note: allow file line {no} ignored (expected <path-glob><TAB><fingerprint-or-*>)", file=sys.stderr)
             continue
         rules.pairs.append((parts[0].strip(), parts[1].strip()))
+    if not rules.salt and any(t != "*" for _, t in rules.pairs):
+        raise AllowFileError("allow file has fingerprint rules but no @salt line")
     return rules
 
 
@@ -287,7 +326,12 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
 
     root = Path(git(Path(a.root), "rev-parse", "--show-toplevel").strip())
-    allow, terms, accept = load_allow(root), load_terms(a.terms), load_accept(a.allow)
+    try:
+        accept = load_accept(a.allow)
+    except AllowFileError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    allow, terms = load_allow(root), load_terms(a.terms)
     if accept is not None:
         accept.bind(terms)
     if a.fingerprint is not None:

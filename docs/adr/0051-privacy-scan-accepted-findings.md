@@ -26,6 +26,10 @@ the very terms the scan protects.
    With no allow file, behaviour is unchanged.
 7. Term values and matched text are never printed in any mode. Overlapping masked spans are merged, so an
    excerpt cannot leak the tail of a longer match.
+8. With the salt, a fingerprint of a short term is cheap to guess, so the allow file must never be published. The
+   scanner exits 2 when the allow file sits inside any git work tree, when the salt is shorter than 16 bytes (hex
+   or base64) or visibly non-random, or when fingerprint rules have no salt. `.gitignore` also lists
+   `privacy_allow*.txt` as a backstop.
 
 ## Consequences
 The full scan is a meaningful gate again on the owner's machine. The allow file names only paths, a salt and
