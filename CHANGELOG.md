@@ -9,6 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - Search sessions, per-host rate limits, progress + `search_status` (ADR-0024).
 
 ### Added
+- `run_applications` tool and `job-apply-mcp run` (explicit links, `--links` file, job links emailed to yourself from the read-only mail source, discovery; any mix, in that priority), `run_report` / `job-apply-mcp report`, `give_feedback` / `job-apply-mcp feedback` applied at the start of the next run, `unsupported_site` rows, concurrent planning, per-host serialized concurrent submits, deferred prose for batch runs (ADR-0045).
 - `writing.timeout_s` hard budget for all prose of one plan (timed-out fields become `client_tasks` with any partial draft, never answers), per-call provider timeouts, `llm.heavy_classes` semaphore with `llm_wait` / `llm_gen` in `timings`, `writing.mode = "deferred"` plus the `draft_answers` tool (ADR-0041).
 - Faster `search_jobs` (issue #60): in-memory memo of parsed boards keyed by response digest, date filter before parsing, guarded text-flag regexes, 404 negative caching, interleaved per-platform fan-out, `search.board_timeout_s`, and a `timings` block in the response. 1,887 boards: cold 333 s -> ~150 s, warm 208 s -> 1.5 s (ADR-0043).
 - Optional submission caps `apply.daily_limit` / `daily_limit_per_platform` / `run_limit` (`0` = no limit; loosening only from the trusted user config), `daily_limit` block in `control_status` and `doctor` (ADR-0035).
