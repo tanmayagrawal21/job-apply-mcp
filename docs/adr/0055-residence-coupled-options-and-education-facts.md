@@ -62,9 +62,12 @@ the facts.
    only that country's visa types. "Sponsorship from <company>" then reads as "by <company>". Answers still come only
    from structured `[authorization]` facts. Non-home and unconfirmed jobs stay unresolved.
 6. **U.S. person.** A new `us_person` key is answered only when every word of the label is U.S.-person / export-control
-   definition wording. The source is `[authorization].us_person`, else `policy.us_person` when the owner's config
-   sets it explicitly (the default `False` is not a fact). If neither is set, the owner's own `[answers]` value for
-   that exact wording applies, or the field becomes a gap (`authorization.us_person`).
+   definition wording. The source is `[authorization].us_person`, else `policy.us_person` only when it was set in
+   the trusted user config. `load_settings` marks that case with a private flag; a default, a project file,
+   `JOB_APPLY__*` or an untrusted user file never counts. If neither source applies, the owner's own `[answers]` value
+   for that exact wording is used, or the field becomes a gap (`authorization.us_person`).
+   - The legal-status policy facts `us_person`, `us_citizen`, `requires_sponsorship` and `has_clearance` join the
+     trust guard (ADR-0021/0037). Only the trusted user config may change them, in either direction.
    - For a non-U.S. person, a "None of the above; I am a citizen of a different country" option is chosen only when
      the citizenship is known, is not the US, and no option names that country.
    - A label that also asks about work authorization stays unresolved.

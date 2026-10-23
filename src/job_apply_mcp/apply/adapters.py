@@ -148,10 +148,10 @@ class ProfileView:
         return max(rows, key=lambda w: w.end).company.strip() or None
 
     def _us_person(self) -> bool | None:
-        """ADR-0055: [authorization].us_person, else policy.us_person only when the owner's config sets it explicitly
-        (the default False is not a fact)."""
+        """ADR-0055: [authorization].us_person, else policy.us_person only when it was set in the TRUSTED user config
+        (load_settings marks it). A default, a project file or JOB_APPLY__* is never a fact."""
         v = self.p.authorization.us_person
-        if v is None and "us_person" in self.settings.policy.model_fields_set:
+        if v is None and getattr(self.settings.policy, "_us_person_trusted", False):
             v = self.settings.policy.us_person
         return v
 

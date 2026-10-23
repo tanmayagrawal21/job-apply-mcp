@@ -235,13 +235,40 @@ def test_us_person_missing_or_ambiguous_stays_unresolved():
     assert run(q, p=view(us_person=True)) is None                          # a work-authorization question too
 
 
-def test_us_person_policy_fallback_only_when_explicit():
-    s = Settings.model_validate({"policy": {"us_person": True}})
-    assert run("Are you a U.S. person as defined by ITAR/EAR?", p=view(settings=s)) == (True, "rule:us_person")
-    assert run("Are you a U.S. person as defined by ITAR/EAR?", p=view()) is None   # default False is not a fact
-    s2 = Settings.model_validate({"policy": {"us_person": True}})
-    assert run("Are you a U.S. person as defined by ITAR/EAR?",
-               p=view(settings=s2, us_person=False, citizenship="Canada")) == (False, "rule:us_person")
+ITAR_Q = "Are you a U.S. person as defined by ITAR/EAR?"
+
+
+def _loaded(tmp_path, monkeypatch, user="", proj="", env=None):
+    from test_approvals import _cfg
+    return _cfg(tmp_path, monkeypatch, user=user, proj=proj, env=env)
+
+
+def test_us_person_policy_fallback_only_from_the_trusted_user_config(tmp_path, monkeypatch):
+    s = _loaded(tmp_path, monkeypatch, user="[policy]\nus_person = true\n")
+    assert run(ITAR_Q, p=view(settings=s)) == (True, "rule:us_person")
+    # [authorization].us_person wins over the policy value
+    assert run(ITAR_Q, p=view(settings=s, us_person=False, citizenship="Canada")) == (False, "rule:us_person")
+    assert run(ITAR_Q, p=view()) is None                                   # default False is not a fact
+    assert run(ITAR_Q, p=view(settings=Settings.model_validate({"policy": {"us_person": True}}))) is None
+
+
+@pytest.mark.parametrize("layer", ["proj", "env"])
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_us_person_from_a_project_file_or_env_is_never_a_fact(tmp_path, monkeypatch, layer, value):
+    kw = ({"proj": f"[policy]\nus_person = {value}\n"} if layer == "proj"
+          else {"env": {"JOB_APPLY__POLICY__US_PERSON": value}})
+    s = _loaded(tmp_path, monkeypatch, **kw)
+    assert s.policy.us_person is False                                    # the guard drops a changed value
+    assert run(ITAR_Q, p=view(settings=s)) is None
+    assert run(USP_Q, FieldKind.select, USP_OPTS, p=view(settings=s, citizenship="Canada")) is None
+
+
+@pytest.mark.parametrize("key,raw", [("us_citizen", "true"), ("requires_sponsorship", "false"),
+                                     ("has_clearance", "true")])
+def test_policy_legal_facts_cannot_be_set_outside_the_trusted_user_config(tmp_path, monkeypatch, key, raw):
+    s = _loaded(tmp_path, monkeypatch, user="[policy]\nrequires_sponsorship = true\n",
+                proj=f"[policy]\n{key} = {raw}\n")
+    assert getattr(s.policy, key) == {"us_citizen": False, "requires_sponsorship": True, "has_clearance": False}[key]
 
 
 # ---------------------------------------------------------------- #87 short facts skip the prose review gate
