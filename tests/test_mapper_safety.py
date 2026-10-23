@@ -134,9 +134,17 @@ def test_non_us_authorization_uses_a_country_specific_answer_only():
 
 @pytest.mark.parametrize("label,want", [("Are you legally authorized to work in the United States?", "Yes"),
                                         ("Are you authorized to work in the U.S.?", "Yes"),
-                                        ("Will you require sponsorship for a US work visa?", "No")])
+                                        ("Will you require sponsorship to work in the US?", "No")])
 def test_us_or_unspecified_authorization_still_answered(label, want):
     assert run(sel(label))[0][0] == want
+
+
+@pytest.mark.parametrize("label", ["Will you require sponsorship for a US work visa?",
+                                   "Will you now or in the future require H-1B sponsorship?",
+                                   "Do you require sponsorship to work for US?"])
+def test_us_visa_wording_needs_a_confirmed_us_job(label):   # ADR-0040: a visa type or "for US" is not a place
+    assert run(sel(label)) == (None, ["q"])
+    assert run(sel(label), job_in_us=True)[0][0] == "No"
 
 
 def test_place_less_authorization_needs_a_confirmed_us_job():   # ADR-0040
@@ -244,8 +252,7 @@ def test_authorization_any_non_us_place_unresolved(label):
 
 
 @pytest.mark.parametrize("label,want", [("Are you legally authorized to work in America?", "Yes"),
-                                        ("Are you authorized to work in the USA for any employer?", "Yes"),
-                                        ("Will you now or in the future require H-1B sponsorship?", "No")])
+                                        ("Are you authorized to work in the USA for any employer?", "Yes")])
 def test_authorization_us_wording_still_answered(label, want):
     assert run(sel(label))[0][0] == want
 

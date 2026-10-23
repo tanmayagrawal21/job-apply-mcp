@@ -654,12 +654,23 @@ def location_is_us(location: str) -> bool:
     return bool(parts) and all(_part_is_us(p) for p in parts)
 
 
-def job_is_us(location: str, countries: Sequence[str] = ()) -> bool:
-    """Structured adapter countries first (exactly ["US"], and no foreign country named in the text); the free-text
-    location heuristic only when the adapter gave no country. Deny-by-default (ADR-0040)."""
-    if countries:
-        return list(dict.fromkeys(countries)) == ["US"] and not question_countries(location or "")[1]
-    return location_is_us(location)
+_MULTI_REGION = re.compile(r"\b(?:americas?|north america|latam|latin america|emea|apac|asia|europe|global|worldwide|"
+                           r"international|anywhere|multiple|several|various|or)\b|[;/|&]", re.IGNORECASE)
+
+
+def job_is_us(location: str, countries: Sequence[str] = (), locations: Sequence[str] = ()) -> bool:
+    """ONE conjunctive, deny-by-default rule (ADR-0040). True only if
+    (a) the structured adapter countries are exactly ["US"] (every location entry parsed; a malformed or country-less
+        entry is "UNCONFIRMED"), AND
+    (b) every available location string (posting location, offices, allLocations, secondaryLocations) is a US place by
+        `location_is_us`, AND
+    (c) no location string names a region or several places (americas, latam, emea, apac, europe, global, worldwide,
+        international, anywhere, multiple, "or", ";", "/", ...).
+    No text fallback: without a structured country the job is not confirmed, and text never overrides structure."""
+    if list(dict.fromkeys(countries)) != ["US"]:
+        return False
+    texts = [t for t in (location, *locations) if str(t or "").strip()]
+    return all(not _MULTI_REGION.search(str(t)) and location_is_us(str(t)) for t in texts)
 
 
 # ADR-0040 (control review): an authorization/sponsorship rule never answers a field whose label, help text or options
@@ -673,15 +684,20 @@ def auth_legal_blocked(f: FormField) -> bool:
     return any(_AUTH_LEGAL_BLOCK.search(normalize(t)) for t in (f.label, *f.options))
 
 
-_US_UPPER = re.compile(r"\bU\.?S\.?(?:A\.?)?(?![A-Za-z])")   # "US", "U.S.", "USA" in capitals; "us" may be the company
-# US-only visa types name the US too ("H-1B sponsorship"); upper case, so "opt in" is not OPT
-_US_VISA_NAMED = re.compile(r"\bH-?1-?B\b|\bSTEM OPT\b|\bOPT\b|\bCPT\b|\bE-?3\b|\bTN (?:visa|status)\b")
+# The US named as the PLACE of the work: "in the US", "within the United States", "in the U.S.A.". Visa examples
+# ("e.g., H-1B") and "work for US" (the company) never count; on an unconfirmed job they leave the field unresolved.
+_US_PLACE = re.compile(r"\b(?:in|within|inside) (?:the )?(?:U\.?S\.?A?\.?(?![A-Za-z])|united states(?: of america)?\b|"
+                       r"america\b)", re.IGNORECASE)
 
 
 def names_us(text: str) -> bool:
-    """The text itself names the United States (or a US-only visa type)."""
-    t = text or ""
-    return bool(_US_UPPER.search(t) or _US_VISA_NAMED.search(t) or _US_IN_LABEL.search(normalize(t)))
+    """The text names the United States as a place ("... to work in the US?"), after example clauses are dropped."""
+    t = _drop_examples(text or "")
+    for m in _US_PLACE.finditer(t):
+        hit = m.group(0)
+        if re.search(r"united states|america", hit, re.IGNORECASE) or re.search(r"U\.?S", hit):   # "US" in capitals only
+            return True
+    return False
 
 
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_in_us: bool = False) -> tuple[bool, Any]:
@@ -690,7 +706,7 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_in_us: bool = 
     core = auth_core(f.label, job_in_us)
     # ADR-0040: the [authorization] facts are US facts. Unless the job is confirmed in the US, only a question that
     # names the US itself is answered; "Will you require sponsorship?" for a Perth/Toronto/Remote job stays unresolved.
-    if core is not None and not job_in_us and not names_us(f.label):
+    if core is not None and not job_in_us and not names_us(core):
         return True, None
     n = normalize(core if core is not None else f.label)
     if core is None:
@@ -939,18 +955,27 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
 # clearance, criminal history) and place (residence, location, relocation, commute, on-site, hybrid, remote, time zone)
 # are facts about the candidate. They are answered by the deterministic rules above or left to the owner; a model
 # never guesses them, whatever the label's canonical key.
-_NEVER_LLM_LEGAL = re.compile(r"export|\bitar\b|\bear\b|\bu ?s persons?\b|citizen|nationalit|green card|permanent resid|"
-                              r"clearance|sanction|embargo|immigra|\bvisas?\b|sponsor|authori[sz]|right to work|"
-                              r"eligible to work|work permit|criminal|convict|felon")
+_NEVER_LLM_LEGAL = re.compile(r"export|\bitar\b|\bear\b|\bu ?s persons?\b|citizen|nationalit|\bnationals?\b|green card|"
+                              r"permanent resid|clearance|sanction|embargo|immigra|\bvisas?\b|sponsor|authori[sz]|"
+                              r"right to work|eligible to work|work permit|work rights|criminal|convict|felon|arrest|"
+                              r"\bf ?1\b|\bh ?1 ?b\b|\bh1b\b|\bopt\b|\bcpt\b|\btn\b|\bj ?1\b|\bo ?1\b|\bl ?1\b|\bead\b|"
+                              r"passport|1324b|debar|lawful|permitted to be employed|public trust")
 _NEVER_LLM_PLACE = re.compile(r"resid|\blocat|\blive\b|\bliving\b|\bbased\b|relocat|commut|\bon ?site\b|\bin office\b|"
                               r"\bin person\b|hybrid|\bremote\b|time ?zones?\b|continental|contiguous|\bzip\b|postal|"
                               r"\bcity\b|\bstate\b|\bcountry\b|\baddress\b|\btravel")
+# extra place wording for SHORT answers only (a textarea essay such as "Where do you see yourself in 5 years?" may still
+# go to the writer; a one-line "Which office would you prefer?" never goes to a model)
+_NEVER_LLM_PLACE_SHORT = re.compile(r"\boffices?\b|\bmetro\b|\bnear\b|\bwhere\b|\bmoving\b|\bmove\b|\bhq\b|"
+                                    r"\bheadquarters\b|\bwork (?:in|from)\b|\barea\b|\bregion\b|\bon campus\b|"
+                                    r"\bcome (?:in|to)\b")
 
 
 def never_llm(f: FormField) -> bool:
     """True for legal-status and place questions (label or options): deterministic rule or owner only."""
     texts = [normalize(f.label), *(normalize(o) for o in f.options)]
-    return any(_NEVER_LLM_LEGAL.search(t) or _NEVER_LLM_PLACE.search(t) for t in texts)
+    if any(_NEVER_LLM_LEGAL.search(t) or _NEVER_LLM_PLACE.search(t) for t in texts):
+        return True
+    return f.kind != FieldKind.textarea and any(_NEVER_LLM_PLACE_SHORT.search(t) for t in texts)
 
 
 @dataclass

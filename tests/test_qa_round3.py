@@ -291,9 +291,7 @@ def test_real_us_sponsorship_labels_are_answered():
                   "Do you require visa sponsorship such as H-1B or TN?",
                   "Will you require immigration sponsorship for work authorization?"]:
         assert auth(label, job_in_us=True) == "No", label
-    for label in [SPONS_EG, SPONS_ETC, "Do you require visa sponsorship such as H-1B or TN?"]:
-        assert auth(label) == "No", label                       # names a US-only visa type
-    assert auth("Will you require immigration sponsorship for work authorization?") is None
+        assert auth(label) is None, label                     # a US visa example is not a place: confirmed job only
     assert auth("Are you authorized to work in the United States?") == "Yes"
 
 
@@ -474,70 +472,94 @@ def test_only_the_last_component_decides():
 
 
 def test_place_less_sponsorship_unresolved_unless_job_confirmed_us():
-    label = "Will you require sponsorship?"
-    for loc in ["Perth, WA", "Toronto, ON", "Remote", ""]:
-        assert auth(label, job_in_us=job_is_us(loc)) is None, loc
-        assert auth("Are you legally authorized to work?", job_in_us=job_is_us(loc)) is None, loc
-    assert auth(label, job_in_us=job_is_us("Remote (US)")) == "No"
-    assert auth("Are you authorized to work in the US?", job_in_us=job_is_us("Perth, WA")) == "Yes"   # names the US
+    for loc, countries in [("Perth, WA", ["AU"]), ("Toronto, ON", ["CA"]), ("Remote", ["US"]), ("", []),
+                           ("Remote (US)", [])]:
+        ok = job_is_us(loc, countries)
+        for label in ["Will you require sponsorship?", "Are you legally authorized to work?",
+                      "Will you require sponsorship (e.g., H-1B)?", "Do you require sponsorship (e.g. H1B, TN, OPT)?",
+                      "Will you require sponsorship (OPT/CPT/STEM OPT)?", "Do you require sponsorship to work for US?"]:
+            assert auth(label, job_in_us=ok) is None, (loc, label)
+    assert auth("Will you require sponsorship?", job_in_us=job_is_us("Remote (US)", ["US"])) == "No"
+    assert auth("Are you authorized to work in the US?", job_in_us=job_is_us("Perth, WA", ["AU"])) == "Yes"
 
 
-def test_structured_country_is_the_primary_signal():
-    assert job_is_us("Cambridge, MA", ["US"]) and job_is_us("Remote", ["US"]) and job_is_us("", ["US"])
-    assert not job_is_us("Perth, WA", ["AU"]) and not job_is_us("Seattle, WA", ["AU"])
-    assert not job_is_us("Toronto", ["CA"]) and not job_is_us("New York, NY", ["US", "CANADA"])
-    assert not job_is_us("London, UK", ["US"])                        # the text names another country
-    assert job_is_us("Seattle, WA", []) and not job_is_us("Cambridge, MA", [])   # fallback heuristic
+def test_job_is_us_is_one_conjunctive_rule():
+    assert job_is_us("New York, NY", ["US"]) and job_is_us("Remote - US", ["US"]) and job_is_us("", ["US"])
+    assert job_is_us("Seattle, WA", ["US"], ["Austin, TX", "Long Beach, California, United States"])
+    # (a) structured countries exactly ["US"]; no text fallback, text never overrides structure
+    for countries in ([], ["UNCONFIRMED"], ["US", "UNCONFIRMED"], ["AU"], ["CA"], ["US", "CANADA"]):
+        assert not job_is_us("New York, NY", countries), countries
+    # (b) every location string must be a US place
+    for loc, extra in [("Cambridge, MA", []), ("London, UK", []), ("New York, NY", ["Toronto"]),
+                       ("New York, NY", ["Toronto, ON"]), ("Remote", []), ("New York, Toronto, London", [])]:
+        assert not job_is_us(loc, ["US"], extra), (loc, extra)
+    # (c) regions and several places
+    for loc in ["US or LATAM", "Remote - Americas", "Remote - EMEA", "Multiple Locations", "New York, NY; Toronto",
+                "New York / Toronto", "Global", "Worldwide (US)", "Remote - North America", "Anywhere in the US",
+                "International", "US & Canada"]:
+        assert not job_is_us(loc, ["US"]), loc
 
 
 def test_adapters_extract_structured_countries():
     from job_apply_mcp.platforms.ashby import AshbyAdapter
     from job_apply_mcp.platforms.greenhouse import GreenhouseAdapter
     from job_apply_mcp.platforms.lever import LeverAdapter
+
+    def us(p):
+        return job_is_us(p.location, p.countries, p.locations)
+
     lv = LeverAdapter(None, env={})
-    d = {"id": "x1", "text": "Engineer", "categories": {"location": "Springfield"}, "country": "US"}
-    assert lv._to_posting("acme", d, with_description=False).countries == ["US"]
-    assert lv._to_posting("acme", d | {"country": "AU"}, with_description=False).countries == ["AU"]
-    assert lv._to_posting("acme", {k: v for k, v in d.items() if k != "country"}, with_description=False).countries == []
-    multi = d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY", "Toronto, ON"]}}
-    pm = lv._to_posting("acme", multi, with_description=False)
-    assert not job_is_us(pm.location, pm.countries)
-    no_country = {k: v for k, v in multi.items() if k != "country"}
-    pn = lv._to_posting("acme", no_country, with_description=False)
-    assert pn.countries == ["UNCONFIRMED"] and not job_is_us(pn.location, pn.countries)
-    same = d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY"]}}
-    ps = lv._to_posting("acme", same, with_description=False)
-    assert job_is_us(ps.location, ps.countries)
+    d = {"id": "x1", "text": "Engineer", "categories": {"location": "New York, NY"}, "country": "US"}
+    assert us(lv._to_posting("acme", d, with_description=False))
+    for bad in [d | {"country": "AU"}, {k: v for k, v in d.items() if k != "country"},
+                d | {"categories": {"location": "New York, NY", "allLocations": ["New York, NY", "Toronto, ON"]}},
+                {"id": "x1", "text": "E", "categories": {"location": "New York, NY",
+                                                        "allLocations": ["New York, NY", "Toronto, ON"]}},
+                d | {"categories": {"allLocations": ["New York, NY"]}},
+                d | {"categories": {"location": "New York, NY", "allLocations": [{"name": "Toronto"}]}},
+                d | {"categories": {"location": "US or LATAM"}}, d | {"categories": {"location": "Remote - EMEA"}},
+                d | {"categories": {"location": "Multiple Locations"}}]:
+        assert not us(lv._to_posting("acme", bad, with_description=False)), bad
+    assert us(lv._to_posting("acme", d | {"categories": {"location": "New York, NY",
+                                                        "allLocations": ["new york, ny"]}}, with_description=False))
+
     ab = AshbyAdapter(None, env={})
-    j = {"id": "x2", "title": "Engineer", "location": "Springfield",
-         "address": {"postalAddress": {"addressCountry": "United States"}},
-         "secondaryLocations": [{"address": {"postalAddress": {"addressCountry": "USA"}}}]}
-    assert ab._to_posting("acme", j, with_description=False).countries == ["US"]
-    j2 = j | {"secondaryLocations": [{"address": {"postalAddress": {"addressCountry": "Canada"}}}]}
-    assert ab._to_posting("acme", j2, with_description=False).countries == ["CANADA", "US"]
-    j5 = j | {"location": "New York, NY", "secondaryLocations": [{"location": "Remote"}, {"address": None}]}
-    assert not job_is_us(j5["location"], ab._to_posting("acme", j5, with_description=False).countries)
-    j3 = j | {"location": "New York, NY", "secondaryLocations": [{"location": "Toronto"}]}   # secondary without a country
-    p3 = ab._to_posting("acme", j3, with_description=False)
-    assert not job_is_us(p3.location, p3.countries)
-    j6 = {"id": "x4", "title": "E", "location": "New York, NY", "secondaryLocations": [{"location": "Toronto"}]}
-    p6 = ab._to_posting("acme", j6, with_description=False)                # no structured country anywhere
-    assert p6.countries == ["UNCONFIRMED"] and not job_is_us(p6.location, p6.countries)
-    p4 = ab._to_posting("acme", {"id": "x3", "title": "E", "location": "New York, NY"}, with_description=False)
-    assert p4.countries == [] and job_is_us(p4.location, p4.countries)                        # single: text fallback
-    assert not job_is_us(p3.location, ab._to_posting("acme", j2, with_description=False).countries)
+    usa = {"postalAddress": {"addressCountry": "United States"}}
+    j = {"id": "x2", "title": "Engineer", "location": "New York, NY", "address": usa,
+         "secondaryLocations": [{"location": "San Francisco, CA", "address": {"postalAddress": {"addressCountry": "USA"}}}]}
+    assert us(ab._to_posting("acme", j, with_description=False))
+    for bad in [j | {"secondaryLocations": [{"location": "Toronto", "address": {"postalAddress":
+                                                                                 {"addressCountry": "Canada"}}}]},
+                j | {"secondaryLocations": [{"location": "Toronto"}]}, j | {"secondaryLocations": ["Toronto"]},
+                j | {"secondaryLocations": [{}]}, j | {"secondaryLocations": "Toronto"}, j | {"address": None},
+                j | {"location": "New York, NY; Toronto"}, j | {"location": "New York, Toronto, London"},
+                {"id": "x3", "title": "E", "location": "New York, NY"}]:
+        assert not us(ab._to_posting("acme", bad, with_description=False)), bad
+
     gh = GreenhouseAdapter(None, env={})
-    g = {"id": 1, "title": "Engineer", "location": {"name": "Springfield"},
-         "offices": [{"location": "Springfield, Illinois, United States"}]}
-    assert gh._to_posting("acme", g, with_description=False).countries == ["US"]
-    g2 = g | {"offices": [{"location": "Springfield, Illinois, United States"}, {"location": "Perth, WA"}]}
-    p2 = gh._to_posting("acme", g2 | {"location": {"name": "New York, NY"}}, with_description=False)
-    assert not job_is_us(p2.location, p2.countries)                   # a non-US office never falls back to the text
-    for offices in ([{"location": "New York, New York, United States"}, {"location": "London, United Kingdom"}],
-                    [{"location": "London, United Kingdom"}], [{"location": "New York, NY"}, {"location": "London"}]):
-        pg = gh._to_posting("acme", g | {"location": {"name": "New York, NY"}, "offices": offices},
-                            with_description=False)
-        assert not job_is_us(pg.location, pg.countries), offices
-    p1 = gh._to_posting("acme", g | {"location": {"name": "New York, NY"}, "offices": [{"location": "NYC"}]},
-                        with_description=False)
-    assert p1.countries == [] and job_is_us(p1.location, p1.countries)                        # single: text fallback
+    g = {"id": 1, "title": "Engineer", "location": {"name": "Long Beach, CA"},
+         "offices": [{"name": "HQ", "location": "Long Beach, California, United States"}]}
+    assert us(gh._to_posting("acme", g, with_description=False))
+    for bad in [g | {"offices": [{"location": "New York, New York, United States"}, {"location": "London, United Kingdom"}]},
+                g | {"offices": [{"location": "Long Beach, California, United States"}, "Toronto"]},
+                g | {"offices": [{"location": "Long Beach, California, United States"}, {"location": None}]},
+                g | {"offices": [{"name": "Toronto", "location": None}]}, g | {"offices": [{"location": "Toronto"}]},
+                g | {"offices": []}, g | {"location": {"name": "New York, Toronto"}},
+                g | {"location": {"name": "Remote - Americas"}}, g | {"offices": "Toronto"}]:
+        assert not us(gh._to_posting("acme", bad, with_description=False)), bad
+
+def test_never_llm_covers_control_list():
+    legal = ["Have you ever been arrested?", "Are you an F-1 student?", "H-1B status?", "Do you require an H1B transfer?",
+             "Do you have STEM OPT?", "Are you on a TN?", "When does your OPT end?", "Are you a dual national?",
+             "Do you have a valid passport?", "Are you a protected individual under 8 U.S.C. 1324b?",
+             "Have you been debarred by any agency?", "Are you lawfully permitted to be employed?",
+             "Do you have work rights in Australia?"]
+    place = ["Can you work in Toronto?", "Are you willing to work in NYC?",
+             "Can you come to our SF office 3 days a week?", "Which office would you prefer?",
+             "Which metro area are you in?", "Are you near Boston?", "Where would you work from?",
+             "Are you open to moving?"]
+    for label in legal + place:
+        assert never_llm(F("k", label, FieldKind.text, max_length=80)), label
+    assert never_llm(F("k", "Do you have a valid passport?", FieldKind.textarea))          # legal: any kind
+    assert not never_llm(F("k", "Where do you see yourself in five years?", FieldKind.textarea))
+    assert not never_llm(F("k", "Why do you want to work at Acme Robotics?", FieldKind.text))

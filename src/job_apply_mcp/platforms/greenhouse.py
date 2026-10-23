@@ -54,24 +54,30 @@ class GreenhouseAdapter(BaseAdapter):
                  url=j.get("absolute_url") or f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
                  apply_url=f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
                  posted_at=self._posted(j),
-                 countries=self._countries(j))
+                 countries=self._countries(j), locations=self._locations(j))
 
     @staticmethod
     def _posted(j: dict) -> str | None:
         return iso_date(j.get("updated_at") or j.get("first_published"))
 
     def _countries(self, j: dict) -> list[str]:
-        """["US"] only when every office's location ends in an explicit United States name (ADR-0040). One office that
-        does not -> unknown ([], text fallback); several offices where any does not -> unconfirmed (never US)."""
-        offices = [o for o in j.get("offices") or [] if isinstance(o, dict)]
-        tails = [str(o.get("location") or "").rsplit(",", 1)[-1] for o in offices]
-        codes = [self.country_code(t) for t in tails]
-        if codes and all(c == "US" for c in codes):
-            return ["US"]
-        from ..apply.mapper import question_countries  # lazy: platforms never import apply at module load
-        if len(offices) > 1 or any(question_countries(str(o.get("location") or ""))[1] for o in offices):
-            return ["UNCONFIRMED"]                              # several offices, or a known foreign one
-        return []
+        """"US" per office only when its location ends in an explicit United States name (ADR-0040); any non-dict,
+        malformed or other office is "UNCONFIRMED". No offices -> [] (not confirmed; there is no text fallback)."""
+        raw = j.get("offices") or []
+        if not isinstance(raw, list):
+            return ["UNCONFIRMED"]
+        out: list[str] = []
+        for o in raw:
+            loc = o.get("location") if isinstance(o, dict) else None
+            tail = loc.rsplit(",", 1)[-1] if isinstance(loc, str) else ""
+            out.append("US" if self.country_code(tail) == "US" else "UNCONFIRMED")
+        return sorted(set(out))
+
+    @staticmethod
+    def _locations(j: dict) -> list[str]:
+        raw = j.get("offices") or []
+        return [str(o.get("location")) for o in (raw if isinstance(raw, list) else [])
+                if isinstance(o, dict) and str(o.get("location") or "").strip()]
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:

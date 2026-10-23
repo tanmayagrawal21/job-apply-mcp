@@ -67,14 +67,17 @@ A QA round (issues #47, #48, #51) found:
   ambiguous code (CA, IN, DE, LA, WA, MI, ...) counts only with a city from a small explicit US city table, and
   well-known shared city names (Perth, Melbourne, Sydney, London, Paris, Birmingham, Cambridge, Hamilton, Victoria,
   Vancouver, Kingston) need an explicit US marker. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
-- **Confirmed-US job.** The `[authorization]` facts are US facts. Unless the job is confirmed in the US, an
-  authorization/sponsorship question is answered only when the label itself names the US ("US", "U.S.", "United
-  States", or a US-only visa type such as H-1B, OPT, CPT, E-3); a place-less "Will you require sponsorship?" stays
-  unresolved. Confirmation (`job_is_us`) uses STRUCTURED adapter metadata first: `Posting.countries` from Lever
-  `country`, Ashby `address.postalAddress.addressCountry` (primary and secondary locations) and Greenhouse offices
-  whose location ends in "United States"; exactly ["US"] (and no foreign country in the text) confirms. A location without a country among several (Lever allLocations, Ashby secondaryLocations, Greenhouse offices) makes the set unconfirmed, never US. Only when the
-  adapter gives no country does the free-text heuristic decide, and there only the LAST comma component counts ("US"
-  marker, full state name, or "City, ST"); "(US)" parentheticals are kept as a US marker, others are dropped.
+- **Confirmed-US job (one conjunctive rule).** The `[authorization]` facts are US facts. `job_is_us` is True only if
+  (a) the structured adapter countries are exactly ["US"], with every location entry parsed (Lever `country` +
+  `allLocations`, Ashby `addressCountry` of the primary and every secondary location, Greenhouse every office
+  location ending in "United States"); a non-dict, malformed, country-less or additional entry is "UNCONFIRMED";
+  (b) every available location string (posting location, office locations, allLocations, secondaryLocations) passes
+  `location_is_us` (last comma component decides; "(US)" kept as a marker); and (c) no location string names a
+  region or several places (americas, latam, emea, apac, europe, global, worldwide, international, anywhere,
+  multiple, "or", ";", "/", "&"). There is no text fallback and text never overrides a structured value.
+  Unless the job is confirmed, an authorization/sponsorship question is answered only when it names the US as the
+  PLACE of work ("in the US", "within the United States"), after visa example clauses are dropped; "(e.g., H-1B)",
+  "OPT/CPT" and "work for US" alone leave it unresolved.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an
@@ -82,7 +85,9 @@ A QA round (issues #47, #48, #51) found:
 - **Never-LLM questions (#58 and export non-determinism).** `never_llm` (label or options) covers export control,
   ITAR/EAR, "U.S. person", citizenship, nationality, immigration, visa, sponsorship, authorization, clearance and
   criminal history, plus residence, location, relocation, commute, on-site, in-office, hybrid, remote, time zone and
-  address. The engine sends these fields to neither the short-field model nor the writer; they are answered by
+  address; plus arrest, visa types (F-1, H-1B, OPT, CPT, TN, J-1, O-1, L-1, EAD), nationals, passport, 1324b,
+  debarment, "lawful(ly)" and work rights; and, for short answers, office, metro, near, where, move/moving, HQ,
+  "work in/from", area and region. The engine sends these fields to neither the short-field model nor the writer; they are answered by
   deterministic rules or become owner tasks.
 - **Residence.** "Do you (currently) reside/live/are you located/based in the (continental) United States?" is answered
   from the profile country; "continental"/"contiguous" also needs `contact.region` (Alaska, Hawaii and territories ->
