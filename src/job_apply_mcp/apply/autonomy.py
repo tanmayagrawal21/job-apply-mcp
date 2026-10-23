@@ -8,12 +8,15 @@ Levels (settings `answers.autonomy`, trusted user config only; see config._RELAX
                   - EEO / demographic: "decline to self-identify" when offered, else blank
                   - optional free text: blank (as before)
                 everything else stays unresolved
-  infer         safe_default plus ordinary capability / experience choice questions ("comfortable making cold
-                calls?", "experience with X?"), answered by the LLM from the resume and profile with a conservative
-                prompt: Yes only when the facts clearly support it, otherwise the honest No or the lowest option
+  infer         safe_default plus an ALLOWLIST of skill / experience choice questions about a tool, technology,
+                language, domain or skill ("experience with X?", "proficient in X?"), answered by the LLM from the
+                resume and profile with a conservative prompt: Yes only when the facts clearly support it, otherwise
+                the honest No or the lowest option. Willingness, ability, availability, location, consent and terms
+                questions are never inferred
 
-Hard limits apply at EVERY level and are checked first: authorization, sponsorship, citizenship, visa; criminal history,
-background checks, drug tests; attestations and certifications; legal agreements; salary; start date, relocation and
+Hard limits apply at EVERY level and are checked first: authorization, sponsorship, citizenship, visa; identity
+(E-Verify, I-9); criminal history, background checks, drug tests; screening (polygraph, psychological, physical);
+accommodation; recording / social media; employment terms (trial, unpaid, contract, government, firearms); attestations and certifications; legal agreements; salary; start date, relocation and
 location facts. Those fields stay structured-facts-only or unresolved.
 
 Every assumed answer carries `assumed=True` and its rule or rationale (plan, evidence, run report). Assumptions are
@@ -44,8 +47,10 @@ from .mapper import (
     eeo_option_ok,
     is_auth_question,
     is_single_permission_ask,
+    named_countries,
     never_llm_legal_place,
     normalize,
+    question_countries,
     tokens,
 )
 from .salary import is_salary_field
@@ -68,7 +73,20 @@ _HARD: list[tuple[str, re.Pattern[str]]] = [
     ("salary", re.compile(r"salary|compensation|\bpay\b|\bwages?\b|hourly rate|\brate expectation|\bbonus\b|\bequity\b")),
     ("start_date", re.compile(r"\bstart\b|notice period|available to (?:begin|join)|when can you|join date|\bbegin\b")),
     ("relocation_location", re.compile(r"relocat|commut|on ?site|in office|in person|hybrid|\bremote\b|"
-                                       r"\bvisit|\btravel|\boffices?\b|\bmetro\b|time ?zone|\bwhere\b")),
+                                       r"\bvisit|\btravel|\boffices?\b|\bmetro\b|time ?zone|\bwhere\b|client site|"
+                                       r"customer site|abroad|overseas|\binternational\b")),
+    # control review of #75: identity, screening, medical / ADA, privacy, unpaid and employment terms
+    ("identity", re.compile(r"e ?verify|\bi ?9\b|proof of identity|\bidentity\b|\bidentification\b|\bpassport\b|"
+                            r"\bssn\b|social security")),
+    ("screening", re.compile(r"polygraph|lie detector|psycholog|personality test|physical (?:exam|test|evaluation|"
+                             r"assessment|requirements?)|\bphysical\b|\bmedical\b|\bvaccin|\bscreening\b")),
+    ("disability_accommodation", re.compile(r"accommodat|essential functions|\bdisab")),
+    ("privacy_recording", re.compile(r"record(?:ed|ing|ings)?\b|\bcamera\b|\bon video\b|video (?:interview|call)s?|"
+                                     r"social media|\bmonitored\b|keystroke|surveillance|\bbiometric|"
+                                     r"(?:your|personal) data\b")),
+    ("employment_terms", re.compile(r"trial period|\bunpaid\b|for free|without pay|\bvolunteer|\bcontract\w*|"
+                                    r"\bfreelanc|\b1099\b|\bw ?2\b|probation|government|\bfederal\b|\bmilitary\b|"
+                                    r"firearm|weapon|\bgun\b|\bshifts?\b|weekends?|overtime|\bnights?\b|on ?call\b")),
 ]
 # plain opt-in wording a clean contact-permission ask may carry ("I agree to receive ...", "By checking this box")
 _CONSENT_WORDS = re.compile(r"\bi (?:agree|accept)\b|\bby (?:checking|selecting|clicking|ticking)\b")
@@ -94,6 +112,8 @@ def hard_limit(f: FormField, *, contact: bool = False) -> str | None:
     for name, rx in _HARD:
         if any(rx.search(_CONSENT_WORDS.sub(" ", t) if contact else t) for t in texts):
             return name
+    if any(named_countries(t) or question_countries(t)[1] for t in (f.label, *f.options)):
+        return "relocation_location"                 # a country or region named anywhere: a place fact
     if never_llm_legal_place(f):                     # ADR-0040 legal-status / place wording (anchored list)
         return "relocation_location" if not _HARD[0][1].search(texts[0]) else "authorization"
     return None
@@ -202,38 +222,59 @@ def referral_default(f: FormField, prefs: Sequence[str]) -> Any | None:
     return None if other is None else [other] if f.kind == FieldKind.multiselect else other
 
 
-# ---- infer: ordinary capability / experience questions --------------------------------------------------------
+# ---- infer: skill / experience questions (allowlist) ----------------------------------------------------------
+# ALLOWLIST (control review of #75): only skill / experience questions whose object X is a tool, technology, language,
+# domain or skill. Willingness, ability, availability, location, consent and terms questions are never inferred.
+_X = r"(?P<x>[a-z0-9][a-z0-9 ]{0,48})"
 _CAP = [re.compile(p) for p in (
-    r"(?:are|would) you (?:be )?(?:comfortable|able|willing|open|happy|ok|okay|confident) (?:with |to |in |at )?[a-z0-9 ]+",
     (r"(?:do|does) you have (?:any )?(?:prior |previous |professional |hands on |practical |working |direct )?"
-     r"(?:experience|familiarity|exposure|knowledge|proficiency|background|expertise) (?:with|in|using|of|on|doing) [a-z0-9 ]+"),
-    (r"(?:have you|did you) (?:ever |previously )?(?:used|worked (?:with|on|in)|built|developed|managed|led|written|"
-     r"deployed|designed|run|operated|shipped|maintained|done|made|sold|programmed|taught|mentored) [a-z0-9 ]+"),
-    r"how (?:comfortable|familiar|proficient|experienced|skilled) are you (?:with|in|using|at|doing) [a-z0-9 ]+",
-    (r"(?:please )?(?:rate|select|indicate|choose|what is) your (?:level of |current )?(?:experience|proficiency|"
-     r"familiarity|comfort|expertise|skill)(?: level)? (?:with|in|using|of|at) [a-z0-9 ]+"),
-    r"(?:are you|do you consider yourself) (?:proficient|experienced|familiar|skilled|fluent|comfortable) (?:with|in|at|using) [a-z0-9 ]+",
-    r"(?:do|can) you (?:know|use|code in|program in|write|speak|read) [a-z0-9 ]+",
+     rf"(?:experience|familiarity|exposure|proficiency|expertise) (?:with|in|using) {_X}"),
+    rf"(?:are you|do you consider yourself) (?:proficient|experienced|familiar|skilled) (?:with|in|at|using) {_X}",
+    rf"(?:are you|how) comfortable (?:are you )?using {_X}",
+    rf"how (?:proficient|familiar|experienced) are you (?:with|in|using) {_X}",
+    rf"have you (?:ever |previously )?(?:used|worked with|programmed in|developed (?:with|in)|built (?:with|in)) {_X}",
+    (r"(?:do you have )?(?:at least )?(?:\d+ )?(?:or more )?(?:years? of )(?:professional |hands on )?experience "
+     rf"(?:with|in|using) {_X}"),
+    rf"how many years of (?:professional |hands on )?experience do you have (?:with|in|using) {_X}",
+    (r"(?:please )?(?:rate your|what is your(?: level of)?) (?:proficiency|experience|familiarity|skill level|expertise)"
+     rf"(?: level)? (?:with|in|using) {_X}"),
 )]
-# commitments and conditions are not capabilities: schedules, travel, physical requirements, licences, relatives
+# X must be a short noun phrase naming a tool / technology / skill: no person, place, process, term or activity words
+_X_DENY = re.compile(
+    r"\b(?:be|being|been|work|working|works|travel\w*|relocat\w*|handl\w*|sign\w*|shar\w*|submit\w*|undergo\w*|"
+    r"pass\w*|tak\w*|provid\w*|report\w*|perform\w*|commut\w*|record\w*|camera|free|unpaid|trial|contract\w*|"
+    r"government|firearm\w*|weapon\w*|client|clients|customer|customers|site|sites|people|team|teams|manag\w*|"
+    r"you|your|our|us|me|my|this|that|these|role|position|job|company|employer|employers|cold|call|calls|calling|"
+    r"phone|sales|selling|lift\w*|driv\w*|licen[cs]\w*|vehicle\w*|shift\w*|weekend\w*|night\w*|hours|overtime|"
+    r"remote|office|onsite|site|abroad|overseas|europe|country|countries|state|city|move|moving|any|other|such|"
+    r"environment|setting|conditions?|pressure|deadlines?|stress|fast|paced|ambiguity|change)\b")
+# commitments and conditions are not capabilities (defence in depth on the whole label)
 _INFER_EXCLUDE = re.compile(r"\bweekends?\b|\bshifts?\b|overtime|\bnights?\b|\bhours\b|schedule|\bon ?call\b|\blift\b|"
                             r"pounds|\blbs\b|\bdriv|licen[cs]|vehicle|insurance|\bage\b|\b18\b|\b21\b|relative|related to|"
                             r"family|conflict|bond|\bvaccin|covid|\bmedical\b|\bpregnan|religio|union|polic(?:y|ies)|"
-                            r"privacy|\bai\b|\bllm|chatgpt|generative|contact|reach|references?")
+                            r"privacy|\bai\b|\bllm|chatgpt|generative|contact|reach|references?|willing|\bable\b|"
+                            r"\bopen\b|availab|consent|agree|terms")
 
 
 def capability_question(f: FormField) -> bool:
-    """An ordinary capability/experience choice question that the infer level may answer. Deny by default: the whole
-    normalized label must match one anchored template, and nothing legal, place, consent, EEO or sensitive may appear."""
+    """An ordinary skill/experience choice question the infer level may answer. ALLOWLIST: the whole normalized label
+    matches one anchored skill template, its object is a short tool/technology/skill phrase (<= 4 words, no denied
+    word), and nothing legal, place, consent, EEO, hard-limit or sensitive appears anywhere."""
     from ..persona.guard import blocked_label
     if not _choice(f) or f.kind == FieldKind.multiselect:
         return False
     n = normalize(f.label)
-    if (not n or hard_limit(f) is not None or canonical_key(f.label) is not None or eeo_field(f)
-            or never_llm_legal_place(f) or blocked_label(f.label)
+    ck = canonical_key(f.label)
+    if (not n or hard_limit(f) is not None or (ck is not None and ck != "years_experience") or eeo_field(f)
+            or never_llm_legal_place(f) or blocked_label(re.sub(r"\b(?:how many )?years of\b", " ", f.label))
             or _INFER_EXCLUDE.search(n) or _ASKS.search(n) or any(_INFER_EXCLUDE.search(normalize(o)) for o in f.options)):
         return False
-    return any(t.fullmatch(n) for t in _CAP)
+    for t in _CAP:
+        m = t.fullmatch(n)
+        if m:
+            x = m.group("x").strip()
+            return 1 <= len(x.split()) <= 4 and not _X_DENY.search(x)
+    return False
 
 
 _LOW_OPTION = re.compile(r"^(?:no|none|never|not at all)\b|\bno (?:experience|exposure|knowledge|familiarity)\b|"

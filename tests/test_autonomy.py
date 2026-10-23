@@ -24,6 +24,7 @@ def form(ref=POSTING.ref):
         F("q_call", "May we call you about your application?", FieldKind.boolean),
         F("q_cold", "Are you comfortable making cold calls?", FieldKind.select, options=YN),
         F("q_rust", "Do you have experience with Rust?", FieldKind.select, options=YN),
+        F("q_k8s", "Do you have experience with Kubernetes?", FieldKind.select, options=YN),
         F("q_vet", "Veteran status", FieldKind.select, options=VET),
         F("q_race", "Race", FieldKind.text, required=False),
         F("q_spons", "Will you now or in the future require visa sponsorship?", FieldKind.select, options=YN),
@@ -67,7 +68,7 @@ async def test_strict_is_unchanged_nothing_assumed(tmp_path):
     out = await engine("strict", model(q_cold=("Yes", 0.99)), tmp_path=tmp_path).plan(POSTING.ref)
     a = got(out)
     assert not any(x.assumed for x in a.values()) and "assumed" not in out.compact()
-    for k in ("q_contact", "q_call", "q_cold", "q_rust", "q_vet", "q_hear", *HARD):
+    for k in ("q_contact", "q_call", "q_cold", "q_rust", "q_k8s", "q_vet", "q_hear", *HARD):
         assert k in out.plan.unresolved and k not in a
     assert not (tmp_path / "evidence").exists()
 
@@ -82,7 +83,7 @@ async def test_safe_default_declines_contact_and_eeo_and_uses_referral_default(t
     assert a["q_vet"].value == "I don't wish to answer" and a["q_vet"].source == "assumed:eeo_decline"
     assert a["q_hear"].value == "Job board" and a["q_hear"].source == "assumed:referral_default"
     assert "q_race" not in a and "q_note" not in a                            # optional free text stays blank
-    for k in ("q_cold", "q_rust", *HARD):                                     # capability is infer-only
+    for k in ("q_cold", "q_rust", "q_k8s", *HARD):                            # skills are infer-only
         assert k not in a and k in out.plan.unresolved
 
 
@@ -146,31 +147,34 @@ def test_eeo_without_decline_option_is_left_blank():
 
 # ---- infer -------------------------------------------------------------------------------------------------------
 async def test_infer_answers_capability_conservatively(tmp_path):
-    r = model(q_cold=("Yes", 0.99), q_rust=("Yes", 0.95))
+    r = model(q_cold=("Yes", 0.99), q_rust=("Yes", 0.95), q_k8s=("Yes", 0.99))
     out = await engine("infer", r, tmp_path=tmp_path).plan(POSTING.ref)
     a = got(out)
-    # the resume says nothing about cold calls: a confident Yes still becomes the honest No
-    assert a["q_cold"].value == "No" and a["q_cold"].assumed and a["q_cold"].source == "assumed:infer"
-    assert "not clearly supported" in a["q_cold"].rationale
+    # the resume says nothing about Kubernetes: a confident Yes still becomes the honest No
+    assert a["q_k8s"].value == "No" and a["q_k8s"].assumed and a["q_k8s"].source == "assumed:infer"
+    assert "not clearly supported" in a["q_k8s"].rationale
+    # a willingness / activity question is never inferred (control review): it stays with the owner
+    assert "q_cold" not in a and "q_cold" in out.plan.unresolved
     # the resume lists Rust: Yes is kept, with the model's confidence and rationale recorded
     assert a["q_rust"].value == "Yes" and a["q_rust"].confidence == 0.95 and a["q_rust"].rationale == "fictional"
     # everything safe_default does still happens
     assert a["q_contact"].value == "No" and a["q_vet"].value == "I don't wish to answer"
     prompt = next(p for c, p in r.calls if "ONLY when the facts clearly" in p)
-    assert "cold calls" in prompt and "sponsorship" not in prompt and "felony" not in prompt
+    assert "Kubernetes" in prompt and "cold calls" not in prompt and "sponsorship" not in prompt
+    assert "felony" not in prompt
     for k in HARD:                                                              # hard limits: never decided
         assert k not in a and k in out.plan.unresolved
 
 
 async def test_infer_low_confidence_yes_becomes_no():
-    out = await engine("infer", model(q_cold=("No", 0.9), q_rust=("Yes", 0.4))).plan(POSTING.ref)
+    out = await engine("infer", model(q_k8s=("No", 0.9), q_rust=("Yes", 0.4))).plan(POSTING.ref)
     a = got(out)
-    assert a["q_rust"].value == "No" and a["q_cold"].value == "No"
+    assert a["q_rust"].value == "No" and a["q_k8s"].value == "No"
 
 
 async def test_infer_without_a_model_leaves_capability_unresolved():
     out = await engine("infer").plan(POSTING.ref)
-    assert "q_cold" in out.plan.unresolved and got(out)["q_contact"].value == "No"
+    assert "q_rust" in out.plan.unresolved and got(out)["q_contact"].value == "No"
 
 
 @pytest.mark.parametrize("level", ["strict", "safe_default", "infer"])
@@ -197,14 +201,14 @@ async def test_hard_limits_never_assumed_at_any_level(level, label):
 
 # ---- labelling: plan, evidence ------------------------------------------------------------------------------------
 async def test_assumed_answers_labelled_in_plan_and_evidence(tmp_path):
-    out = await engine("infer", model(q_cold=("Yes", 0.99)), tmp_path=tmp_path).plan(POSTING.ref)
+    out = await engine("infer", model(q_k8s=("Yes", 0.99)), tmp_path=tmp_path).plan(POSTING.ref)
     c = out.compact()
     assert c["assumed"]["q_contact"]["rule"] == "assumed:decline_contact_permission"
-    assert c["assumed"]["q_cold"]["confidence"] == 0.99 and "why" in c["assumed"]["q_cold"]
+    assert c["assumed"]["q_k8s"]["confidence"] == 0.99 and "why" in c["assumed"]["q_k8s"]
     assert out.plan.audit["assumed"]["q_hear"]["rule"] == "assumed:referral_default"
     ev = list((tmp_path / "evidence").glob("*/assumed.json"))
     rows = {r["key"]: r for r in json.loads(ev[0].read_text())["assumed"]}
-    assert rows["q_contact"]["assumed"] is True and rows["q_cold"]["rationale"]
+    assert rows["q_contact"]["assumed"] is True and rows["q_k8s"]["rationale"]
     assert "first_name" not in rows
 
 
@@ -317,11 +321,11 @@ def test_setup_wizard_asks_and_writes_autonomy(tmp_path):
     ("strict", set()),
     ("safe_default", {"assumed.contact.email", "assumed.contact.phone", "assumed.referral_source"}),
     ("infer", {"assumed.contact.email", "assumed.contact.phone", "assumed.referral_source",
-               "assumed.q:are you comfortable making cold calls", "assumed.q:do you have experience with rust"}),
+               "assumed.q:do you have experience with kubernetes", "assumed.q:do you have experience with rust"}),
 ])
 async def test_pattern_promotion_at_each_level(level, kinds):
     db = ProfileDB(":memory:")
-    e = engine(level, model(q_cold=("Yes", 0.99), q_rust=("Yes", 0.9)), gaps=db, answers__promote_after=2)
+    e = engine(level, model(q_k8s=("Yes", 0.99), q_rust=("Yes", 0.9)), gaps=db, answers__promote_after=2)
     for i in (1, 2):
         out = await e.plan(f"greenhouse:acme:{i}")
     assert {g["gap"] for g in out.profile_gaps if g.get("gap")} == kinds
@@ -336,7 +340,7 @@ async def test_run_report_labels_assumed_answers_at_each_level(tmp_path, level):
         async def get_form(self, ref):
             f = await super().get_form(ref)
             f.fields += [F("q_contact", "Can we email or contact you with updates?", FieldKind.select, options=YN),
-                         F("q_cold", "Are you comfortable making cold calls?", FieldKind.select, options=YN)]
+                         F("q_cold", "Do you have experience with Kubernetes?", FieldKind.select, options=YN)]
             return f
     r, _, _ = make(tmp_path, adapter=A(), router=model(q_cold=("Yes", 0.99)), answers__autonomy=level)
     url = "https://boards.greenhouse.io/acme/jobs/1"
@@ -362,3 +366,74 @@ async def test_compound_permission_labels_are_never_assumed(level, label):
                     router=model(q=("Yes", 0.99)), gates=FakeGates(), store=FakeStore())
     out = await e.plan(POSTING.ref)
     assert "q" in out.plan.unresolved and "q" not in got(out)
+
+
+# control review of #75: infer is an allowlist; these must stay unresolved at infer (and every level)
+CONTROL = [
+    "Are you able to pass an E-Verify check?", "Are you able to provide proof of identity?",
+    "Are you willing to submit to a polygraph?", "Are you willing to take a lie detector test?",
+    "Are you willing to undergo a psychological evaluation?", "Are you able to pass a physical exam?",
+    "Are you able to perform the essential functions with or without accommodation?",
+    "Are you open to working in Europe?", "Are you willing to report to the client site?",
+    "Are you willing to be recorded during interviews?", "Are you willing to share social media accounts?",
+    "Are you comfortable being on camera?", "Are you willing to work for free during a trial period?",
+    "Are you open to a contract-to-hire arrangement?", "Are you willing to work under a government contract?",
+    "Are you comfortable handling firearms?", "Are you comfortable making cold calls?",
+    "Are you willing to travel to client offices?", "Are you willing to relocate to Canada?",
+    "Do you have experience working in Germany?", "Are you comfortable working unpaid overtime?",
+    "Do you have experience with working night shifts?", "Have you used our product before?",
+    "Do you have experience managing people?", "Are you comfortable using your personal phone for work?",
+]
+
+
+@pytest.mark.parametrize("label", CONTROL)
+def test_control_labels_are_never_capability_questions(label):
+    assert not autonomy.capability_question(F("q", label, FieldKind.select, options=YN))
+
+
+@pytest.mark.parametrize("level", ["strict", "safe_default", "infer"])
+@pytest.mark.parametrize("label", CONTROL)
+async def test_control_labels_stay_unresolved_at_every_level(level, label):
+    class One(FakeAdapter):
+        async def get_form(self, ref):
+            return ApplicationForm(ref=ref, submit_via=["api"], fields=[F("q", label, FieldKind.select, options=YN)])
+    r = model(q=("Yes", 0.99))
+    e = ApplyEngine(settings(answers__autonomy=level), resolve_adapter=lambda ref: One(), profile=FakeProfile(),
+                    router=r, gates=FakeGates(), store=FakeStore())
+    out = await e.plan(POSTING.ref)
+    assert "q" in out.plan.unresolved and not out.plan.answers
+    assert not [p for _, p in r.calls if "ONLY when the facts clearly" in p]      # never sent to the infer model
+
+
+@pytest.mark.parametrize("label", ["Do you have experience with Rust?", "Are you proficient in SQL?",
+                                   "Are you comfortable using Python?", "Have you worked with PostgreSQL?",
+                                   "How many years of experience do you have with Rust?",
+                                   "Do you have 3+ years of experience with Rust?",
+                                   "Rate your proficiency with Python"])
+def test_skill_templates_are_capability_questions(label):
+    assert autonomy.capability_question(F("q", label, FieldKind.select, options=YN))
+
+
+async def test_infer_rationale_is_redacted_and_provider_policy_is_honoured(tmp_path):
+    from job_apply_mcp.core import secrets
+    secrets._remember("fictional-secret-token-123")
+    try:
+        r = FakeRouter(short={"q_rust": {"value": "Yes", "confidence": 0.95,
+                                         "rationale": "uses fictional-secret-token-123 at work"}})
+        a = got(await engine("infer", r, tmp_path=tmp_path).plan(POSTING.ref))["q_rust"]
+        assert "fictional-secret-token-123" not in a.rationale and secrets.MASK in a.rationale
+    finally:
+        secrets.forget("fictional-secret-token-123")
+
+    from types import SimpleNamespace
+
+    class CloudRouter(FakeRouter):
+        cfg = SimpleNamespace(tiers={"small": SimpleNamespace(provider="cloud_x")}, fallbacks={},
+                              client_on_failure=False)
+
+        def _is_cloud(self, name):
+            return True
+    e = engine("infer", CloudRouter(short={"q_rust": {"value": "Yes", "confidence": 0.95}}))
+    assert "q_rust" in (await e.plan(POSTING.ref)).plan.unresolved           # reviewer=client + cloud tier: no infer
+    e = engine("infer", CloudRouter(short={"q_rust": {"value": "Yes", "confidence": 0.95}}), writing__reviewer="router")
+    assert got(await e.plan(POSTING.ref))["q_rust"].value == "Yes"

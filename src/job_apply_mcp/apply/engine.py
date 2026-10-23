@@ -36,6 +36,7 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
+from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
 from ..writing import checks
 from . import autonomy
@@ -483,7 +484,7 @@ class ApplyEngine:
                          "What should 'How did you hear about us?' say when none of your configured sources is "
                          "offered? (the option or text to use)")
                 continue
-            if level == "infer" and f.required and autonomy.capability_question(f):
+            if level == "infer" and f.required and autonomy.capability_question(f) and self._infer_allowed(f):
                 infer.append(f)
                 continue
             left.append(f)
@@ -498,11 +499,37 @@ class ApplyEngine:
         keep = {f.key for f in left}
         return out, [f for f in fields if f.key in keep]
 
+    def _infer_allowed(self, f: FormField) -> bool:
+        """#54 gate on the infer path: the full never-LLM check plus every _llm_allowed reason except the
+        "years of" wording of a skill-years question (the capability allowlist already anchors that)."""
+        ck = canonical_key(f.label)
+        label = re.sub(r"\b(?:how many )?years of\b", " ", f.label, flags=re.IGNORECASE)
+        return not (never_llm(f) or (ck in _SENSITIVE_KEYS and ck != "years_experience") or _SENSITIVE_LABEL.search(label)
+                    or eeo_class(f.label)[0] or self._needs_human(f) or _NO_FABRICATE_LABEL.search(f.label)
+                    or geo_kind(f) or f.kind == FieldKind.file)
+
+    def _infer_provider_ok(self) -> bool:
+        """Same provider policy as writing: the router (local-first, allow_cloud honoured by the router itself). With
+        writing.reviewer="client" (model judgement stays with the user's own side) and cloud allowed, infer runs only
+        when every candidate for the short tier is local; otherwise the field stays unresolved."""
+        if not self.s.llm.allow_cloud or self.s.writing.reviewer == "router":
+            return True
+        is_cloud = getattr(self.router, "_is_cloud", None)
+        cfg = getattr(self.router, "cfg", None)
+        if not callable(is_cloud) or cfg is None:
+            return True                       # a router without provider metadata (tests, custom wiring)
+        try:
+            first = next(iter(cfg.tiers))
+            cands = [cfg.tiers[first], *cfg.fallbacks.get(first, [])]
+            return not any(is_cloud(c.provider) for c in cands) and not cfg.client_on_failure
+        except Exception:  # noqa: BLE001
+            return False
+
     async def _infer(self, fields: list[FormField], ctx: _Ctx) -> tuple[dict[str, tuple[Any, float, str]],
                                                                         list[FormField]]:
         """ONE conservative model call; an affirmative answer needs confidence >= answers.infer_min_confidence AND
         every topic word in the resume/profile facts, otherwise the honest No / lowest option."""
-        if self.router is None:
+        if self.router is None or not self._infer_provider_ok():
             return {}, list(fields)
         facts = list(self.profile.facts(" ".join(f.label for f in fields), 20))
         prompt = autonomy.infer_prompt(fields, facts, f"{ctx.posting.title} @ {ctx.posting.company}")
@@ -526,7 +553,7 @@ class ApplyEngine:
                 conf = max(0.0, min(1.0, float(d.get("confidence") or 0)))
             except (TypeError, ValueError):
                 conf = 0.0
-            why = re.sub(r"\s+", " ", str(d.get("rationale") or ""))[:160]
+            why = redact(re.sub(r"\s+", " ", str(d.get("rationale") or "")))[:160]   # never a secret
             v = self._validate(f, d.get("value")) if d.get("value") not in (None, "") else None
             if v is not None and v != low and not (conf >= self.s.answers.infer_min_confidence
                                                    and autonomy.topic_supported(f.label, all_facts)):

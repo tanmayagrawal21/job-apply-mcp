@@ -106,7 +106,7 @@ def render_config(*, small: str | None, narrative: str | None, ollama: bool, ope
               "# What the agent may assume when you are not available (ADR-0052). Only this file can loosen it.",
               "#   strict       every unresolved field waits for you (default)",
               "#   safe_default decline contact/marketing permission, default 'how did you hear', decline EEO",
-              "#   infer        safe_default + capability Yes/No questions answered conservatively from your resume",
+              "#   infer        safe_default + skill Yes/No questions (experience with a tool) answered from your resume",
               "# Never assumed at any level: authorization/visa, background checks, attestations, legal agreements,",
               "# salary without a policy, start date and location facts.",
               f"autonomy = {_q(autonomy)}",
@@ -145,7 +145,8 @@ AUTONOMY_HELP = ("When you are not available, how much may the agent assume?\n"
                  "  strict       = ask me about every unresolved field (safest, default)\n"
                  "  safe_default = take only safe answers: decline contact/marketing opt-ins, default 'how did you\n"
                  "                 hear', 'decline to self-identify'\n"
-                 "  infer        = safe_default + answer ordinary skill Yes/No questions from my resume, conservatively\n"
+                 "  infer        = safe_default + answer skill questions ('experience with <tool>?') from my resume,\n"
+                 "                 conservatively; willingness, availability, location and terms questions never\n"
                  "  (authorization, background checks, attestations, legal agreements, salary and start date are\n"
                  "  never assumed)")
 

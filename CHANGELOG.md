@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 - Autonomy level `[answers] autonomy = strict | safe_default | infer` (trusted user config only; default strict):
   safe declines for genuine contact/marketing permission asks, the configured "how did you hear" default and
-  "decline to self-identify"; at `infer`, conservative resume-based answers to capability questions. Hard limits
+  "decline to self-identify"; at `infer`, conservative resume-based answers to an allowlist of skill/experience questions. Hard limits
   (authorization, background, attestations, legal agreements, salary, start date/location) are never assumed.
   Assumed answers are labelled in plan, evidence and run report; repeated kinds become one profile question
   (ADR-0052).

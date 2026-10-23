@@ -90,9 +90,10 @@ the same in dry and live mode; skipped and unsupported postings do not count. A 
    **Autonomy level (ADR-0052).** `[answers] autonomy` in your own user config decides what the agent may assume
    when you are not available: `strict` (default: every unresolved field waits for you), `safe_default` (decline
    contact/marketing permission, the configured "how did you hear" default, "decline to self-identify"), or `infer`
-   (also ordinary skill Yes/No questions, answered from your resume: Yes only when it clearly says so, otherwise No).
-   Authorization/visa, background checks, attestations, legal agreements, salary without a policy, start date and
-   location facts are never assumed. Every assumed answer is labelled (`assumed`, plan, evidence, run report); after
+   (also skill/experience questions about a tool or technology, answered from your resume: Yes only when it
+   clearly says so, otherwise No; willingness, availability, location and terms questions are never inferred).
+   Authorization/visa/identity, background and other screening, accommodation, recording, attestations, legal
+   agreements and employment terms, salary without a policy, start date and location facts are never assumed. Every assumed answer is labelled (`assumed`, plan, evidence, run report); after
    `promote_after` (3) assumptions of one question you are asked once and your answer is reused. A project file or
    env var can only make the level stricter. `init` asks which level to use; `control_status` shows it.
 6. **Privacy.** Profile and secrets stay on your machine, are never committed, and API keys are read only from

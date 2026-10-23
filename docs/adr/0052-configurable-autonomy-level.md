@@ -50,30 +50,54 @@ user's usual "how did you hear about us" source.
      a required one goes to the owner.
    - **Optional free text** stays blank, as before.
    - **Everything else** stays unresolved.
-4. **infer**: everything in safe_default, plus ordinary capability and experience questions on **required** choice
-   or boolean fields:
-   - The whole normalized label must match one anchored capability template (`autonomy._CAP`), such as "are you
-     comfortable ...", "do you have experience with ..." or "have you used ...".
-   - The field must be free of every exclusion: a hard limit, ADR-0040 legal or place wording
-     (`never_llm_legal_place`), EEO, a blocked label (ADR-0047 guard), permission wording, a canonical profile key,
-     and commitments such as schedules, travel, licences, physical requirements, relatives or AI use.
-   - ADR-0050 marks "Are you comfortable making cold calls?" owner-only, so in strict and safe_default it stays with
-     the owner. Under infer it is a capability question. The infer path skips only ADR-0050's broad contact clause.
-     ADR-0040's anchored legal and place lists still apply in full.
-   - One model call (`task_class="short"`) gets a conservative prompt: Yes only when the facts clearly and directly
-     show it; otherwise the honest No or the lowest option; never invent anything; give a short rationale.
+4. **infer**: everything in safe_default, plus skill and experience questions on **required** choice or boolean
+   fields. This is an ALLOWLIST (after the control review of #75).
+   - The whole normalized label must match one anchored skill template (`autonomy._CAP`): "do you have experience
+     with X", "are you proficient / familiar / experienced in X", "are you comfortable using X", "how proficient
+     are you with X", "have you used / worked with X", "(N+) years of experience with X", "how many years of
+     experience do you have with X", "rate your proficiency with X".
+   - X must name a tool, technology, language, domain or skill: at most 4 words, and no person, place, process,
+     employment-term or activity word (`_X_DENY`).
+   - **Never inferred, so they stay unresolved:** willingness, ability, availability, location, consent and terms
+     questions ("are you willing / able / open / comfortable to ...", "comfortable making cold calls?").
+   - The field must also clear every exclusion: a hard limit, ADR-0040 legal or place wording, EEO, a blocked
+     label, permission wording, or a canonical profile key other than `years_experience`.
+   - **#54 gate.** The model call is also gated by the full `never_llm` check and by every `_llm_allowed` reason
+     (sensitive keys and labels, attestation or AI use, links and contact values, geo, files). The one exception is
+     the "years of" wording of a skill-years question, which the allowlist already anchors.
+   - **Provider policy, same as writing.** The call goes through the router (`task_class="short"`), which is
+     local-first and honours `llm.allow_cloud`.
+     - With `writing.reviewer = "client"` and cloud allowed, infer runs only when every candidate for the short tier
+       is local and `client_on_failure` is off. Otherwise the field stays unresolved.
+     - `writing.reviewer = "router"`, or `allow_cloud = false`, uses the router as configured.
+     - Nothing about the provider is hardcoded.
+   - The conservative prompt: Yes only when the facts clearly and directly show it; otherwise the honest No or the
+     lowest option; never invent anything; give a short rationale.
    - An affirmative answer is kept only when the confidence is at least `answers.infer_min_confidence` (0.8) AND
-     every topic word of the question appears in the resume and profile facts. Otherwise the field gets the lowest
-     value: `False`, the single No option, or a single "none / beginner / less than" option.
+     every topic word appears in the resume and profile facts. Otherwise the field gets the lowest value: `False`,
+     the single No option, or a single "none / beginner / less than / 0" option.
    - With no model, or no lowest option, the field stays unresolved.
-   - The confidence and rationale are recorded. The prompt holds profile facts only, never secrets.
-5. **Hard limits at every level** (`autonomy.hard_limit`, checked first): authorization, sponsorship, citizenship
-   and visa; criminal history, background checks and drug tests; attestations and certifications ("true and
-   complete", signatures); legal agreements (arbitration, NDA, non-compete, confidentiality, terms); salary (any
-   salary field left after the ADR-0047 salary rule, that is, no posted range and no profile policy); and start date,
-   relocation and location facts (including the ADR-0040 place list). These fields stay structured-facts-only or
-   unresolved. On a clean contact-permission ask, only the plain "I agree" / "By checking" wording is ignored; every
-   other category still applies.
+   - The confidence is recorded, and so is the rationale, after it passes through `core.secrets.redact` and is cut
+     to 160 characters. The prompt holds profile facts only.
+5. **Hard limits at every level** (`autonomy.hard_limit`, checked first): these fields stay structured-facts-only or
+   unresolved.
+   - authorization, sponsorship, citizenship and visa
+   - identity: E-Verify, I-9, proof of identity, passport
+   - criminal history, background checks and drug tests
+   - screening: polygraph, lie detector, psychological evaluation, physical or medical exams
+   - disability: accommodation, essential functions
+   - privacy: being recorded, camera or video interviews, social media, monitoring, biometrics, personal data
+   - attestations and certifications ("true and complete", signatures)
+   - legal agreements: arbitration, NDA, non-compete, confidentiality, terms
+   - employment terms: trial period, unpaid or for free, contract or contract-to-hire, 1099/W-2, probation,
+     government or military work, firearms, shifts, weekends, nights, overtime, on call
+   - salary: any salary field left after the ADR-0047 salary rule, that is, no posted range and no profile policy
+   - start date
+   - relocation and location: travel, client site, abroad, any named country or region such as "Europe", and the
+     ADR-0040 place list
+
+   On a clean contact-permission ask, only the plain "I agree" / "By checking" wording is ignored; every other
+   category still applies.
 6. **Labelling.**
    - An assumed answer is an `Answer` with `assumed=True`, `source="assumed:<rule>"` (`decline_contact_permission`,
      `referral_default`, `eeo_decline`, `infer`) and a `rationale`.
