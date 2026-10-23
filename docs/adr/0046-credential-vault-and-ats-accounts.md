@@ -10,7 +10,7 @@ unattended needs a credential store whose secrets the calling LLM can never see,
 ## Decision
 1. **Vault = OS keychain only** (`keyring` extra). One item per (host, username): service
    `job-apply-mcp-vault:<host>`, account `<username>`. A secret-free index (host, username, added_at) lives in
-   `<data_dir>/vault_index.json` (0600) because keychains cannot be enumerated. No file fallback: without a backend,
+   `<data_dir>/vault_index.json` (0600 on POSIX; on Windows it relies on the per-user `%LOCALAPPDATA%` ACL) because keychains cannot be enumerated. No file fallback: without a backend,
    or with an insecure one (`fail`, `null`, plaintext, `keyrings.alt`), the vault refuses to store anything. The
    service prefix is a constant, not a setting, so a project file cannot redirect lookups.
 2. **Human-only CLI** (TTY required, like `grant`): `job-apply-mcp vault add <host> --username U` (getpass, asked

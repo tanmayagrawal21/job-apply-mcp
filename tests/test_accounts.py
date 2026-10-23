@@ -1,6 +1,7 @@
 """ADR-0046: credential vault, consent-gated logins and account creation. Fake keyring only; nothing real."""
 import asyncio
 import json
+import os
 import pickle
 import sqlite3
 import sys
@@ -158,7 +159,9 @@ def test_vault_roundtrip_index_has_no_secret(vault, kr):
     assert vault.get(HOST, USER) == Secret(PW)
     assert vault.entries()[0]["host"] == HOST and vault.usernames(HOST) == [USER]
     raw = vault.index_path.read_text()
-    assert PW not in raw and (vault.index_path.stat().st_mode & 0o077) == 0
+    assert PW not in raw                                       # all platforms: the index never holds a secret
+    if os.name != "nt":   # POSIX mode bits; on Windows the file inherits the per-user %LOCALAPPDATA% ACL (ADR-0046)
+        assert (vault.index_path.stat().st_mode & 0o077) == 0
     assert vault.remove(HOST) == [USER] and kr.items == {} and vault.entries() == []
 
 

@@ -1,7 +1,8 @@
 """Credential vault over the OS keychain (ADR-0046). Optional extra: `keyring`.
 
 Each secret is one keychain item: service `job-apply-mcp-vault:<host>`, account `<username>`. Keychains cannot be
-enumerated portably, so a small index of (host, username, added_at) lives in `<data_dir>/vault_index.json` (0600).
+enumerated portably, so a small index of (host, username, added_at) lives in `<data_dir>/vault_index.json` (0600
+on POSIX; on Windows mode bits are not enforced and the file relies on the per-user %LOCALAPPDATA% ACL).
 The index holds NO secret. There is no file fallback for secrets: without a real keychain backend the vault
 refuses to store anything.
 """
