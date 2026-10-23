@@ -461,19 +461,24 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   // Explicit allowlist of groups that are not application questions (left empty on purpose; logged by the caller).
   // Exempt ONLY a field whose OWN label/legend states a consent intent (never a bare word, never container text),
   // and ONLY when no required markup and no API required:true applies (control review 4).
-  // ANCHORED, FAIL CLOSED: the whole label must be an opt-in statement. The only lead-ins allowed are a FIXED set
-  // ("check yes or no to indicate your", "yes,", "i", "we", "you" ...); no free-text prefix, so a compound question
-  // ("Have you worked with X and do you agree to receive SMS ...") never qualifies. A second clause (and / or / ;
-  // / a question mark followed by more text) before the consent verb is rejected as well.
-  const LEAD = '^(?:(?:please )?(?:check|select|tick) (?:yes|no|yes or no|the box)(?: to indicate)?(?: (?:your|if you|that you))?|yes,?|i|we|you)?\\\\s*';
+  // FAIL CLOSED (control review 6): an opt-in is exempt only if the WHOLE label (trimmed, ^...$) is one of a few short
+  // templates: fixed lead-in + consent verb + "to receive" + channel + an optional short tail ("about this/my
+  // application", "about future/new jobs/roles/opportunities", "from <company>") + an optional period; or a bare
+  // job-alert / newsletter / talent-community sign-up. Any second clause (and / or / ; / ? / a further sentence) or
+  // any attestation, legal or eligibility term anywhere in the label (or a policy stop phrase) disqualifies it.
+  const LEAD = '(?:(?:please )?(?:check|select|tick) (?:yes|no|yes or no|the box)(?: to indicate)?(?: (?:your|if you|that you))?|yes,?|i|we|you)? ?';
+  const VERB = "(?:agree(?:ment)?|consent(?:ing)?|opt(?:ing)?[ -]?in|subscrib(?:e|ing)|sign(?:ing)? (?:me )?up|would like|'d like|wish|want)";
+  const CHAN = '(?:(?:sms|text|text message|e-?mail|marketing) (?:messages?|updates|e-?mails?|communications?|alerts|notifications)|text messages?|sms|e-?mails?|marketing e-?mails?|marketing communications?|updates|job alerts?|newsletters?)';
+  const TAIL = "(?: (?:about (?:this|my|your) application|about (?:future|new) (?:jobs|roles|opportunities)|from [a-z0-9&'. -]{1,40}))?";
   const CONSENT_RE = [
-    new RegExp(LEAD + "(agree(ment)?|consent(ing)?|opt(ing)?[ -]?in|subscrib(e|ing)|sign(ing)? (me )?up|(would|'d) like) to (receive|get|be sent|be contacted)\\\\b[^?]*\\\\b(text|sms|messages?|marketing|newsletters?|job alerts?|updates|e-?mails?|communications?)\\\\b"),
-    /^(please )?(create (a )?job alert|(send me|get|receive) job alerts?|subscribe to (our |the )?(newsletter|mailing list)|join (our )?talent (community|network))\\b/,
-    new RegExp(LEAD + '(may|can) contact me (by|via) (text|sms)\\\\b')];
+    new RegExp('^' + LEAD + VERB + ' to receiv(?:e|ing) ' + CHAN + TAIL + '\\\\.?$'),
+    /^(?:please )?(?:create (?:a )?job alert|(?:send me|get|receive) job alerts?|subscribe to (?:our |the )?(?:newsletter|mailing list)|join (?:our )?talent (?:community|network))(?: for (?:similar|new) (?:roles|jobs|opportunities))?\\.?$/];
+  const NOT_OPTIN = /\\b(certif\\w*|confirm\\w*|attest\\w*|true|accura\\w*|authori[sz]\\w*|eligib\\w*|18|age|background|arbitrat\\w*|relocat\\w*|sponsor\\w*|visa|criminal|legal|terms|waive\\w*|dispute\\w*|signature)\\b/;
+  const STOP = (a.stop || []).map(x => String(x).toLowerCase().trim()).filter(Boolean);
   const CONSENT = { test: raw => { const t = (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-    if (!CONSENT_RE.some(r => r.test(t))) return false;
-    const lead = (t.match(new RegExp(LEAD)) || [''])[0].replace('yes or no', '');
-    return !/(\\band\\b|\\bor\\b|;|\\?.)/.test(lead); } };
+    if (!t || NOT_OPTIN.test(t) || STOP.some(p => t.includes(p))) return false;
+    if (/\\band\\b|\\bor\\b|;|\\?|[.!]\\s*\\S/.test(t.replace('yes or no', ''))) return false;      // a second clause anywhere
+    return CONSENT_RE.some(r => r.test(t)); } };
   const REQ_ATTR = n => n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
     || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false') || /(^|[\\s_-])required([\\s_-]|$)/i.test(String(n.className || ''));
   const markedRequired = (members, container, headEl, text) => {
@@ -749,7 +754,7 @@ class PlaywrightDriver(VerificationMixin):
 
         self._api_keys[id(page)] = {"req": [f.key for f in form.fields if f.required and f.kind != FieldKind.file],
                                     "opt": [f.key for f in form.fields if not f.required],
-                                    "keys": [f.key for f in form.fields]}
+                                    "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases)}
         steps = fill_order(form, answers, files)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]

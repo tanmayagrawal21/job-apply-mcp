@@ -141,16 +141,14 @@ PHONE_FORM = ApplicationForm(ref="ashby:acme:job3", fields=[
 
 
 @pytest.mark.parametrize("opt_in", [False, True])
-async def test_sms_consent_radio_is_never_answered_and_is_an_exempt_logged_optin(drv, opt_in, caplog):
-    """SMS opt-ins are on the explicit allowlist: never ticked, left empty on purpose, and logged."""
-    caplog.set_level("INFO")
+async def test_multi_sentence_sms_consent_is_never_answered_and_stops_the_run(drv, opt_in):
+    """A consent block with several sentences (Ashby-style) is not a whole-label opt-in template: fail closed."""
     base, posts = _serve(_consent_page(SMS_CONSENT))
     res = await drv.fill_and_submit(f"{base}/acme/job3/application", PHONE_FORM,
                                     {"q-phone": "555-0101", "pref:acknowledge_privacy_notices": opt_in}, {},
                                     dry_run=True)
-    assert res.status == "dry_run", res.detail
+    assert res.status == "incomplete" and "text message" in res.detail, res.detail
     assert _checked(posts) == []
-    assert "left empty on purpose" in caplog.text and "text message" in caplog.text
 
 
 @pytest.mark.parametrize("opt_in", [False, True])
@@ -316,7 +314,7 @@ async def test_unwrapped_required_radio_set_blocks_dry_run(drv, variant):
 
 async def test_unwrapped_optional_radio_set_does_not_block(drv):
     html = ("<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>"
-            "<div class=q><p>Subscribe to our newsletter?</p><label><input type=radio name=nl value=y> Yes</label>"
+            "<div class=q><p>Subscribe to our newsletter</p><label><input type=radio name=nl value=y> Yes</label>"
             "<label><input type=radio name=nl value=n> No</label></div>"
             "<button type=submit>Submit application</button></form>"
             "<script>document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>")
@@ -635,3 +633,50 @@ async def test_compound_question_with_consent_clause_is_never_exempt(drv, label,
     res = await drv.fill_and_submit(f"{base}/acme/jobs/28", ApplicationForm(ref="greenhouse:acme:28", fields=[GH_FIRST]),
                                     {"first_name": "Alex"}, {}, dry_run=True)
     assert res.status == "incomplete", (label, res.detail)
+
+
+
+# ---- control review 6: the WHOLE label must be a short opt-in template
+
+SECOND_CLAUSE_AFTER = [
+    "I agree to receive text messages and certify that all my answers are true",
+    "I agree to receive SMS updates and confirm I am authorized to work in the US",
+    "I agree to receive SMS updates. Are you over 18?",
+    "I consent to receive marketing emails or relocation information",
+    "Create a job alert and confirm you are over 18",
+    "We may contact me by text about my background check",
+    "You agree to receive emails about arbitration of disputes",
+]
+PLAIN_OPTINS = [
+    "I agree to receive SMS updates about my application",
+    "Create a job alert for similar roles",
+    "Please tick the box if you agree to receive updates",
+    "I would like to receive marketing emails",
+    "I agree to receive text message updates",
+    "Create a Job Alert",
+]
+
+
+def _optin_block(label, kind):
+    if kind == "radio":
+        return (f"<fieldset><legend>{label}</legend><label><input type=radio name=o value=y> Yes</label>"
+                f"<label><input type=radio name=o value=n> No</label></fieldset>")
+    return f'<div class=optin><label><input type=checkbox name=o value=y> {label}</label></div>'
+
+
+@pytest.mark.parametrize("kind", ["radio", "checkbox"])
+@pytest.mark.parametrize("label", SECOND_CLAUSE_AFTER)
+async def test_consent_with_a_second_clause_anywhere_is_incomplete(drv, label, kind):
+    base, _ = _serve(_set_page(_optin_block(label, kind)))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/29", ApplicationForm(ref="greenhouse:acme:29", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", (label, kind, res.detail)
+
+
+@pytest.mark.parametrize("kind", ["radio", "checkbox"])
+@pytest.mark.parametrize("label", PLAIN_OPTINS)
+async def test_plain_whole_label_optins_stay_exempt(drv, label, kind):
+    base, _ = _serve(_set_page(_optin_block(label, kind)))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/30", ApplicationForm(ref="greenhouse:acme:30", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "dry_run", (label, kind, res.detail)
