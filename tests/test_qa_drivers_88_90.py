@@ -300,3 +300,77 @@ async def test_driver_hands_off_comprehension_check(drv):
     form = ApplicationForm(ref="ashby:acme:job1", fields=[FormField(key="n", label="Name", kind=FieldKind.text)])
     r = await drv.fill_and_submit(_data_url(html), form, {"n": "x"}, {}, dry_run=True)
     assert r.status == "needs_human" and "visible challenge" in r.detail, r
+
+
+# ---------------------------------------------------------------- Ashby required markup (Lambda follow-up, ADR-0056)
+# Shape observed on a public Ashby form: each [data-field-path] entry has a .ashby-application-form-question-title;
+# a required one carries a hashed `_required_<hash>` class. Voluntary EEO and recording-consent groups have none.
+
+def _ashby_entry(fp, title, required, inner, fieldset=False):
+    cls = "_heading_x1 _required_ab12_91 ashby-application-form-question-title" if required else \
+          "_heading_x1  ashby-application-form-question-title"
+    tag = "fieldset" if fieldset else "div"
+    return (f'<div data-field-path="{fp}"><{tag} class="_fieldEntry_x ashby-application-form-field-entry">'
+            f'<label class="{cls}">{title}</label>{inner}</{tag}></div>')
+
+
+def _radios(name, opts, checked=None):
+    return "".join(f'<span><input type="radio" id="{name}-{i}" name="{name}" value="{o}"{" checked" if o == checked else ""}>'
+                   f'<label for="{name}-{i}">{o}</label></span>' for i, o in enumerate(opts))
+
+
+def ashby_form(*, onsite=True, untitled=False):
+    p = "c7512b4c__"
+    parts = [
+        _ashby_entry("_systemfield_name", "Name", True, '<input id="_systemfield_name" name="_systemfield_name" value="Alex Rivera">'),
+        _ashby_entry("_systemfield_recording_consent", "Interview Recording Consent", False,
+                     _radios(p + "_systemfield_recording_consent", ["Yes, I consent to be recorded"]), fieldset=True),
+        _ashby_entry("q-onsite", "Are you able and willing to work onsite?", True,
+                     '<input type="checkbox" name="q-onsite" id="q-onsite-yes"' + (" checked" if onsite else "") +
+                     '><label for="q-onsite-yes">Yes</label><input type="checkbox" name="q-onsite" id="q-onsite-no">'
+                     '<label for="q-onsite-no">No</label>'),
+        _ashby_entry("_systemfield_eeoc_gender", "Gender", False,
+                     _radios(p + "_systemfield_eeoc_gender", ["Male", "Female", "Decline to self-identify"]), fieldset=True),
+        _ashby_entry("_systemfield_eeoc_veteran_status", "Veteran Status", False,
+                     _radios(p + "_systemfield_eeoc_veteran_status", ["I am not a protected veteran",
+                                                                      "I decline to self-identify"]), fieldset=True)]
+    if untitled:
+        parts.append('<fieldset><legend>Untitled group</legend>' + _radios("mystery", ["A", "B"]) + '</fieldset>')
+    return "<html><body><form>" + "".join(parts) + "</form></body></html>"
+
+
+async def test_ashby_unmarked_eeo_and_consent_groups_are_optional(drv):
+    pg = await _page(drv, ashby_form(), ats="ashby", api={"req": ["_systemfield_name", "q-onsite"]})
+    assert await drv._empty_required(pg) == []
+
+
+async def test_ashby_required_group_still_blocks(drv):
+    pg = await _page(drv, ashby_form(onsite=False), ats="ashby")      # marked by the _required_ class alone
+    assert [r["label"] for r in await drv._empty_required(pg)] == ["Are you able and willing to work onsite?"]
+
+
+async def test_ashby_api_required_overrides_missing_markup(drv):
+    pg = await _page(drv, ashby_form(), ats="ashby", api={"req": ["_systemfield_eeoc_gender"]})
+    assert [r["label"] for r in await drv._empty_required(pg)] == ["Gender"]
+
+
+async def test_ashby_group_without_a_title_keeps_inverted_rule(drv):
+    pg = await _page(drv, ashby_form(untitled=True), ats="ashby")
+    assert [r["label"] for r in await drv._empty_required(pg)] == ["Untitled group"]
+
+
+async def test_ashby_yes_no_with_hidden_checkbox_is_fast(drv):
+    html = ('<html><body><form><div data-field-path="q1"><div role="group" aria-label="Willing to work onsite?">'
+            '<label class="_required_ab12_91 ashby-application-form-question-title">Willing to work onsite?</label>'
+            '<input type="checkbox" name="q1" style="display:none">'
+            '<button type="button" aria-pressed="false" id="y">Yes</button>'
+            '<button type="button" aria-pressed="false" id="n">No</button></div></div></form>'
+            "<script>document.querySelectorAll('button').forEach(b => b.onclick = () => {"
+            "document.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));"
+            "document.querySelector('[name=q1]').checked = b.id === 'y'; });</script></body></html>")
+    pg = await _page(drv, html, ats="ashby")
+    f = FormField(key="q1", label="Willing to work onsite?", kind=FieldKind.boolean, required=True)
+    t0 = time.monotonic()
+    assert await drv._fill(pg, ATS["ashby"], f, True)
+    assert time.monotonic() - t0 < 5                    # was the full 30 s default timeout per question
+    assert await drv._verify(pg, [(f, True)], ATS["ashby"]) == []

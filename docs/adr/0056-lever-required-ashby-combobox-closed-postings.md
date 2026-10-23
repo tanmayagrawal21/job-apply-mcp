@@ -34,6 +34,17 @@ A QA round on PR #81 found three driver and adapter faults:
   `required:true`, makes the question required. A required question with nothing selected still blocks the run.
   Hidden survey sections are not visible, so the scan skips them. Every other ATS keeps the ADR-0039 inverted
   rule unchanged.
+- **Ashby is judged by its markup too.** Every Ashby field entry has a `.ashby-application-form-question-title`.
+  A required title carries a hashed `_required_<hash>` class, and the asterisk is drawn in CSS. A choice group
+  counts as optional when all of these hold: its own title exists, the title has no such class, `required`,
+  `aria-required`, asterisk or pseudo-element asterisk, and the API (by `data-field-path` or member name) does
+  not mark the field required. Examples are the voluntary EEO groups and the interview-recording consent. A
+  group without a title keeps the inverted rule. Whether a voluntary EEO question gets an answer, such as
+  "decline to self-identify", stays the mapper's and autonomy's decision. The driver only stops calling these
+  groups required.
+- **Ashby Yes/No questions.** Ashby keeps a hidden checkbox behind its Yes/No buttons. The direct click now runs
+  only when the checkbox is visible. Before, it waited the full 30 s default timeout for each question and then
+  fell through to the buttons. That cost about 90 s on Lambda.
 - **ARIA autocomplete commit.** `_locate` now also finds `[data-field-path=K] input[role=combobox][aria-autocomplete]`.
   For such an input outside a react-select, `_combo_commit` does the following:
   1. Types each `location_queries()` variant.
@@ -63,5 +74,6 @@ A QA round on PR #81 found three driver and adapter faults:
 - The Ashby location field takes at most 20 s instead of 100 s, and it never leaves uncommitted text. Cohere and
   Harvey use the same widget.
 - `skipped` is a new `SubmitResult.status`.
+- Lambda dry run: 110 s and `incomplete`/`fill-failed` before; about 15 s and `dry_run` now.
 - Dry-run time: the Lever scan no longer runs a false refill pass or a second scan. Most of the remaining time is
   page load, resume parsing and the geocoded location. This ADR leaves those unchanged.

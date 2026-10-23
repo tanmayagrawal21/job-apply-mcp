@@ -525,10 +525,25 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     || /[*✱]/.test((leverHead(q) || {}).textContent || ''));
   // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
   // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
+  // ASHBY (ADR-0056): every field entry has a question title, and a required one carries Ashby's `_required_<hash>`
+  // class (an asterisk drawn in CSS). A choice group whose OWN title exists without that marker, with no
+  // required/aria-required member and no API required flag, is optional (voluntary EEO, recording consent). No
+  // title found -> the inverted rule below still applies (fail closed).
+  const ashbyUnmarked = (members, idCands, names) => {
+    if (a.ats !== 'ashby') return false;
+    const fe = members[0].closest('[data-field-path]');
+    const t = fe && [...fe.querySelectorAll('.ashby-application-form-question-title')].find(x => x.closest('[data-field-path]') === fe);
+    if (!t) return false;
+    const fpk = fe.getAttribute('data-field-path');
+    if (members.some(m => m.required || m.getAttribute('aria-required') === 'true') || REQ_ATTR(t) || REQ_ATTR(fe)
+        || /[*✱]/.test(t.textContent || '') || /\brequired\b/i.test(t.textContent || '')) return false;
+    for (const pe of ['::after', '::before']) { const c = getComputedStyle(t, pe).content; if (c && /[*✱]/.test(c)) return false; }
+    return !REQK.has(fpk) && !apiRequired(idCands.concat(names, [fpk])); };
   const emit = (members, container, text, idCands, consent, headEl) => {
     if (members.some(m => m.checked)) return;
     const names = members.flatMap(m => [m.name, m.id]);
     if (apiOptional(idCands.concat(names))) return;
+    if (ashbyUnmarked(members, idCands, names)) return;
     const opts = members.map(optText).slice(0, 12);
     const exempt = !apiRequired(idCands.concat(names)) && !markedRequired(members, container, headEl, text)
       && CONSENT.test(clean(text));
@@ -1768,9 +1783,11 @@ class PlaywrightDriver(VerificationMixin):
         if loc is not None:
             try:
                 typ = (await loc.get_attribute("type")) or ""
-                if typ == "checkbox":
+                # Ashby keeps a HIDDEN checkbox behind its Yes/No buttons: clicking it waited the full default
+                # timeout (30 s per question) before falling through to the buttons (ADR-0056)
+                if typ == "checkbox" and await loc.is_visible():
                     if await loc.is_checked() != want:
-                        await loc.click()      # real click: programmatic check does not register
+                        await loc.click(timeout=3000)      # real click: programmatic check does not register
                     return await loc.is_checked() == want
             except Exception:
                 pass
