@@ -230,6 +230,11 @@ class GrantsCfg(BaseModel):
     max_uses_cap: int = 1000                      # upper bound for --max-uses
     otp_window_min: int = 10                      # otp_assist reads only a message newer than this
     use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available; only the user config file may disable it
+    # consent window (ADR-0048): `job-apply-mcp consent --for 24h|--per-run`; raising either cap is user-config only
+    consent_max_duration_s: int = 7 * 86400       # longest window `consent --for` will issue (a week)
+    consent_per_run_max_s: int = GRANT_MAX_DURATION_S   # a --per-run consent also expires after this
+    otp_unattended_wait_s: int = 180              # otp_unattended: how long to wait for the code mail before `unknown`
+    otp_poll_s: int = 15                          # otp_unattended: mail poll interval while waiting
 
 
 class PathsCfg(BaseModel):
@@ -566,6 +571,8 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("grants", "max_uses_cap"): _raises,
     ("grants", "otp_window_min"): _raises,
     ("grants", "use_keyring"): _bool_off,
+    ("grants", "consent_max_duration_s"): _raises,          # ADR-0048
+    ("grants", "consent_per_run_max_s"): _raises,
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
 }

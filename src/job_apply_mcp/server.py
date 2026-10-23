@@ -250,6 +250,9 @@ _register_facts(mcp, lambda: svc().settings)
 from .grants.tools import register as _register_grants
 
 _register_grants(mcp, lambda: svc().settings)
+from .consent.tools import register as _register_consent
+
+_register_consent(mcp, lambda: svc().settings)
 from .ingest.tools import register as _register_ingest
 
 _register_ingest(mcp, svc)
