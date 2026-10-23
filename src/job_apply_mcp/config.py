@@ -102,10 +102,12 @@ class LLMCfg(BaseModel):
         "review": LLMTier(provider="client", model="client-default", max_tokens=1200, temperature=0.2),
         # Required-essay autodraft (ADR-0057): writer and strict reviewer, LOCAL ONLY (llm.local_only_classes).
         # Each is configurable on its own: [llm.task_tiers.essay] model = "..." keeps the other fields.
-        "essay": LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=700, temperature=0.4, num_ctx=6144,
-                         timeout_s=80),
-        "essay_review": LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=900, temperature=0.0,
-                                num_ctx=6144, timeout_s=60),
+        # Default from the ADR-0057 benchmark: gemma4:12b was the only local model whose drafts passed; qwen2.5:7b
+        # as reviewer returned wrong findings. One model for both = no weight swap between writer and reviewer.
+        "essay": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=700, temperature=0.4,
+                         num_ctx=6144, timeout_s=120),
+        "essay_review": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=600, temperature=0.0,
+                                num_ctx=6144, timeout_s=90),
     })
     # Tried in order after the primary of a tier or task tier (keys: tier names and task-tier names).
     fallbacks: dict[str, list[LLMTier]] = Field(default_factory=lambda: {

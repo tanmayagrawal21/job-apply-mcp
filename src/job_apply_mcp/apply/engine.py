@@ -897,7 +897,7 @@ class ApplyEngine:
                 resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None),
                 progress=progress[f.key],
                 **({"draft_class": "essay", "review_class": "essay_review", "router_review": True,
-                    "ground_sources": sources} if essay else {}))
+                    "ground_sources": sources, "review_facts": self.profile.facts(f.label, 40)} if essay else {}))
             if deadline is None:
                 return await coro
             async with asyncio.timeout_at(deadline):   # cancels the in-flight LLM call (and its HTTP request)

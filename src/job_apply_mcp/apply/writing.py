@@ -226,7 +226,8 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
                      exemplar: str = "", resume: list[Fact] | None = None, corpus: list[str] | None = None,
                      today: date | None = None, progress: WriteProgress | None = None,
                      draft_class: str = "narrative", review_class: str = "review",
-                     router_review: bool = False, ground_sources: list[str] | None = None) -> WritingResult:
+                     router_review: bool = False, ground_sources: list[str] | None = None,
+                     review_facts: list[str] | None = None) -> WritingResult:
     """kind: 'cover_letter' | 'free_text'. Returns pass / needs_review (client reviews) / needs_human.
 
     `draft_class` / `review_class` pick the router task tiers; `router_review=True` always uses the router reviewer
@@ -273,7 +274,8 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
         if not violations and ground_sources is not None:   # essay autodraft: strict verdict-only review
             prog.stage = "review"
             raw = await router.complete(
-                essay_review_prompt(draft, label=label, company=company, title=title, facts=facts, summary=summary,
+                essay_review_prompt(draft, label=label, company=company, title=title, facts=review_facts or facts,
+                                    summary=summary,
                                     cfg=cfg), task_class=review_class, max_tokens=600, json_schema=ESSAY_REVIEW_SCHEMA)
             ok, issues, _ = _parse_review(raw)
             if ok:
