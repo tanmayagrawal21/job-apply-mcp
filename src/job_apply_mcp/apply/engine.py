@@ -38,10 +38,12 @@ from ..core.models import (
 )
 from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
+from ..platforms.base import PostingClosed
 from ..writing import checks
 from . import autonomy, essays
 from .approvals import ApprovalBook, evidence_path
 from .autonomy import Assumption
+from .closed import CHALLENGE_REASON, challenge_fields, closed_reason
 from .mapper import (
     DEMOGRAPHIC_KEYS,
     SEMANTIC_SENSITIVE,
@@ -319,6 +321,19 @@ class ApplyEngine:
         return [f.label for f in form.fields
                 if any(stop_phrase_hit(t, phrases) for t in (f.label, *f.options))]
 
+    @staticmethod
+    def _closed_or_challenge(ctx: _Ctx) -> tuple[Decision, str] | None:
+        """ADR-0056: a closed posting -> (skip, 'closed: ...'); an anti-automation question (comprehension check)
+        -> (needs_human, visible-challenge reason). The challenge is never mapped, answered or offered as a task."""
+        why = closed_reason(title=ctx.posting.title, description=ctx.posting.description or "",
+                            labels=[f.label for f in ctx.form.fields])
+        if why:
+            return Decision.skip, why
+        ch = challenge_fields(ctx.form.fields)
+        if ch:
+            return Decision.needs_human, CHALLENGE_REASON.format(labels=", ".join(repr(f.label[:60]) for f in ch[:3]))
+        return None
+
     async def _gate(self, ctx: _Ctx) -> GateResult:
         ref = ctx.form.ref
         with self._stage(ref, "gate"):  # policy gates and the dedupe lookup run concurrently
@@ -328,6 +343,9 @@ class ApplyEngine:
                                 ref=ref, url=ctx.posting.apply_url or ctx.posting.url))
         reasons = list(gate.reasons)
         decision = gate.decision
+        why = self._closed_or_challenge(ctx)            # ADR-0056: before any mapping, LLM or client task
+        if why is not None:
+            return GateResult(decision=why[0], reasons=[why[1], *[r for r in reasons if r != why[1]]])
         hits = self._stop_hits(ctx.form)
         if hits and decision == Decision.submit:
             decision = Decision.needs_human
@@ -342,7 +360,11 @@ class ApplyEngine:
         # deferred prose makes planning fetch + mapping + one small batched call, so more may run at once (ADR-0045)
         sem = self._plan_sem_deferred if _write_mode(self.s) == "deferred" else self._plan_sem
         async with sem:
-            ctx = await self._context(ref)
+            try:
+                ctx = await self._context(ref)
+            except PostingClosed as e:                  # ADR-0056: the API says closed -> skipped, not an error
+                return PlanOut(plan=ApplicationPlan(ref=ref, gate=GateResult(decision=Decision.skip,
+                                                                             reasons=[f"closed: {e}"])))
             return await self._plan_ctx(ref, ctx)
 
     @contextmanager
@@ -1292,14 +1314,20 @@ class ApplyEngine:
             elif dry or self.s.apply.auto_approve_active:
                 plan = await self._plan_ctx(ref, ctx)
                 if plan.plan.gate.decision != Decision.submit:
-                    return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
-                                        else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
+                    rs = plan.plan.gate.reasons
+                    st = ("skipped" if rs and rs[0].startswith("closed:") else
+                          "duplicate" if "duplicate" in rs else "needs_human")
+                    return SubmitResult(ref=ref, status=st, detail="; ".join(rs)[:200])
                 base = {a.key: a.value for a in plan.plan.answers}
                 eff = {**base, **supplied}
             else:
                 eff = supplied                      # stateless: must hash-match the server-held record
                 rec, _ = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
                 base = eff if rec is not None and self.approvals.matches(rec, eff, self._split(ctx.form, eff)[1]) else {}
+            why = self._closed_or_challenge(ctx)       # ADR-0056: also on the cached / stateless paths
+            if why is not None:
+                return SubmitResult(ref=ref, status="skipped" if why[0] == Decision.skip else "needs_human",
+                                    detail=why[1][:200])
             failed = await self._review_client_prose(ctx, eff, base)
             if failed:
                 return SubmitResult(ref=ref, status="needs_review", client_tasks=failed,
@@ -1368,6 +1396,8 @@ class ApplyEngine:
                 return result
         except ComponentMissing:
             raise
+        except PostingClosed as e:                      # ADR-0056: closed per the platform API
+            return SubmitResult(ref=ref, status="skipped", detail=f"closed: {e}"[:200])
         except Exception as e:  # noqa: BLE001
             return SubmitResult(ref=ref, status="error", detail=f"{type(e).__name__}: {e}"[:200])
 
@@ -1576,7 +1606,9 @@ class ApplyEngine:
             out = await self.plan(ref)
             g = out.plan.gate
             if g.decision != Decision.submit:
-                return {"ref": ref, "status": g.decision.value, "why": g.reasons, "t": out.timings}
+                closed = bool(g.reasons) and g.reasons[0].startswith("closed:")      # ADR-0056
+                return {"ref": ref, "status": "skipped" if closed else g.decision.value, "why": g.reasons,
+                        "t": out.timings}
             if out.plan.unresolved:
                 human = any(t.get("needs_human") for t in out.client_tasks)
                 return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,

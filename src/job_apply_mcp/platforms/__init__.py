@@ -15,10 +15,10 @@ from . import (  # noqa: F401  (self-register)
     smartrecruiters,
     workday,
 )
-from .base import AdapterError, NotSupported
+from .base import AdapterError, NotSupported, PostingClosed
 from .http import HttpClient, HttpError
 
-__all__ = ["AdapterError", "HttpClient", "HttpError", "NotSupported", "build_adapters", "detect"]
+__all__ = ["AdapterError", "HttpClient", "HttpError", "NotSupported", "PostingClosed", "build_adapters", "detect"]
 
 
 def build_adapters(names: list[str], http: HttpClient, cfg: PlatformsCfg | None = None,

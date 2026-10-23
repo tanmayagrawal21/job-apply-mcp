@@ -396,8 +396,13 @@ class Services:
         return out
 
     async def get_form(self, ref_or_url: str) -> dict[str, Any]:
+        from .apply.closed import challenge_label, closed_reason
+        from .platforms import PostingClosed
         a = self.resolve(ref_or_url)
-        f = await a.get_form(ref_or_url)
+        try:
+            f = await a.get_form(ref_or_url)
+        except PostingClosed as e:                     # ADR-0056: closed per the platform API
+            return {"ref": ref_or_url, "status": "skipped", "closed": f"closed: {e}"}
         rows = []
         for x in f.fields:
             r: dict[str, Any] = {"k": x.key, "l": x.label[:80], "t": x.kind.value}
@@ -406,7 +411,12 @@ class Services:
             if x.options:
                 r["o"] = x.options[:12]
             rows.append(r)
-        return {"ref": f.ref, "via": f.submit_via, "fields": rows}
+        out: dict[str, Any] = {"ref": f.ref, "via": f.submit_via, "fields": rows}
+        if (why := closed_reason(labels=[x.label for x in f.fields])):      # ADR-0056
+            out.update(status="skipped", closed=why)
+        if (ch := [x.key for x in f.fields if challenge_label(x.label)]):
+            out["challenge"] = ch                       # anti-automation question: never answered (ADR-0056)
+        return out
 
     async def plan(self, ref_or_url: str, cursor: int = 0) -> dict[str, Any]:
         return await self._paged_plan("plan", ref_or_url, cursor)
