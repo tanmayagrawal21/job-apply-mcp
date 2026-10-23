@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tanmayagrawal21/applywise",
+  "title": "ApplyWise",
+  "description": "Job search and form filling; dry run by default, real submits need your approval or consent.",
+  "repository": {
+    "url": "https://github.com/tanmayagrawal21/job-apply-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "applywise",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
