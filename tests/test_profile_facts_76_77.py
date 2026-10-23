@@ -209,12 +209,15 @@ def test_city_and_state_of_residence():
 @pytest.mark.parametrize("label,want", [("Are you located in Canada?", False), ("Are you based in Illinois?", True),
                                         ("Do you live in Texas?", False), ("Are you located in Springfield, IL?", True),
                                         ("Do you live within 50 miles of Springfield, Illinois?", True),
-                                        ("Are you located in Springfield, USA?", True)])
+                                        ("Are you located in Springfield, IL, USA?", True)])
 def test_located_in_place_when_computable(label, want):
     assert run(label) == (want, f"rule:{canonical_key(label)}")
 
 
 @pytest.mark.parametrize("label", ["Are you located in Springfield?", "Do you live within 25 km of Springfield?",
+                                   "Are you located in Springfield, USA?", "Are you located in Springfield, United States?",
+                                   "Do you live within 10 miles of Springfield, US?",
+                                   "Are you located in Springfield, IL, Canada?",
                                    "Are you located in Springfield, MO?", "Are you located in Springfield, Canada?",
                                    "Are you located in Chicago?", "Are you located in New York?",
                                    "Do you live within 50 miles of Chicago, IL?", "Are you based in the Bay Area?",
@@ -266,7 +269,7 @@ async def test_fact_rule_fields_are_never_assumed_or_inferred(level, label):
 
 
 def test_worked_with_salesforce_without_history_stays_unresolved():   # reviewer: blocking case
-    assert run("Have you worked with Salesforce?", company="Salesforce") is None
-    worked = [Work(company="Salesforce", title="Engineer", start="2019-01", end="2020-01")]
-    assert run("Have you worked with Salesforce?", company="Salesforce", p=view(work=worked)) == \
+    assert run("Have you worked with Quillmere Labs?", company="Quillmere Labs") is None
+    worked = [Work(company="Quillmere Labs", title="Engineer", start="2019-01", end="2020-01")]
+    assert run("Have you worked with Quillmere Labs?", company="Quillmere Labs", p=view(work=worked)) == \
         (True, "rule:prior_employee")

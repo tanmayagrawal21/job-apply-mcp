@@ -21,6 +21,7 @@ from .places import (
     _VISA_COMMON,
     ISO2,
     MULTI_REGION,
+    SUBDIVISIONS,
     VISA_LEXICON,
     VISA_MARKERS,
     _part_in,
@@ -1010,16 +1011,24 @@ def _place_answer(place: str, profile: ProfileLike, near: bool, gap: Any) -> Any
         return None
     parts = [normalize(t) for t in raw.split(",") if normalize(t)]
     if city and parts and parts[0] == normalize(city):
-        # ADR-0053 (control): the owner's own city counts only with a named region (state/province) or country that
-        # matches the profile; a bare "Springfield" may be another Springfield
+        # ADR-0053 (control): the owner's own city counts only with the profile's region (state/province) named; a
+        # country is accepted only after that region ("Springfield, IL, USA"). A bare "Springfield" or "Springfield,
+        # USA" may be another Springfield. Only a home country without subdivisions accepts "<city>, <country>".
         rest = parts[1:]
-        if len(rest) != 1:
+        if not rest or len(rest) > 2:
             return None
-        r = rest[0]
-        same_region = bool(region) and (r == normalize(region) or (_region_code(r) is not None
-                                                                    and _region_code(r) == _region_code(region)))
-        same_country = home is not None and country_iso(r, allow_codes=False) == home
-        return "Yes" if same_region or same_country else None
+
+        def same_region(r: str) -> bool:
+            return bool(region) and (r == normalize(region) or (_region_code(r) is not None
+                                                                and _region_code(r) == _region_code(region)))
+
+        def same_country(r: str) -> bool:
+            return home is not None and country_iso(r, allow_codes=False) == home
+        if region or home is None or home in SUBDIVISIONS:
+            ok = same_region(rest[0]) and (len(rest) == 1 or same_country(rest[1]))
+        else:
+            ok = len(rest) == 1 and same_country(rest[0])
+        return "Yes" if ok else None
     if near:                                                  # no geocoder: another place is never "computable"
         if not city:
             gap("contact.city")

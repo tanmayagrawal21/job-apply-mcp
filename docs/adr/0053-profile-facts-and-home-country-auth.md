@@ -66,8 +66,9 @@ holds these facts. Root causes:
      contact country is the US.
    - `located_in_place` ("are you located in X") is Yes or No when X is a country, or a US state named in full (not
      "New York" or "Washington", which are also cities). It is Yes for the owner's own city only when the question
-     also names a region (state or province) or country, and that matches the profile ("Springfield, IL"). A bare
-     "Springfield" stays unresolved.
+     also names the profile's region (state or province): "Springfield, IL", or "Springfield, IL, USA". A country
+     counts only in addition to that region. A bare "Springfield", or "Springfield, USA", stays unresolved. Only a
+     home country without subdivisions accepts "<city>, <country>".
    - `located_near` ("within N miles of X") is Yes only when X is the owner's own city with the same region or
      country rule. There is no geocoder, so
      anything else is not computable. Any other place stays unresolved; only the owner's own `[answers]` pattern for
