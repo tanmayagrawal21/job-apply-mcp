@@ -510,40 +510,63 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   const out = [], seen = new Set(), done = new Set();
   document.querySelectorAll('[data-jam-group]').forEach(x => x.removeAttribute('data-jam-group'));
   let gi = 0;
-  // LEVER (ADR-0056): Lever renders every required question with real markup (a `.required` ✱ inside the question's
-  // own .application-label, `required` on the input, or a .required-field wrapper), so the question container
-  // (.application-question) is the unit: its label is the GROUP label (never an option's text or a sentence beside
-  // it), and a choice group is required only when that markup or the API says so. Unmarked groups (pronouns,
-  // future-opportunity consent) and native selects (demographic survey) are optional. Fail closed: any marker -> required.
+  // MARKUP-OPTIONAL (ADR-0056, control review on #91): on Lever and Ashby a choice group (Lever: also a select or a
+  // text input) is OPTIONAL only when (1) its question container has exactly ONE label/title of its own and (2) NO
+  // required signal exists anywhere in that container. Everything else (no title, several titles, any signal, API
+  // required:true) is required or ambiguous -> the inverted rule (empty blocks). Signals: required / aria-required /
+  // data-required on the container or any descendant; a class matching /(^|[\\s_-])required([\\s_-]|$)/ on any of them;
+  // an asterisk, or the word "required" as a marker (a whole text node, or at its start or end: "(Required)",
+  // "Required", "This field is required"), in the container text outside option labels (the title included); a
+  // ::before/::after asterisk on any non-option element. "required" inside a sentence ("retention is required by
+  // applicable law") is prose, not a marker.
   const LEVER = a.ats === 'lever';
   const LQ = '.application-question';
-  const leverHead = q => q && q.querySelector('.application-label');
+  const REQ_CLS = /(^|[\\s_-])required([\\s_-]|$)/i;
+  const REQ_WORD = /^\\s*[(\\[{]?\\s*required\\b|\\brequired\\s*[)\\]}:.!]?\\s*$/i;
+  const clsOf = n => String((n.className && n.className.baseVal !== undefined) ? n.className.baseVal : (n.className || ''));
+  const attrReq = n => n.hasAttribute('required') || n.getAttribute('aria-required') === 'true'
+    || (n.hasAttribute('data-required') && String(n.getAttribute('data-required')).toLowerCase() !== 'false');
+  const reqSignal = (q, members, title) => {
+    const els = [q, ...q.querySelectorAll('*')];
+    if (els.some(n => attrReq(n) || REQ_CLS.test(clsOf(n)))) return true;
+    const opts = members.filter(m => m.type === 'checkbox' || m.type === 'radio');   // a select's label is the question
+    const ids = new Set(opts.map(m => m.id).filter(Boolean));
+    const optLab = n => { const l = n && n.closest && n.closest('label');
+      return !!l && l !== title && q.contains(l) && (opts.some(m => l.contains(m)) || ids.has(l.htmlFor)); };
+    const tw = document.createTreeWalker(q, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+      const el = n.parentElement; const t = (n.textContent || '').trim();
+      if (!t || !el || el.closest('script, style, noscript, option') || optLab(el)) continue;
+      if (/[*✱]/.test(t) || REQ_WORD.test(t)) return true; }
+    for (const n of els.slice(0, 400)) { if (optLab(n) && n !== title) continue;
+      for (const pe of ['::before', '::after']) { const c = getComputedStyle(n, pe).content;
+        if (c && c !== 'none' && /[*✱]/.test(c)) return true; } }
+    return false; };
+  const markupOptional = (q, members, titles, keys) => !!q && titles.length === 1 && !reqSignal(q, members, titles[0])
+    && !apiRequired(keys) && !keys.some(k => k && REQK.has(k));
+  // Lever titles: the question's own .application-label(s); a lone checkbox with no question label is titled by its
+  // own <label> (the future-opportunities consent).
+  const leverTitles = (q, members) => { const ls = [...q.querySelectorAll('.application-label')];
+    if (ls.length || members.length !== 1) return ls;
+    const l = members[0].closest('label') || (members[0].id && q.querySelector('label[for="' + CSS.escape(members[0].id) + '"]'));
+    return l ? [l] : []; };
   const leverText = h => { if (!h) return ''; const c = h.cloneNode(true);
     c.querySelectorAll('.required, input, ul, select, textarea').forEach(x => x.remove()); return c.textContent; };
-  const leverReq = (q, members) => !!q && (members.some(m => m.required || m.getAttribute('aria-required') === 'true')
-    || !!q.querySelector('.application-label .required, .required-field, [data-qa*=required i]')
-    || /[*✱]/.test((leverHead(q) || {}).textContent || ''));
-  // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
-  // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
-  // ASHBY (ADR-0056): every field entry has a question title, and a required one carries Ashby's `_required_<hash>`
-  // class (an asterisk drawn in CSS). A choice group whose OWN title exists without that marker, with no
-  // required/aria-required member and no API required flag, is optional (voluntary EEO, recording consent). No
-  // title found -> the inverted rule below still applies (fail closed).
-  const ashbyUnmarked = (members, idCands, names) => {
+  const ashbyOptional = (members, idCands, names) => {
     if (a.ats !== 'ashby') return false;
     const fe = members[0].closest('[data-field-path]');
-    const t = fe && [...fe.querySelectorAll('.ashby-application-form-question-title')].find(x => x.closest('[data-field-path]') === fe);
-    if (!t) return false;
-    const fpk = fe.getAttribute('data-field-path');
-    if (members.some(m => m.required || m.getAttribute('aria-required') === 'true') || REQ_ATTR(t) || REQ_ATTR(fe)
-        || /[*✱]/.test(t.textContent || '') || /\brequired\b/i.test(t.textContent || '')) return false;
-    for (const pe of ['::after', '::before']) { const c = getComputedStyle(t, pe).content; if (c && /[*✱]/.test(c)) return false; }
-    return !REQK.has(fpk) && !apiRequired(idCands.concat(names, [fpk])); };
+    if (!fe) return false;
+    const titles = [...fe.querySelectorAll('.ashby-application-form-question-title')];
+    return markupOptional(fe, members, titles, idCands.concat(names, [fe.getAttribute('data-field-path')])); };
+  // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
+  // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
+  // ASHBY (ADR-0056): the [data-field-path] entry is the container and its .ashby-application-form-question-title
+  // (or legend) the title; a required title carries a hashed `_required_<hash>` class (caught by REQ_CLS).
   const emit = (members, container, text, idCands, consent, headEl) => {
     if (members.some(m => m.checked)) return;
     const names = members.flatMap(m => [m.name, m.id]);
     if (apiOptional(idCands.concat(names))) return;
-    if (ashbyUnmarked(members, idCands, names)) return;
+    if (ashbyOptional(members, idCands, names)) return;
     const opts = members.map(optText).slice(0, 12);
     const exempt = !apiRequired(idCands.concat(names)) && !markedRequired(members, container, headEl, text)
       && CONSENT.test(clean(text));
@@ -563,10 +586,12 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
       members.forEach(m => done.add(m));
       if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement))) continue;
       const names = members.flatMap(m => [m.name, m.id]);
-      if (!leverReq(q, members) && !apiRequired(names)) continue;          // no required markup: optional
-      const head = leverHead(q);
-      let text = leverText(head);
-      if (!clean(text) && members.length === 1) text = (members[0].closest('label') || {}).textContent || '';
+      const titles = leverTitles(q, members);
+      if (markupOptional(q, members, titles, names)) continue;            // one title, no required signal: optional
+      const head = titles[0] || null;
+      let text = titles.length === 1 ? leverText(head) : '';
+      if (!clean(text)) text = clean([...q.querySelectorAll('.application-label')].map(leverText).join(' / '))
+        || (members[0].closest('label') || {}).textContent || '';
       emit(members, q, text, [members[0].name], false, head);
     }
   }
@@ -635,9 +660,11 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     const native = e.tagName === 'SELECT';
     const lq = LEVER ? e.closest(LQ) : null;
     const fpk = (e.closest('[data-field-path]') || {getAttribute: () => ''}).getAttribute('data-field-path');
-    const isReq = req(e) || (lq && leverReq(lq, [e])) || (!!fpk && REQK.has(fpk));
+    // Lever (ADR-0056): optional only with one question label and no required signal in the question; otherwise a
+    // native select follows the inverted rule and a text input counts as required when the question is ambiguous
+    const lopt = !!lq && markupOptional(lq, [e], [...lq.querySelectorAll('.application-label')], [e.id, e.name]);
+    const isReq = req(e) || (!!lq && !lopt) || (!!fpk && REQK.has(fpk));
     // native selects follow the inverted rule too: empty -> gap unless the API marks the field required:false
-    // (Lever: markup only, ADR-0056)
     if (!(native && !LEVER ? (isReq || !apiOptional([e.id, e.name])) : isReq)) continue;
     let empty = false;
     if (rs) { const sh = e.closest('[class*=select__control]').parentElement;
@@ -646,7 +673,7 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     else empty = !(e.value || '').trim();
     if (!empty) continue;
     const fpl = fpk ? (e.closest('[data-field-path]').querySelector('label') || {}).textContent : '';
-    const lab = clean(lq ? leverText(leverHead(lq)) : '') || clean(labelOf(e)) || clean(fpl) || fpk || e.id;
+    const lab = clean(lq ? leverText(lq.querySelector('.application-label')) : '') || clean(labelOf(e)) || clean(fpl) || fpk || e.id;
     const sk = e.id || lab; if (seen.has(sk)) continue; seen.add(sk);
     out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs,
               exempt: native && !req(e) && !apiRequired([e.id, e.name]) && CONSENT.test(lab)});

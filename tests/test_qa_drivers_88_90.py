@@ -374,3 +374,74 @@ async def test_ashby_yes_no_with_hidden_checkbox_is_fast(drv):
     assert await drv._fill(pg, ATS["ashby"], f, True)
     assert time.monotonic() - t0 < 5                    # was the full 30 s default timeout per question
     assert await drv._verify(pg, [(f, True)], ATS["ashby"]) == []
+
+
+# ---------------------------------------------------------------- control review on #91: unrecognised required
+# markup must FAIL CLOSED. Each shape has one empty required question; every one must block.
+
+def _lever_q(label_html="<div class=\"application-label\">Which apply?</div>", extra="", q_attrs="", ul_attrs="",
+             style=""):
+    boxes = "".join(f'<li><label><input type="checkbox" name="cards[c1][field0]" value="{o}"><span>{o}</span></label></li>'
+                    for o in ("A", "B"))
+    return (f'<html><head><style>{style}</style></head><body><form><ul><li class="application-question"{q_attrs}>'
+            f'{label_html}{extra}<div class="application-field"><ul{ul_attrs}>{boxes}</ul></div></li></ul></form>'
+            '</body></html>')
+
+
+LEVER_BLOCK = {
+    "asterisk-outside-label": _lever_q(extra="<span>✱</span>"),
+    "required-text": _lever_q('<div class="application-label">Which apply? (Required)</div>'),
+    "required-badge": _lever_q('<div class="application-label">Which apply? <span>Required</span></div>'),
+    "css-after-asterisk": _lever_q('<div class="application-label lab-x">Which apply?</div>',
+                                   style=".lab-x::after{content:'*'}"),
+    "aria-required-ul": _lever_q(ul_attrs=' aria-required="true"'),
+    "aria-required-question": _lever_q(q_attrs=' aria-required="true"'),
+    "no-application-label": _lever_q("<div>Which apply?</div>"),
+    "select-required-text": ('<html><body><form><ul><li class="application-question"><label><div class="application-label">'
+                             'How did you hear? (required)</div><select name="cards[c1][field1]"><option value="">Select'
+                             '</option><option>Web</option></select></label></li></ul></form></body></html>'),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(LEVER_BLOCK))
+async def test_lever_unrecognised_required_markup_blocks(drv, shape):
+    pg = await _page(drv, LEVER_BLOCK[shape], ats="lever")
+    assert len(await drv._empty_required(pg)) == 1, shape
+
+
+def _ashby_g(*, wrapper_attrs="", entry_cls="_fieldEntry_x", fs_attrs="", title="Pick one",
+             title_cls="_heading_x1  ashby-application-form-question-title", extra_title=""):
+    radios = _radios("e1__q_pick", ["A", "B"])
+    return (f'<html><body><form><div data-field-path="q_pick"{wrapper_attrs}><fieldset class="{entry_cls} '
+            f'ashby-application-form-field-entry"{fs_attrs}>{extra_title}<label class="{title_cls}">{title}</label>'
+            f'{radios}</fieldset></div></form></body></html>')
+
+
+ASHBY_BLOCK = {
+    "aria-required-fieldset": _ashby_g(fs_attrs=' aria-required="true"'),
+    "data-required-wrapper": _ashby_g(wrapper_attrs=' data-required="true"'),
+    "required-class-on-entry": _ashby_g(entry_cls="_fieldEntry_x _required_zz_9"),
+    "two-titles": _ashby_g(extra_title='<label class="_heading_x1 ashby-application-form-question-title">Section</label>'),
+    "required-text-in-title": _ashby_g(title="Pick one (required)"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(ASHBY_BLOCK))
+async def test_ashby_unrecognised_required_markup_blocks(drv, shape):
+    pg = await _page(drv, ASHBY_BLOCK[shape], ats="ashby")
+    assert len(await drv._empty_required(pg)) == 1, shape
+
+
+async def test_unmarked_single_title_groups_stay_optional(drv):
+    pg = await _page(drv, _lever_q(), ats="lever")
+    assert await drv._empty_required(pg) == []
+    pg = await _page(drv, _ashby_g(), ats="ashby")
+    assert await drv._empty_required(pg) == []
+
+
+async def test_prose_mentioning_required_is_not_a_marker(drv):
+    html = _ashby_g().replace('<label class="_heading_x1  ashby-application-form-question-title">Pick one</label>',
+                              '<label class="_heading_x1  ashby-application-form-question-title">Pick one</label>'
+                              '<p>Recordings are kept unless retention is required by applicable law.</p>')
+    pg = await _page(drv, html, ats="ashby")
+    assert await drv._empty_required(pg) == []

@@ -26,22 +26,28 @@ A QA round on PR #81 found three driver and adapter faults:
    Check" select was offered to the client as a task.
 
 ## Decision
-- **Lever is judged by its markup.** On Lever (`ats == "lever"`), the `.application-question` container is the unit
-  for each question. Its label is the group label: the `.application-label` text without the marker. A choice
-  group or native select counts as required only if it carries real required markup or the API marks it required.
-  Real markup means `required` or `aria-required` on a member, a `.required` marker (✱) or an asterisk in its own
-  `.application-label`, or a `.required-field` wrapper. The scan still fails closed: any one marker, or an API
-  `required:true`, makes the question required. A required question with nothing selected still blocks the run.
-  Hidden survey sections are not visible, so the scan skips them. Every other ATS keeps the ADR-0039 inverted
-  rule unchanged.
-- **Ashby is judged by its markup too.** Every Ashby field entry has a `.ashby-application-form-question-title`.
-  A required title carries a hashed `_required_<hash>` class, and the asterisk is drawn in CSS. A choice group
-  counts as optional when all of these hold: its own title exists, the title has no such class, `required`,
-  `aria-required`, asterisk or pseudo-element asterisk, and the API (by `data-field-path` or member name) does
-  not mark the field required. Examples are the voluntary EEO groups and the interview-recording consent. A
-  group without a title keeps the inverted rule. Whether a voluntary EEO question gets an answer, such as
-  "decline to self-identify", stays the mapper's and autonomy's decision. The driver only stops calling these
-  groups required.
+- **Optional only when the markup clearly says so (Lever and Ashby, revised after the #91 control review).** The
+  unit is the question container: `.application-question` on Lever, the `[data-field-path]` entry on Ashby. A choice
+  group counts as optional only when both of these hold:
+  1. The container has exactly one label or title of its own. On Lever that is the `.application-label`, or a
+     lone checkbox's own `<label>`. On Ashby it is the `.ashby-application-form-question-title`.
+  2. The container shows no required signal anywhere.
+
+  On Lever the same rule applies to a native select or a text input. The required signals are:
+  - `required`, `aria-required` or `data-required` on the container or on any descendant;
+  - any class matching `/(^|[\s_-])required([\s_-]|$)/`, which includes Ashby's hashed `_required_<hash>` and
+    Lever's `.required` / `.required-field`;
+  - an asterisk, or "required" used as a marker, in the container text outside option labels. A marker is a whole
+    text node, or "required" at the start or end of one: "(Required)", a "Required" badge, "This field is
+    required". The same word inside a sentence, such as "retention is required by applicable law" in Ashby's
+    recording-consent notice, is prose and does not count;
+  - a `::before` or `::after` asterisk;
+  - API `required: true`.
+
+  No title, or more than one title, is ambiguous. The ADR-0039 inverted rule then applies, and an empty group
+  blocks. Every other ATS keeps the ADR-0039 rule unchanged. On the live forms, Lever's pronouns, the
+  future-opportunities consent and the survey select are optional. So are Ashby's voluntary EEO groups and its
+  recording consent. Whether a voluntary EEO question gets an answer stays the mapper's and autonomy's decision.
 - **Ashby Yes/No questions.** Ashby keeps a hidden checkbox behind its Yes/No buttons. The direct click now runs
   only when the checkbox is visible. Before, it waited the full 30 s default timeout for each question and then
   fell through to the buttons. That cost about 90 s on Lambda.
