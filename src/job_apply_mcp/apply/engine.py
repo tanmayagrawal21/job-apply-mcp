@@ -42,6 +42,7 @@ from .mapper import (
     eeo_class,
     geo_kind,
     job_country,
+    llm_safe_short,
     looks_fabricated,
     map_fields,
     never_llm,
@@ -287,7 +288,8 @@ class ApplyEngine:
         pending = [f for f in mapped.unresolved if f.key not in voluntary]
         owner_only = [f for f in pending if never_llm(f)]        # legal status / place: never a model (ADR-0040)
         pending = [f for f in pending if f not in owner_only]
-        short = [f for f in pending if self._is_short(f) and self._llm_allowed(f)]
+        # ADR-0040: the short-answer model only sees allowlisted questions; _llm_allowed is defence in depth
+        short = [f for f in pending if self._is_short(f) and llm_safe_short(f) and self._llm_allowed(f)]
         long_ = [f for f in pending if f not in short]
         tasks: list[dict[str, Any]] = []
         if self.router is not None:

@@ -150,3 +150,32 @@ async def test_engine_plan_lists_profile_gaps():
     out = await e.plan(POSTING.ref)
     assert out.compact()["profile_gaps"] == [{"country": "CA", "fact": "requires_sponsorship", "key": "q"}]
     assert "q" in out.plan.unresolved
+
+
+def test_us_citizen_comes_from_us_facts():
+    p = view(home_country="CA", citizen=True)                       # Canadian citizen, home Canada
+    r = map_fields([F("q", "Are you a US citizen?", FieldKind.select, options=YN)], p)
+    assert "Yes" not in [a.value for a in r.answers]
+    q = view(home_country="CA", citizen=True, US={"citizen": True})
+    r = map_fields([F("q", "Are you a US citizen?", FieldKind.select, options=YN)], q)
+    assert [a.value for a in r.answers] == ["Yes"]
+    assert view(citizen=True).lookup("us_citizen") == "Yes"          # home US: the flat key still counts
+
+
+def test_short_llm_allowlist():
+    from apply_fakes import FakeGates, FakeStore, settings
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    from job_apply_mcp.apply.mapper import llm_safe_short
+    e = ApplyEngine(settings(), resolve_adapter=lambda ref: None, profile=FakeProfile(), router=None,
+                    gates=FakeGates(), store=FakeStore(), driver_factory=lambda n: None)
+    blocked = ["Have you been convicted of a misdemeanor?", "Do you have any unspent police cautions?",
+               "Do you have pre-settled status?", "Do you hold a Stamp 4?", "Can you work CET hours?",
+               "Do you have a valid driving licence?", "Nickname", "Pick one", "What is your favourite colour?"]
+    for label in blocked:
+        f = F("k", label, FieldKind.text, max_length=80)
+        assert not llm_safe_short(f), label
+    for label in ["Favorite build tool", "How many years of experience with Rust?", "What is your notice period?",
+                  "Link to your portfolio", "When can you start?", "Which programming languages do you know?"]:
+        assert llm_safe_short(F("k", label, FieldKind.text, max_length=80)), label
+    assert e._is_short(F("k", "Favorite build tool", FieldKind.text, max_length=80))

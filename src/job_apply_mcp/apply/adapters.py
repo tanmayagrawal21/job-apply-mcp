@@ -109,7 +109,8 @@ class ProfileView:
     def _structured(self, key: str) -> bool | None:
         a, pr = self.p.authorization, self.p.preferences
         return {"work_authorized": a.work_authorized, "requires_sponsorship": a.requires_sponsorship,
-                "us_citizen": a.citizen, "willing_to_relocate": pr.willing_to_relocate,
+                # ADR-0040: US citizenship comes from the US facts (flat `citizen` only when home_country is US)
+                "us_citizen": a.facts_for("US").citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
                 "open_to_onsite": pr.open_to_onsite,
                 "acknowledge_privacy_notices": pr.acknowledge_privacy_notices}.get(key)

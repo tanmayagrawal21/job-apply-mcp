@@ -80,7 +80,7 @@ async def test_llm_url_placeholder_and_url_questions_never_answered():
                           "n": {"value": "https://example.com/x", "confidence": 0.99}})
     out = await eng(form, r).plan(POSTING.ref)
     assert out.plan.answers == [] and set(out.plan.unresolved) == {"u", "n"}
-    assert '"u"' not in r.calls[0][1]  # URL question never sent to the model
+    assert not r.calls or '"u"' not in r.calls[0][1]  # URL question never sent to the model (ADR-0040: no call at all)
 
 
 def test_geo_fields_derived_or_omitted_never_tasks():

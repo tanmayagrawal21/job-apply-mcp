@@ -999,6 +999,21 @@ _NEVER_LLM_PLACE_SHORT = re.compile(r"\boffices?\b|\bmetro\b|\bnear\b|\bwhere\b|
                                     r"\bcome (?:in|to)\b")
 
 
+# ADR-0040 (final): the short-answer model may only answer an ALLOWLISTED kind of question: tools / technologies /
+# skills, years of experience with something, notice period or start availability, links or portfolio, referral
+# source. Everything else stays unresolved (owner task or profile gap). never_llm() stays as defence in depth.
+_LLM_SAFE_SHORT = re.compile(
+    r"\b(?:tools?|technolog\w*|frameworks?|librar(?:y|ies)|languages?|tech stack|stack|software|platforms?|databases?|"
+    r"programming|coding|skills?|proficien\w*|familiar\w*|experience (?:with|in|using)|years of (?:professional )?"
+    r"experience|how many years|notice period|start date|available to start|availability to start|earliest start|"
+    r"when can you start|portfolio|github|website|links?|url|how did you hear|how did you find|referred)\b")
+
+
+def llm_safe_short(f: FormField) -> bool:
+    """True only for an allowlisted, non-legal, non-place short question (ADR-0040)."""
+    return bool(_LLM_SAFE_SHORT.search(normalize(f.label))) and not never_llm(f) and not eeo_class(f.label)[0]
+
+
 def never_llm(f: FormField) -> bool:
     """True for legal-status and place questions (label or options): deterministic rule or owner only."""
     texts = [normalize(f.label), *(normalize(o) for o in f.options)]

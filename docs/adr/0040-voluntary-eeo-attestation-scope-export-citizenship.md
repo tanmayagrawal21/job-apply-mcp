@@ -91,6 +91,12 @@ A QA round (issues #47, #48, #51) found:
     an unknown job country or missing facts leave the field unresolved; missing facts are recorded as
     `profile_gaps` ({country, fact, key}) in the plan output for the profile builder. Export control and "U.S. person"
     remain legal, never-LLM and unresolved by default.
+- **Short-answer allowlist (final).** The short-answer model only sees allowlisted questions (`llm_safe_short`):
+  tools, technologies, skills, years of experience with something, notice period or start availability, links or
+  portfolio, referral source. Everything else (criminal record, police cautions, residence statuses such as
+  pre-settled status or Stamp 4, working hours, driving licence, ...) stays with the owner. `never_llm` and the
+  engine's sensitive checks remain as defence in depth. US citizenship comes from the US facts: the flat `citizen` key
+  counts only when `home_country` is US, otherwise `[authorization.US].citizen`.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an
