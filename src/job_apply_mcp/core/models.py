@@ -95,3 +95,4 @@ class SubmitResult(BaseModel):
     confirmation: str | None = None
     detail: str | None = None
     pending_id: str | None = None   # awaiting_code only: pass to provide_verification_code (ADR-0026)
+    client_tasks: list[dict[str, Any]] = Field(default_factory=list)   # needs_review: prose that failed review (ADR-0044)
