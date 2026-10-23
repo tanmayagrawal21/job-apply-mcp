@@ -146,6 +146,11 @@ def contact_channels(f: FormField, company: str = "") -> list[str] | None:
     classifier's interface (contact_permission_channels)."""
     if not _choice(f):
         return None
+    from . import mapper
+    single = getattr(mapper, "is_single_permission_ask", None)
+    if single is not None:              # ADR-0050 (#73): one source of truth for a single-clause permission ask
+        chans = single(f.label)
+        return list(chans) if chans else None
     n = normalize(f.label)
     for w in [w for w in normalize(company).split() if len(w) > 2]:
         n = re.sub(rf"\b{re.escape(w)}(?: s)?\b", " ", n)

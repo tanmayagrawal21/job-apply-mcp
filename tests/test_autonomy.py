@@ -106,7 +106,9 @@ NOT_ASKS = ["Would you like to receive WhatsApp training?", "Do you have experie
             "Would you like to join our marketing team?", "Would you like to own our SMS product?",
             "Can we contact your references?", "Do you want to opt out of marketing emails?",
             "I agree to receive text messages and accept the privacy policy",
-            "Would you like to receive updates and agree to binding arbitration?"]
+            "Would you like to receive updates and agree to binding arbitration?",
+            "Have you been arrested, and may we text you?",
+            "Do you have WhatsApp experience, and may we message you there?"]
 
 
 @pytest.mark.parametrize("label", NOT_ASKS)
@@ -342,3 +344,16 @@ async def test_run_report_labels_assumed_answers_at_each_level(tmp_path, level):
             "infer": {"q_contact": "assumed:decline_contact_permission", "q_cold": "assumed:infer"}}[level]
     assert rules == want
     assert rep["counts"] == ({"dry_run_ok": 1} if level == "infer" else {"needs_human": 1})
+
+
+@pytest.mark.parametrize("level", ["safe_default", "infer"])
+@pytest.mark.parametrize("label", ["Have you been arrested, and may we text you?",
+                                   "Do you have WhatsApp experience, and may we message you there?"])
+async def test_compound_permission_labels_are_never_assumed(level, label):
+    class One(FakeAdapter):
+        async def get_form(self, ref):
+            return ApplicationForm(ref=ref, submit_via=["api"], fields=[F("q", label, FieldKind.select, options=YN)])
+    e = ApplyEngine(settings(answers__autonomy=level), resolve_adapter=lambda ref: One(), profile=FakeProfile(),
+                    router=model(q=("Yes", 0.99)), gates=FakeGates(), store=FakeStore())
+    a = got(await e.plan(POSTING.ref)).get("q")
+    assert a is None or not a.assumed          # the autonomy layer never assumes it (the mapper's rule is #73's)

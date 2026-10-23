@@ -38,6 +38,9 @@ user's usual "how did you hear about us" source.
      - The channels come only from the classifier's interface (`contact_permission_channels`), so a change to its
        regexes does not change this rule.
      - Without a clean declining option the field stays unresolved.
+     - When ADR-0050 exports `is_single_permission_ask(label)` (#73), that function alone decides: one anchored,
+       single-clause permission ask with no legal or attestation terms. The local templates are only a fallback until
+       then. Compound labels ("Have you been arrested, and may we text you?") are never declined or answered.
    - **"How did you hear about us"** gets `answers.referral_default`, then the `apply.referral_preference` list. On
      a choice field this is the first preference that matches an option (never a referral or employee option), else a
      plain "Other". On free text it is the first preference.
