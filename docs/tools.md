@@ -41,7 +41,7 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 |---|---|---|
 | `run_applications` | `links=None`, `links_file=None`, `sources=None` (links, mail, discovery), `max_applications=None`, `dry_run=None`, `mail=None` ({sender, recipient, query, label, since, since_days}), `messages=None` (client mail source), `discovery=None` (search_jobs arguments) | the run report: `run_id`, `counts`, rows per category with `why`, and `plan_context` (feedback applied, notes). Priority: explicit links, emailed links, discovery. Unknown hosts are `unsupported_site` rows |
 | `run_report` | `run_id=""` (latest), `category=""`, `limit=20` | submitted, dry_run, confirmed, handed_off, unknown, skipped, unsupported_site and failed rows, each with `why` |
-| `give_feedback` | `run_id`, `feedback` (free text or {kind: deny_company, deny_title, answer, salary, run_size, ...}), `ref=None` | the stored feedback and what the next run will apply |
+| `give_feedback` | `run_id`, `feedback` (free text or {kind: deny_company, deny_title, answer, profile_answer, salary, run_size, ...}), `ref=None` | the stored feedback and what the next run will apply. Salary feedback never goes below the configured floor; authorization/demographic/attestation answers go to `answer_profile_question` (pending until the profile builder is installed) |
 
 ## Control layer and mail dedupe
 

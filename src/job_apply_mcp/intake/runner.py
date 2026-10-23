@@ -71,9 +71,19 @@ def read_links_file(path: str | Path) -> list[str]:
 class IntakeRunner:
     def __init__(self, settings: Any, *, engine: Any, store: IntakeStore, resolve: Callable[[str], Any],
                  search: Callable[..., Awaitable[dict[str, Any]]] | None = None, self_address: str = "",
-                 mail_connect: Any = None):
+                 mail_connect: Any = None, profile_answer_sink: Callable[..., Any] | None = None):
         self.s, self.engine, self.store, self._resolve = settings, engine, store, resolve
         self._search, self._me, self._connect = search, self_address, mail_connect
+        self._sink = profile_answer_sink if profile_answer_sink is not None else self._builder_sink()
+
+    def _builder_sink(self) -> Callable[..., Any] | None:
+        """The profile builder's answer_profile_question path (ADR-0047) when installed, else None: answers then
+        stay pending in intake_feedback and are delivered by the first run after it lands."""
+        try:
+            from ..persona.tools import store_answer  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        return lambda key, value, scope, scope_value: store_answer(self.s, key, value, scope, scope_value)
 
     @classmethod
     def from_services(cls, svc: Any) -> IntakeRunner:
@@ -105,12 +115,29 @@ class IntakeRunner:
             return (urlsplit(url).hostname or url).lower()
         return ":".join(c.target.split(":")[:2])
 
+    async def _deliver_profile_answers(self, problems: list[str]) -> tuple[list[str], list[dict[str, Any]]]:
+        """Hand pending authorization/demographic/attestation answers to the profile builder. Returns
+        (delivered descriptions, still pending rows)."""
+        pending = await self.store.pending_profile_answers()
+        if not pending or self._sink is None:
+            return [], pending
+        done, left = [], []
+        for p in pending:
+            try:
+                self._sink(p["key"], p["value"], p["scope"], p.get("scope_value", ""))
+                done.append(p)
+            except Exception as e:  # noqa: BLE001 - keep it pending; the next run retries
+                problems.append(f"profile answer {p['key']}: {str(e)[:120]}")
+                left.append(p)
+        await self.store.mark_delivered([p["id"] for p in done])
+        return [describe("profile_answer", p) + " -> answer_profile_question" for p in done], left
+
     async def _apply_feedback(self, run_id: str) -> tuple[int | None, list[str], list[str], list[str]]:
         rows = await self.store.feedback()
-        structured = [r for r in rows if r["kind"] != "note"]
+        structured = [r for r in rows if r["kind"] not in ("note", "profile_answer")]
         run_size, problems = apply_overlays(self.s, getattr(self.engine, "profile", None), structured)
         pending = [r for r in rows if r["applied_run"] is None]
-        applied = [describe(r["kind"], r["payload"]) for r in pending if r["kind"] != "note"]
+        applied = [describe(r["kind"], r["payload"]) for r in pending if r["kind"] not in ("note", "profile_answer")]
         notes = [r["payload"]["text"] for r in pending if r["kind"] == "note"]
         await self.store.mark_feedback_applied([r["id"] for r in pending], run_id)
         return run_size, applied, notes, problems
@@ -167,8 +194,11 @@ class IntakeRunner:
         notes: list[str] = []
         applied: list[str] = []
         fb_notes: list[str] = []
+        pending_pa: list[dict[str, Any]] = []
         try:
             run_size, applied, fb_notes, problems = await self._apply_feedback(run_id)
+            delivered, pending_pa = await self._deliver_profile_answers(problems)
+            applied += delivered
             notes += problems
             n = max(1, min(cfg.max_applications_cap, max_applications or run_size or cfg.max_applications))
             pool_size = math.ceil(n * cfg.plan_factor)
@@ -180,7 +210,9 @@ class IntakeRunner:
                 await self.store.mark_processed(run_id, done)
             rows = [c.row() for c in cands if c.target]
             await self.store.add_items(run_id, rows)
-            ctx = {"applied_feedback": applied, "feedback_notes": fb_notes, "notes": notes}
+            ctx = {"applied_feedback": applied, "feedback_notes": fb_notes, "notes": notes,
+                   "pending_profile_answers": [{k: p[k] for k in ("key", "value", "scope", "scope_value") if p.get(k)}
+                                               for p in pending_pa]}
             rep = self._build(run_id, rows, cfg.report_rows)
             await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live"})
         return {**rep, "mode": "dry_run" if dry else "live", "plan_context": {k: v for k, v in ctx.items() if v}}
@@ -357,7 +389,8 @@ class IntakeRunner:
                     await self.store.set_item_status(it["id"], "confirmed")
         rep = self._build(run["run_id"], items, limit or self.s.intake.report_rows, category)
         summ = run["summary"]
-        ctx = {k: summ.get(k) for k in ("applied_feedback", "feedback_notes", "notes") if summ.get(k)}
+        ctx = {k: summ.get(k) for k in ("applied_feedback", "feedback_notes", "notes", "pending_profile_answers")
+               if summ.get(k)}
         return {**rep, "started": run["started_at"], "finished": run["finished_at"], "mode": summ.get("mode"),
                 **({"plan_context": ctx} if ctx else {})}
 
@@ -377,4 +410,7 @@ class IntakeRunner:
         except FeedbackError as e:
             return {"error": str(e)}
         fid = await self.store.add_feedback(run_id or None, ref, kind, payload)
-        return {"id": fid, "kind": kind, "will_apply": describe(kind, payload), "when": "at the start of the next run"}
+        when = ("at the start of the next run, via the profile builder's answer_profile_question (kept pending and "
+                "listed in run reports until it is installed)") if kind == "profile_answer" else \
+            "at the start of the next run"
+        return {"id": fid, "kind": kind, "will_apply": describe(kind, payload), "when": when}

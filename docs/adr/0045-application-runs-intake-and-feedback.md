@@ -47,18 +47,35 @@ writing.
    unsupported_site and failed. `run_report(run_id)` and `job-apply-mcp report` read it back. Before reading, they
    promote rows to `confirmed` when reconciliation (ADR-0025) has confirmed the submission since.
 7. **Feedback loop.** `give_feedback(run_id, feedback, ref=None)` / `job-apply-mcp feedback` accepts:
-   - structured feedback: `deny_company` / `deny_title` (a regex, or with `ref` that item's exact company or title);
-     `answer` (pattern and value); `salary` (`salary_floor`, `default_ask`, `base_salary`); `run_size` (`value` or
-     `delta`, resolved and clamped when given);
+   - structured feedback:
+     - `deny_company` / `deny_title`: a regex, or, given a `ref`, that item's exact company or title;
+     - `answer`: a pattern and a value;
+     - `salary`: `salary_floor`, `base_salary`, `default_ask`, the profile's `expected` salary rule, `delta`
+       (for example +5000 for "raise salary"), `percent`;
+     - `run_size`: `value` or `delta`, resolved and clamped when given;
+     - `profile_answer`: see item 8;
    - free text, stored as a note.
    Feedback is stored in `intake_feedback`. At the start of every run, all structured feedback is replayed in order
-   onto the in-memory `policy` (denylists, salary) and the profile's `answers`. Replay is idempotent. Feedback no
+   onto the in-memory `policy` (denylists, salary), the profile's `answers` and its salary rule. Replay is
+   idempotent: salary values are reset to the configured ones first, so a delta is never applied twice. Feedback no
    run has seen yet is listed in `plan_context.applied_feedback`, and pending notes appear in
    `plan_context.feedback_notes`. Both are then marked applied. The user's config and profile files are never
-   written. Answers whose pattern concerns authorization, sponsorship, citizenship, demographics, attestations or
-   pay are refused through feedback, because a wrong value is a false legal statement. Those are edited in
-   `profile.toml`.
-8. **Safety is unchanged.** `dry_run` follows the global setting, and a per-run value can only make a run safer (the
+   written.
+   **The salary floor holds.** The configured floor is a hard lower bound. Feedback may raise `salary_floor` or
+   `base_salary` but never lower them below the configured values. After every step, `default_ask` and `expected`
+   are clamped to at least the effective floor, and each clamp is noted in `plan_context.notes`.
+8. **Authorization, demographic and attestation answers go to the profile builder.** These are legal or
+   biographical statements, so they are never in-memory overlays. Such feedback is either an `answer` whose
+   pattern matches those topics (rerouted automatically) or an explicit
+   `{"kind":"profile_answer", key|question, value, scope, scope_value}`. It becomes a `profile_answer` row in the
+   profile builder's format (ADR-0047, PR #65): the mapper's canonical key when the question has one (for example
+   `work_authorized`, `veteran`), else `q:<normalized question>`, with scope `global`, `company` (default: the
+   item's company) or `role_family`. At the start of a run, pending rows are handed to the builder's
+   `answer_profile_question` path (`persona.tools.store_answer`) when that module is installed, and listed under
+   `applied_feedback`. Until then they stay pending. Every run report lists them under
+   `plan_context.pending_profile_answers`, and the first run after the builder lands delivers them. Pay questions
+   sent as `answer` are refused with a pointer to `salary`.
+9. **Safety is unchanged.** `dry_run` follows the global setting, and a per-run value can only make a run safer (the
    engine's rule). In human approval mode, live runs hand every ready job off with its approval id, as
    `apply_batch` does. Approvals, CAPTCHA, OTP and credential handling are untouched.
 
@@ -81,7 +98,10 @@ writing.
 - `max_applications` is respected;
 - priority order, with discovery called only when the pool has room;
 - processed mail ids are recorded, and messages with deferred links are kept;
-- feedback is applied in the next run and replay is idempotent; sensitive answers are refused;
+- feedback is applied in the next run and replay is idempotent;
+- salary feedback raises the ask but never goes below the configured floor;
+- authorization and demographic answers stay pending as profile answers until the builder's sink exists, then
+  are delivered once;
 - `unsupported_site` rows;
 - one submit per host with parallelism across hosts;
 - deferred prose is skipped without narrative calls;

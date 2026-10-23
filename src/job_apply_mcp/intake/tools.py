@@ -43,7 +43,9 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
     async def give_feedback(run_id: str, feedback: str | dict[str, Any], ref: str | None = None) -> str:
         """Feedback on a run (optionally on one `ref` of it), applied at the start of the next run. Structured:
         {"kind":"deny_company"|"deny_title", "pattern"?} (no pattern + ref = that item's company/title),
-        {"kind":"answer","pattern","value"} (not authorization/demographic/pay answers), {"kind":"salary",
-        "salary_floor"|"default_ask"|"base_salary"}, {"kind":"run_size","value"|"delta"}. Free text is stored and
-        shown in the next run's plan_context."""
+        {"kind":"answer","pattern","value"}; authorization, demographic and attestation answers (or
+        {"kind":"profile_answer","key"|"question","value","scope":"global|company|role_family","scope_value"}) go to
+        the profile builder's answer_profile_question, pending until it is installed. {"kind":"salary",
+        "salary_floor"|"base_salary"|"default_ask"|"expected"|"delta"|"percent"}: never below the configured floor.
+        {"kind":"run_size","value"|"delta"}. Free text is stored and shown in the next run's plan_context."""
         return _dump(await runner().give_feedback(run_id, ref, feedback))

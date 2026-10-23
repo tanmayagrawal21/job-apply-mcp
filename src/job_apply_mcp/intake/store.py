@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS intake_feedback(
   kind TEXT NOT NULL,
   payload TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  applied_run TEXT
+  applied_run TEXT,
+  delivered_at TEXT
 );
 """
 
@@ -167,6 +168,18 @@ class IntakeStore:
             q = "SELECT * FROM intake_feedback" + (" WHERE applied_run IS NULL" if pending_only else "") + " ORDER BY id"
             return [{**dict(r), "payload": json.loads(r["payload"])} for r in self._db.execute(q)]
         return await self._a(f)
+
+    async def pending_profile_answers(self) -> list[dict[str, Any]]:
+        """profile_answer feedback not yet handed to the profile builder (answer_profile_question, ADR-0047)."""
+        def f():
+            return [{"id": r["id"], **json.loads(r["payload"]), "run_id": r["run_id"], "ref": r["ref"]}
+                    for r in self._db.execute("SELECT * FROM intake_feedback WHERE kind='profile_answer' "
+                                              "AND delivered_at IS NULL ORDER BY id")]
+        return await self._a(f)
+
+    async def mark_delivered(self, ids: list[int]) -> None:
+        await self._a(lambda: self._db.executemany("UPDATE intake_feedback SET delivered_at=? WHERE id=?",
+                                                   [(_now(), i) for i in ids]))
 
     async def mark_feedback_applied(self, ids: list[int], run_id: str) -> None:
         await self._a(lambda: self._db.executemany("UPDATE intake_feedback SET applied_run=? WHERE id=?",

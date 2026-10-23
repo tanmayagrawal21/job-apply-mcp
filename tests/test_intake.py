@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -93,6 +94,7 @@ class Store:
 class _P:
     def __init__(self):
         self.answers: dict[str, str] = {}
+        self.salary = SimpleNamespace(expected=None)
 
 
 class Profile(FakeProfile):
@@ -110,7 +112,7 @@ def resolve(target):
     raise AdapterError("no adapter")
 
 
-def make(tmp_path, *, adapter=None, search=None, router=None, live=False, connect=None, **cfg):
+def make(tmp_path, *, adapter=None, search=None, router=None, live=False, connect=None, sink=None, **cfg):
     s = settings(**cfg)
     s.paths.data_dir = str(tmp_path)
     s.dry_run = not live
@@ -123,7 +125,8 @@ def make(tmp_path, *, adapter=None, search=None, router=None, live=False, connec
     adapter = adapter or MultiAdapter()
     eng = ApplyEngine(s, resolve_adapter=lambda ref: adapter, profile=Profile(), router=router,
                       gates=PolicyGates(s), store=Store())
-    r = IntakeRunner(s, engine=eng, store=IntakeStore(tmp_path), resolve=resolve, search=search, mail_connect=connect)
+    r = IntakeRunner(s, engine=eng, store=IntakeStore(tmp_path), resolve=resolve, search=search, mail_connect=connect,
+                     profile_answer_sink=sink)
     return r, adapter, eng
 
 
@@ -276,8 +279,10 @@ async def test_feedback_applied_in_next_run(tmp_path):
     assert (await r.give_feedback(rid, None, {"kind": "salary", "salary_floor": 90000}))["id"]
     assert (await r.give_feedback(rid, None, {"kind": "run_size", "delta": -8}))["id"]
     assert (await r.give_feedback(rid, None, "prefer robotics companies"))["kind"] == "note"
-    bad = await r.give_feedback(rid, None, {"kind": "answer", "pattern": "authorized to work", "value": "Yes"})
-    assert "profile.toml" in bad["error"]
+    routed = await r.give_feedback(rid, None, {"kind": "answer", "pattern": "authorized to work", "value": "Yes"})
+    assert routed["kind"] == "profile_answer" and "answer_profile_question" in routed["when"]
+    assert "salary" in (await r.give_feedback(rid, None, {"kind": "answer", "pattern": "desired pay",
+                                                           "value": "1"}))["error"]
     assert "error" in await r.give_feedback(rid, "https://nope.example.com/x", "hi")
 
     links = ["https://boards.greenhouse.io/acme/jobs/2"] + [f"https://boards.greenhouse.io/co{i}/jobs/{i}"
@@ -360,3 +365,54 @@ def test_cli_parses_run_report_feedback():
         "run", "jobs.txt", 3, ["links"], "2026-10-01", True)
     assert build_parser().parse_args(["report"]).run_id == ""
     assert build_parser().parse_args(["feedback", "r1", "too many startups", "--ref", "x"]).ref == "x"
+
+
+async def test_salary_feedback_raises_but_never_below_floor(tmp_path):
+    r, _, eng = make(tmp_path)
+    pol = r.s.policy
+    pol.salary_floor, pol.default_ask = 80000, 85000
+    eng.profile.p.salary.expected = 90000
+    rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
+    rid = rep["run_id"]
+    assert "id" in await r.give_feedback(rid, None, {"kind": "salary", "delta": 5000})        # "raise salary"
+    await r.run(links=[], sources=["links"])
+    assert (pol.default_ask, eng.profile.p.salary.expected) == (90000, 95000)
+    await r.run(links=[], sources=["links"])                                                  # replay: not doubled
+    assert (pol.default_ask, eng.profile.p.salary.expected) == (90000, 95000)
+    await r.give_feedback(rid, None, {"kind": "salary", "salary_floor": 50000, "default_ask": 60000,
+                                      "expected": 70000})
+    rep = await r.run(links=[], sources=["links"])
+    assert pol.salary_floor == 80000                                                          # floor never lowered
+    assert (pol.default_ask, eng.profile.p.salary.expected) == (80000, 80000)                 # clamped to the floor
+    assert any("floor 80000" in n for n in rep["plan_context"]["notes"])
+    await r.give_feedback(rid, None, {"kind": "salary", "salary_floor": 100000, "percent": 10})
+    await r.run(links=[], sources=["links"])
+    assert pol.salary_floor == 100000 and pol.default_ask == 100000    # 60000 * 1.1, clamped to the new floor
+    await r.give_feedback(rid, None, {"kind": "salary", "percent": 10})
+    await r.run(links=[], sources=["links"])
+    assert pol.default_ask == 110000
+
+
+async def test_profile_answers_pending_until_builder_then_delivered(tmp_path):
+    r, _, eng = make(tmp_path)
+    assert r._sink is None                                   # the profile builder (ADR-0047) is not installed here
+    rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
+    rid = rep["run_id"]
+    fb = await r.give_feedback(rid, "https://boards.greenhouse.io/acme/jobs/1",
+                               {"kind": "profile_answer", "question": "Are you legally authorized to work here?",
+                                "value": "Yes", "scope": "company"})
+    assert fb["kind"] == "profile_answer"
+    await r.give_feedback(rid, None, {"kind": "answer", "pattern": "veteran status", "value": "I am not a veteran"})
+    rep = await r.run(links=[], sources=["links"])
+    pend = rep["plan_context"]["pending_profile_answers"]
+    assert [p["scope"] for p in pend] == ["company", "global"] and pend[0]["scope_value"] == "Acme"
+    assert pend[0]["key"] == "work_authorized" and pend[1]["key"] == "veteran"
+    assert "veteran status" not in eng.profile.p.answers           # never an in-memory overlay
+    assert (await r.report())["plan_context"]["pending_profile_answers"] == pend
+    got = []
+    r._sink = lambda *a: got.append(a)
+    rep = await r.run(links=[], sources=["links"])
+    assert got[0] == ("work_authorized", "Yes", "company", "Acme") and len(got) == 2
+    assert sum("answer_profile_question" in x for x in rep["plan_context"]["applied_feedback"]) == 2
+    rep = await r.run(links=[], sources=["links"])
+    assert "pending_profile_answers" not in rep["plan_context"] and len(got) == 2
