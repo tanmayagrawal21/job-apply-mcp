@@ -64,8 +64,12 @@ the facts.
 6. **U.S. person.** A new `us_person` key is answered only when every word of the label is U.S.-person / export-control
    definition wording. The source is `[authorization].us_person`, else `policy.us_person` only when it was set in
    the trusted user config. `load_settings` marks that case with a private flag; a default, a project file,
-   `JOB_APPLY__*` or an untrusted user file never counts. If neither source applies, the owner's own `[answers]` value
-   for that exact wording is used, or the field becomes a gap (`authorization.us_person`).
+   `JOB_APPLY__*` or an untrusted user file never counts. If neither source applies, the field becomes a gap
+   (`authorization.us_person`). An `[answers]` pattern never answers it.
+   - The label must be ONE question about the candidate's own status: optional definition sentences, then a single
+     question that ends the label. A second question ("...? Have you ever been convicted ...?"), another person (a
+     spouse or family member), another legal topic (sponsorship), or an instruction such as "describe" leaves the
+     field with the owner.
    - The legal-status policy facts `us_person`, `us_citizen`, `requires_sponsorship` and `has_clearance` join the
      trust guard (ADR-0021/0037). Only the trusted user config may change them, in either direction.
    - For a non-U.S. person, a "None of the above; I am a citizen of a different country" option is chosen only when

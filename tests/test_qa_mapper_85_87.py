@@ -330,3 +330,36 @@ def test_race_detail_stays_eeo_isolated():
     other = F("q", "Which region do you prefer?", FieldKind.select, options=DETAIL)
     p = ProfileView(Profile(demographics={"race_ethnicity": "White", "race_detail": "Irish"}), Settings())
     assert map_fields([other], p).answers == []                      # never used outside a race question
+
+
+# control (final round): compound, other-person and other-topic U.S.-person labels stay unresolved, whatever the
+# facts or flat [answers] keys say
+USP_COMPOUND = [
+    "Are you a U.S. person and will you require sponsorship?",
+    "Are you a U.S. person, and will you require visa sponsorship now or in the future?",
+    "Is your spouse a U.S. person?",
+    "Is any member of your family a U.S. person?",
+    "Are you a U.S. person? Have you ever been convicted of a felony?",
+    "Are you a U.S. person under ITAR? Please describe your status.",
+    "Are you a U.S. person under ITAR. Describe your status",
+]
+FLAT_USP = {"person": "Yes", "itar": "Yes", "u s person": "Yes", "are you a u s person": "Yes", "felony": "No",
+            "spouse": "Yes", "sponsorship": "No"}
+
+
+@pytest.mark.parametrize("label", USP_COMPOUND)
+@pytest.mark.parametrize("fact", [True, False, None])
+def test_compound_us_person_labels_stay_unresolved(label, fact):
+    p = ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", country="United States"),
+                            authorization=Authorization.model_validate(
+                                {"us_person": fact, "citizenship": "Canada", "work_authorized": True,
+                                 "requires_sponsorship": False}),
+                            answers=FLAT_USP), Settings())
+    for kind, opts in ((FieldKind.boolean, YN), (FieldKind.select, YN), (FieldKind.text, None)):
+        assert run(label, kind, opts, p=p) is None, (label, kind)
+
+
+def test_us_person_never_from_answers_alone():
+    p = ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera"), answers=FLAT_USP), Settings())
+    assert run(ITAR_Q, p=p) is None
+    assert run(USP_Q, FieldKind.select, USP_OPTS, p=p) is None

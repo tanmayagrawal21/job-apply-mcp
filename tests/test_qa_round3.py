@@ -187,9 +187,9 @@ def test_us_person_and_adversarial_citizenship_labels_stay_unresolved():
                   "Countries of citizenship (US citizens: write USA)", "Country of citizenship and date obtained"]:
         ans, unres, _, _ = mapped([F("c", label)], p)
         assert ans == {} and unres == ["c"], label
-    # an explicit [answers] fact is still the owner's own answer
+    # ADR-0055 (control, final round): U.S.-person status never comes from an [answers] pattern
     q = view(citizenship="Freedonia", answers={"person under itar": "No"})
-    assert mapped([F("c", "Are you a U.S. person under ITAR?")], q)[0] == {"c": "No"}
+    assert mapped([F("c", "Are you a U.S. person under ITAR?")], q)[0] == {}
 
 
 # ---------------------------------------------------------------- #51 public-sector qualifier words

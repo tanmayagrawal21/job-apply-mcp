@@ -1329,7 +1329,7 @@ def residence_coupled_value(f: FormField, profile: ProfileLike, locations: Seque
 # Answered only from the structured fact ([authorization].us_person, else a trusted policy.us_person) and only when every
 # word of the label is U.S.-person / export-control definition wording. Anything else stays with the owner.
 _USP_VOCAB = frozenset(["a", "an", "the", "is", "are", "am", "i", "you", "your", "of", "or", "and", "for", "as", "by",
-                        "under", "in", "to", "with", "which", "what", "following", "best", "describes", "describe",
+                        "under", "in", "to", "with", "which", "what", "following", "best", "describes",
                         "status", "please", "select", "indicate", "confirm", "u", "s", "us", "person", "persons",
                         "united", "states", "america", "citizen", "citizens", "legal", "lawful", "lawfully", "permanent",
                         "resident", "residents", "temporary", "refugee", "refugees", "asylee", "asylees", "asylum",
@@ -1341,9 +1341,19 @@ _USP_VOCAB = frozenset(["a", "an", "the", "is", "are", "am", "i", "you", "your",
                         "c", "section", "yes", "no"])
 
 
+def us_person_label_ok(label: str) -> bool:
+    """ONE question about the candidate's own U.S.-person status: definition sentences allowed, then a single question
+    that ends the label. A second question, another person or any other legal topic leaves it to the owner."""
+    raw = (label or "").strip()
+    _, mark, after = raw.partition("?")
+    if mark and after.strip():                       # "...? Have you ever been convicted ...?"
+        return False
+    words = normalize(raw).split()
+    return bool(words) and all(w in _USP_VOCAB or w.isdigit() for w in words)
+
+
 def _us_person_value(f: FormField, profile: ProfileLike, gap: Any) -> Any | None:
-    words = normalize(f.label).split()
-    if not words or not all(w in _USP_VOCAB or w.isdigit() for w in words):
+    if not us_person_label_ok(f.label):
         return None
     fact = _truth(profile.lookup("us_person"))
     if fact is None:
@@ -2121,9 +2131,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         if ck == "us_person":                # ADR-0055: structured U.S.-person fact only, strict wording
             def _usp_gap(fact: str, key: str = f.key) -> None:
                 gaps.append({"country": None, "fact": fact, "key": key, "profile_fact": True})
-            uv = _us_person_value(f, profile, _usp_gap)
-            if uv is None:
-                uv = profile.lookup(normalize(f.label))   # only the owner's own [answers] value for that wording
+            uv = _us_person_value(f, profile, _usp_gap)       # never an [answers] pattern (control, final round)
             ok(f, uv if uv is None or isinstance(uv, list) else _coerce(f, uv, min_score), "rule:us_person")
             continue
         if (ck is None and company and not is_auth_question(f)
