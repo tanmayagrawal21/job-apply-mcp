@@ -12,6 +12,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..persona.models import Persona
+
 DECLINE = "Decline to self-identify"
 
 
@@ -48,6 +50,7 @@ class Work(BaseModel):
     end: str = ""            # empty = current
     location: str = ""
     summary: str = ""
+    kind: str = ""           # full_time | internship | part_time | academic | volunteer | freelance ("" = inferred from title)
 
 
 class Demographics(BaseModel):
@@ -96,6 +99,7 @@ class Profile(BaseModel):
     preferences: Preferences = Field(default_factory=Preferences)
     authorization: Authorization = Field(default_factory=Authorization)
     answers: dict[str, str] = Field(default_factory=dict)
+    persona: Persona = Field(default_factory=Persona)      # ADR-0047: experience counting, salary policy, projects
     demographics: Demographics = Field(default_factory=Demographics)
     salary: SalaryRules = Field(default_factory=SalaryRules)
     # Groups of interchangeable phrases for [answers] pattern matching (ADR-0011 Amendment 2). Extends the defaults.
