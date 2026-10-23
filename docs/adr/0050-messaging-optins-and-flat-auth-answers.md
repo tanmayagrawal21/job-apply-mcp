@@ -14,16 +14,28 @@ QA (#70) found two wrong answers on Greenhouse postings:
    "now or in the future".
 
 ## Decision
-1. **Messaging/marketing opt-ins, before every answer source.** A choice field whose label names a channel
-   (WhatsApp, SMS/MMS/text messages, phone/mobile messaging, Telegram/WeChat/Viber/iMessage/RCS, push
-   notifications, marketing/newsletter/promotions) and opt-in wording is handled by `rule:messaging_optin` only:
+1. **Contact-permission questions are opt-ins (deny by default), before every answer source.** On a choice or
+   boolean field, a label that names a channel or contact word (text/SMS/MMS, call/phone, email, WhatsApp, Signal,
+   Telegram, WeChat, LINE, Viber, iMessage/RCS, push, marketing/newsletter/promotions/future roles/talent community/
+   job alerts, or generic contact/reach/message/updates/alerts/notifications) and addresses the candidate ("you",
+   "your", "me", opt in, consent, agree, receive, OK, allow, ...) is handled by `rule:messaging_optin` only. A
+   phrasing list is not needed: any such label qualifies unless it is a skills/experience question ("experience
+   with Twilio", "built SMS gateways"), a question about the past or other people ("have you been contacted",
+   references, employer, emergency contact), on-call/phone-screen/availability wording, an authorization or EEO
+   question, or a field with its own canonical rule (referral, prior employee, contact details, ...).
    - **Yes** only when the owner stored Yes for every named channel under the exact `[answers]` key
-     `optin:<channel>` (`whatsapp`, `sms`, `phone`, `marketing`). Stored/persona answers and flat patterns never count.
+     `optin:<channel>`: `whatsapp`, `sms`, `phone`, `email`, `signal`, `telegram`, `wechat`, `line`, `viber`,
+     `imessage`, `push`, `marketing`, or `contact` (no channel named). Stored/persona answers and flat patterns
+     never count.
    - Otherwise **No** when required (the single "No ..." / "do not want" option, or `false` for a checkbox), and
      **left empty** when optional (`omitted`: never a task, never a model).
    - Opt-out wording, unclear options, or an opt-in bundled with a notice, terms, attestation or recording consent
-     stay unresolved for the owner. A text field that only names a channel ("WhatsApp number") is not an opt-in.
+     stay unresolved for the owner. On a free-text field only explicit opt-in wording (opt in, consent, subscribe,
+     "may we contact ...") is treated as an opt-in (unresolved); "WhatsApp number" or "Your email" is not.
 2. **"opt-in" is one token** in `normalize_question` (`optin` / `optout`), so a flat `opt` pattern never matches it.
+   Flat `[answers]` patterns already match whole words only (`\b<pattern>\b` on the normalized question); "opt" vs
+   "opt in" was the one cross-token match. The OPT work-program term in the authorization-topic check likewise
+   excludes "opt (me|us) in/into/out".
 3. **Any form of "sponsor"** maps to `requires_sponsorship`, so such questions take the per-country rule.
 4. **Flat answers never answer authorization or sponsorship.** A field whose label or options name authorization,
    sponsorship, visas or work permits is answered only from structured facts: `[authorization]` (flat keys, for

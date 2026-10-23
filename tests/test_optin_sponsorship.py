@@ -191,3 +191,76 @@ def test_no_confirmed_country_means_no_home_and_unresolved(country):
     q = view(country=country, requires_sponsorship=None, US={"requires_sponsorship": False})
     assert run("Will you now or in the future require sponsorship?", p=q, job="US")[0] == \
         ("No", "rule:requires_sponsorship")
+
+
+# ---------------------------------------------------------------- control round (#73): deny-by-default contact asks
+# flat patterns that answered these Yes before (word-boundary hits): each is a channel or contact word
+CONTROL_FLAT = {"text": "Yes", "whatsapp": "Yes", "signal": "Yes", "contact": "Yes", "email": "Yes", "call": "Yes",
+                "updates": "Yes", "future roles": "Yes", "texted": "Yes", "reach": "Yes"}
+CONTROL_LABELS = [
+    ("Is it OK to text you?", ["sms"]),
+    ("May we text your mobile?", ["sms"]),
+    ("Do you agree to be texted?", ["sms"]),
+    ("Can we send you a text?", ["sms"]),
+    ("Can we text you about interview scheduling?", ["sms"]),
+    ("Can recruiters call or text you?", ["sms", "phone"]),
+    ("Okay to WhatsApp you?", ["whatsapp"]),
+    ("Would you like Signal updates?", ["signal"]),
+    ("Can we reach you on Signal?", ["signal"]),
+    ("Can we contact you with updates?", ["contact"]),
+    ("Can we email you about future roles?", ["email", "marketing"]),
+]
+
+
+@pytest.mark.parametrize("label,chans", CONTROL_LABELS)
+def test_control_labels_fail_closed(label, chans):
+    p = view(CONTROL_FLAT)
+    f = F("q", label, FieldKind.select, options=YN)
+    assert optin_channels(f) == chans
+    assert run(label, p=p)[0] == ("No", "rule:messaging_optin")
+    assert run(label, FieldKind.boolean, options=None, p=p)[0] == (False, "rule:messaging_optin")
+    assert run(label, p=p, required=False) == (None, [], ["q"])
+    assert run(label, FieldKind.boolean, options=None, p=p, required=False) == (None, [], ["q"])
+    yes = view(CONTROL_FLAT | {f"optin:{c}": "Yes" for c in chans})
+    assert run(label, p=yes)[0] == ("Yes", "rule:messaging_optin")
+    if len(chans) > 1:                  # every named channel needs its own Yes
+        part = view(CONTROL_FLAT | {f"optin:{chans[0]}": "Yes"})
+        assert run(label, p=part)[0] == ("No", "rule:messaging_optin")
+
+
+@pytest.mark.parametrize("label", [
+    "Do you have experience with Twilio SMS?",
+    "Have you built SMS gateways?",
+    "How many years of email marketing experience do you have?",
+    "Can we contact your references?",
+    "Can we contact your current employer?",
+    "Have you previously been contacted by one of our recruiters?",
+    "Are you comfortable being on call?",
+    "Are you available for a phone screen this week?",
+    "Do you know anyone who works at Acme Robotics?",
+])
+def test_skills_facts_and_other_rules_are_not_optins(label):
+    assert optin_channels(F("q", label, FieldKind.select, options=YN)) is None
+
+
+def test_open_to_receiving_newsletter_optional_is_empty():
+    assert run("Are you open to receiving our newsletter?", required=False) == (None, [], ["q"])
+
+
+@pytest.mark.parametrize("tail", ["for the location you selected", "for the locations you selected",
+                                  "for the location(s) you selected in your previous response",
+                                  "in the locations that you have selected"])
+def test_selected_places_wording_on_a_us_job(tail):
+    p = view(requires_sponsorship=False)
+    assert run(f"Will you require Acme Robotics to sponsor you {tail}?", p=p, job="US")[0] == \
+        ("No", "rule:requires_sponsorship")
+    assert run(f"Will you require Acme Robotics to sponsor you {tail}?", p=p, job="CA")[:2] == (None, ["q"])
+
+
+def test_engine_guard_covers_every_wording():
+    from job_apply_mcp.apply.mapper import contact_permission_channels
+    for label, chans in CONTROL_LABELS:
+        assert contact_permission_channels(label) == chans
+    assert contact_permission_channels("WhatsApp number") == []
+    assert contact_permission_channels("Have you built SMS gateways?") == []
+    assert contact_permission_channels("WhatsApp updates", choice=True) == ["whatsapp"]

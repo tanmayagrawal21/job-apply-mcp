@@ -714,7 +714,7 @@ def country_fact(profile: ProfileLike, country: str, fact: str) -> bool | None:
 
 # ADR-0050: wording that names only the posting company or the places picked in an earlier question. On a confirmed
 # home-country job it does not change which country the question is about.
-_SELECTED_PLACES = re.compile(r"\b(?:for|in|to work in) (?:the )?location s? (?:that )?you (?:have )?selected"
+_SELECTED_PLACES = re.compile(r"\b(?:for|in|to work in) (?:the )?locations? (?:s )?(?:that )?you (?:have )?selected"
                               r"(?: (?:in )+(?:your|the) previous (?:response|answer|question))?")
 
 
@@ -1324,45 +1324,83 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: s
 # that exact channel ([answers] key "optin:<channel>"). Otherwise a required field gets the No option, and an optional
 # one is left empty (omitted: never a task, never a model). No flat [answers] pattern, persona or LLM ever sees it.
 _OPTIN_CHANNELS: list[tuple[str, re.Pattern[str]]] = [
-    ("whatsapp", re.compile(r"\bwhats ?app\b")),
-    ("sms", re.compile(r"\bsms\b|\bmms\b|\btext (?:messag\w*|alerts?|updates|notifications?|reminders?|me)\b|"
-                       r"\btexts\b|\btexting\b|\b(?:by|via|over) text\b")),
-    ("phone", re.compile(r"\b(?:phone|mobile|cell(?:ular)?) (?:messag\w*|notifications?|alerts?|updates)\b|"
-                         r"\bmessaging\b|\bautomated (?:calls?|messages?)\b|"
-                         r"\b(?:telegram|wechat|viber|imessage|signal messag\w*|rcs)\b|\bpush notifications?\b")),
-    ("marketing", re.compile(r"\bmarketing\b|\bnewsletters?\b|\bpromotion(?:s|al)?\b")),
+    ("whatsapp", re.compile(r"\bwhats ?app\w*\b")),
+    ("sms", re.compile(r"\bsms\b|\bmms\b|\btext(?:s|ed|ing)?\b(?! (?:box|field|area|input|below|above|editor)\b)")),
+    ("phone", re.compile(r"\b(?:call(?:s|ed|ing)?|phone(?:d|s)?|voicemail)\b")),
+    ("email", re.compile(r"\be ?mail(?:s|ed|ing)?\b")),
+    ("signal", re.compile(r"\bsignal\b")),
+    ("telegram", re.compile(r"\btelegram\b")),
+    ("wechat", re.compile(r"\bwe ?chat\b")),
+    ("line", re.compile(r"\b(?:on|via|through|by|over) line\b|\bline app\b")),
+    ("viber", re.compile(r"\bviber\b")),
+    ("imessage", re.compile(r"\bimessage\b|\brcs\b")),
+    ("push", re.compile(r"\bpush\b")),
+    ("marketing", re.compile(r"\bmarketing\b|\bnewsletters?\b|\bpromotion(?:s|al)?\b|\bfuture (?:roles|opportunit\w*|"
+                             r"openings|positions|jobs)\b|\btalent (?:community|network|pool)\b|\bjob alerts?\b")),
+    # generic contact permission with no named channel: stored Yes needs optin:contact
+    ("contact", re.compile(r"\b(?:contact(?:ed|ing)?|reach(?:ed|ing)?(?: out)?|messag\w*|updates?|alerts?|"
+                           r"notif\w*|reminders?|communicat\w*|keep in touch|stay in touch|hear from)\b")),
 ]
-# what makes the label an opt-in rather than a question that merely names a channel
-_OPTIN_STRONG = re.compile(r"\bopt(?:ing|ed)? ?in\b|\breceive\b|\bsubscri\w*|\bsign(?: me)? up\b|\bconsent\w*|"
-                           r"\bwould you like\b|\b(?:wish|want|like) to (?:be|get|hear|receive|join)\b|\benroll\w*|"
-                           r"\b(?:send|text|message|contact|email) (?:me|you)\b|\bcontact(?:ed)? (?:by|via|through|on)\b|"
-                           r"\bcan we\b|\bmay we\b|\bpermission\b|\ballow (?:us|\w+) to\b|\bagree to\b")
-_OPTIN_WEAK = re.compile(r"\bupdates?\b|\bnotif\w*|\balerts?\b|\bmessages?\b|\bcommunicat\w*|\breminders?\b")
-_OPTIN_NOT = re.compile(r"\bexperience\b|\bskills?\b|\byears?\b|\bworked\b|\bproficien\w*|\bfamiliar\b|\bbackground in\b")
+# ADR-0050 (deny by default): on a choice or boolean field, any channel / contact word that addresses the candidate
+# makes the field a messaging opt-in. Only these exits make it something else.
+_OPTIN_ADDRESSED = re.compile(r"\b(?:you|your|me|my|i)\b|\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bagree\w*|\breceiv\w*|"
+                              r"\bsubscri\w*|\bsign(?: me)? up\b|\bok(?:ay)?\b|\ballow\w*|\bpermission\b|\benroll\w*")
+# a choice/checkbox whose label starts with the channel ("SMS updates", "WhatsApp: may we ...") is addressed too
+_OPTIN_LEADING = re.compile(r"^(?:sms|text|e ?mail|whats ?app|phone|push|marketing|newsletter|signal|telegram)\b")
+# skills / experience, facts about the past, other people and the company's own process are not opt-ins
+_OPTIN_NOT = re.compile(r"\bexperience\w*\b|\bskills?\b|\byears?\b|\bworked\b|\bproficien\w*|\bfamiliar\w*\b|"
+                        r"\bbackground in\b|\bbuil(?:t|d|ding)\b|\bdevelop\w*|\bimplement\w*|\bdesign(?:ed|ing)?\b|"
+                        r"\bintegrat\w*|\bdeploy\w*|\bengineer\w*|\bexpertise\b|\bknowledge\b|\btools?\b|"
+                        r"\btechnolog\w*|\bplatforms?\b|\bapis?\b|\bgateways?\b|\btwilio\b|\bused\b|\busing\b|"
+                        r"\bhave you (?:ever |previously |already )?(?:been )?(?:contact|call|email|messag|text|reach)\w*|"
+                        r"\b(?:did|has|have) (?:anyone|someone|a recruiter|we|our)\b|\breferences?\b|\breferees?\b|"
+                        r"\bemployers?\b|\bmanager\b|\bemergency\b|\bkin\b|\bon ?call\b|\bpager\w*|"
+                        r"\bphone (?:interview|screen)\w*|\bvideo (?:call|interview)\w*|\bavailab\w*")
 _OPTOUT = re.compile(r"\bopt(?:ing|ed)? ?out\b|\bunsubscri\w*|\bstop receiving\b|\b(?:do not|don t|never) "
                      r"(?:want|wish) to (?:receive|be contacted)\b")
 
 
 _OPTIN_BUNDLED = re.compile(r"acknowledg|privacy|gdpr|attest|certif|\bterms\b|conditions|polic(?:y|ies)|\btrue\b|"
                             r"accura|arbitrat|background|record(?:ed|ing)?\b|transcri")
+_TEXT_OPTIN = re.compile(r"\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bsubscri\w*|\bsign(?: me)? up\b|\bpermission\b|"
+                         r"\b(?:may|can) we (?:contact|text|call|email|message|reach)\b")
+
+
+def contact_permission_channels(label: str, choice: bool = False) -> list[str]:
+    """ADR-0050: the channels a label asks permission to contact the candidate on ([] when it is not such a
+    question). Shared by the mapper's opt-in rule and the engine, which refuses client answers for these fields."""
+    n = normalize(label)
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
+    if not chans or _OPTIN_NOT.search(n) or not (_OPTIN_ADDRESSED.search(n) or (choice and _OPTIN_LEADING.search(n))):
+        return []
+    return [c for c in chans if c != "contact"] or ["contact"]
 
 
 def optin_channels(f: FormField) -> list[str] | None:
-    """The messaging/marketing channels a choice field asks the user to opt in to, or None when it is not one.
-    A text field naming a channel ("WhatsApp number") is not an opt-in; a text field that IS one returns []."""
+    """The channels a choice/boolean field asks permission to contact the candidate on, or None when it is not a
+    contact-permission question. [] = an opt-in the owner must answer (opt-out wording, bundled consent, free text).
+    A text field naming a channel ("WhatsApp number", "Your email") is not an opt-in."""
     n = normalize(f.label)
     chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
-    if not chans:
-        return None
+    if not chans or _OPTIN_NOT.search(n):
+        return None                     # "experience with Twilio", "built SMS gateways", "contact your references"
     choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
-    if _OPTIN_NOT.search(n):
-        return None                     # "Do you have marketing experience?" is not an opt-in
-    messaging = [c for c in chans if c != "marketing"]
-    if not (_OPTIN_STRONG.search(n) or (messaging and _OPTIN_WEAK.search(n))):
+    if not choice:
+        return [] if _TEXT_OPTIN.search(n) else None
+    if is_auth_question(f) or eeo_class(f.label)[0] or canonical_key(f.label) in _OPTIN_OTHER_KEYS:
+        return None                     # a real question with its own rule (authorization, EEO, referral, ...)
+    shared = contact_permission_channels(f.label, choice=True)
+    if not shared:
         return None
     if _OPTOUT.search(n) or _OPTIN_BUNDLED.search(n):
         return []                       # opt-out wording, or bundled with a notice/terms/attestation: the owner decides
-    return chans if choice else []
+    return shared
+
+
+_OPTIN_OTHER_KEYS = {"knows_employee", "prior_employee", "referral_source", "relocation_support", "willing_to_relocate",
+                     "open_to_hybrid", "open_to_onsite", "located_in_us", "over_18", "start_date", "years_experience",
+                     "languages_known", "email", "phone", "first_name", "last_name", "full_name", "preferred_name",
+                     "linkedin", "github", "website", "location", "country", "zip"}
 
 
 def _no_option(options: Sequence[str]) -> str | None:
@@ -1399,7 +1437,7 @@ def optin_value(f: FormField, chans: list[str], profile: ProfileLike) -> Any | N
 # home-country fact, so it may answer an authorization/sponsorship question only on a confirmed home-country job.
 _AUTH_TOPIC = re.compile(r"sponsor|\bvisas?\b|authori[sz]|eligib\w* to work|right to work|work permit|work rights|"
                          r"permitted to work|allowed to work|legally (?:able|entitled) to work|immigra|"
-                         r"\bh ?1 ?b\b|\bopt\b(?! (?:in|out)\b)|\bcpt\b|\bead\b|leave to remain|blue card")
+                         r"\bh ?1 ?b\b|\bopt\b(?! (?:me |us )?(?:in|into|out)\b)|\bcpt\b|\bead\b|leave to remain|blue card")
 
 
 def is_auth_question(f: FormField) -> bool:
