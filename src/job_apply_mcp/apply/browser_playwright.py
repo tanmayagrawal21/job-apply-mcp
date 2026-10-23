@@ -439,7 +439,22 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   const CH = 'input[type=checkbox], input[type=radio]';
   const GS = 'fieldset, [role=group], [role=radiogroup], [class*=consentRadioGroup i], [class*=consent-radio i]';
   // Explicit allowlist of groups that are not application questions (left empty on purpose; logged by the caller).
-  const ALLOW = /\\b(sms|text messag\\w*|marketing|newsletters?|promotion\\w*|opt[ -]?in|job alerts?|create (a )?job alert|talent (community|network|pool)|future (opportunities|openings|roles)|consent to (receive|be contacted))\\b/i;
+  // Exempt ONLY a field whose OWN label/legend states a consent intent (never a bare word, never container text),
+  // and ONLY when no required markup and no API required:true applies (control review 4).
+  const CONSENT = /\\b((opt(ing)?[ -]?in|subscrib(e|ing)|sign(ing)? (me )?up|agree(ing)?|consent(ing)?) (to|for) (receiv(e|ing)|get(ting)?|be(ing)? (sent|contacted)|our (newsletter|mailing list|talent (community|network)))|receiv(e|ing) (text|sms)( message)?s? ?(messages?|updates|alerts|notifications)?|(text|sms) message (updates|alerts|notifications)|job alerts?|marketing (e-?mails?|communications?|messages?) from|(may|can) contact me (by|via) (text|sms)|join (our )?talent (community|network))\\b/i;
+  const REQ_ATTR = n => n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
+    || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false') || /(^|[\\s_-])required([\\s_-]|$)/i.test(String(n.className || ''));
+  const markedRequired = (members, container, headEl, text) => {
+    if (members.some(m => m.required || m.getAttribute('aria-required') === 'true')) return true;
+    if (members.some(m => (m.getAttribute('aria-describedby') || '').split(' ').some(i => i && /\\brequired\\b/i.test((document.getElementById(i) || {}).textContent || '')))) return true;
+    if (/[*✱]/.test(text || '') || /\\brequired\\b/i.test(text || '')) return true;
+    if (headEl) { if (REQ_ATTR(headEl) || headEl.querySelector('[class*=required i]')) return true;
+      for (const pe of ['::after', '::before']) { const c = getComputedStyle(headEl, pe).content; if (c && /[*✱]/.test(c)) return true; } }
+    for (let n = container, d = 0; n && n !== document.body && n.tagName !== 'FORM' && d < 5; n = n.parentElement, d++) {
+      if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;
+      if (REQ_ATTR(n)) return true; }
+    return false; };
+  const apiRequired = xs => xs.filter(Boolean).some(x => [...REQK].some(k => keyMatch(x, k)));
   const keyMatch = (x, k) => x === k || x.endsWith('_' + k) || x.startsWith(k + '_') || x.includes('_' + k + '-labeled-');
   const apiOptional = xs => xs.filter(Boolean).some(x => OPTK.some(k => keyMatch(x, k)));
   const optText = m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '');
@@ -450,13 +465,13 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   let gi = 0;
   // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
   // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
-  const emit = (members, container, text, idCands, consent) => {
+  const emit = (members, container, text, idCands, consent, headEl) => {
     if (members.some(m => m.checked)) return;
     const names = members.flatMap(m => [m.name, m.id]);
     if (apiOptional(idCands.concat(names))) return;
     const opts = members.map(optText).slice(0, 12);
-    const exempt = ALLOW.test(clean(text) + ' ' + members.map(m => m.name).join(' '))
-      || (opts.some(o => ALLOW.test(o)) && opts.every(o => ALLOW.test(o) || /^(yes|no)\\b/i.test(o)));
+    const exempt = !apiRequired(idCands.concat(names)) && !markedRequired(members, container, headEl, text)
+      && CONSENT.test(clean(text));
     const id = idCands.find(Boolean) || '';
     const sk = 'c:' + id + ':' + gi + ':' + names.join(','); if (seen.has(sk)) return; seen.add(sk);
     let gid = '';
@@ -479,7 +494,7 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     if (consent && !clean(text)) { const d = g.parentElement && g.parentElement.querySelector('[class*=consent i]:not(input)');
       text = d && d !== g ? d.textContent : members.map(m => (m.closest('label') || {}).textContent || '').join(' / '); }
     const fp = g.closest('[data-field-path]');
-    emit(members, g, text, [g.id, fp && !consent && fp.getAttribute('data-field-path'), members[0].name], consent);
+    emit(members, g, text, [g.id, fp && !consent && fp.getAttribute('data-field-path'), members[0].name], consent, head);
   }
   // Sets outside any group container: named members share a name; UNNAMED boxes are grouped by their nearest
   // common field container (never one set per box).
@@ -501,7 +516,7 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
       if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;
       wrap = n; }
     // question text: nearest preceding heading-like element inside the wrapper (help text skipped), else nearest text
-    let text = '', any = '';
+    let text = '', any = '', hel = null, anyEl = null;
     const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     tw.currentNode = members[0];
     for (let n = tw.previousNode(); n; n = tw.previousNode()) {
@@ -509,15 +524,19 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
       if (!t || !el || el.closest('script, style, noscript') || optLabel(el)) continue;
       if (!wrap || !wrap.contains(n)) break;
       if (/^[(\\[]?\\s*(required|\\*|✱)\\s*[)\\]]?$/i.test(t)) continue;           // a bare marker / badge, not the question
-      const blk = el.closest(HEAD); if (blk && wrap.contains(blk) && !el.closest(HELP)) { text = blk.textContent; break; }
-      if (!any && !el.closest(HELP)) any = (clean(t).length < 3 && el.parentElement ? el.parentElement.textContent : t); }
-    if (!text) text = any;
+      const blk = el.closest(HEAD); if (blk && wrap.contains(blk) && !el.closest(HELP)) { text = blk.textContent; hel = blk; break; }
+      if (!any && !el.closest(HELP)) { any = (clean(t).length < 3 && el.parentElement ? el.parentElement.textContent : t); anyEl = el; } }
+    if (!text) { text = any; hel = anyEl; }
     if (!text && members.length === 1) text = labelOf(members[0]);
     const fp = members[0].closest('[data-field-path]');
-    emit(members, c, text, [fp && fp.getAttribute('data-field-path'), (typeof k === 'string' ? members[0].name : '') || (c && c.id)], false);
+    emit(members, c, text, [fp && fp.getAttribute('data-field-path'), (typeof k === 'string' ? members[0].name : '') || (c && c.id)], false, hel);
   }
+  // the application form = the <form> holding the API field keys (Ashby has none: whole page)
+  const KEYS = new Set(a.keys || []);
+  const appForm = [...document.querySelectorAll('form')].find(f => [...f.elements].some(x => KEYS.has(x.id) || KEYS.has(x.name)));
   for (const e of document.querySelectorAll('input, textarea, select')) {
     if (done.has(e)) continue;
+    if (appForm && e.form && e.form !== appForm) continue;             // another form (e.g. a job-alert sign-up)
     const type = (e.type || '').toLowerCase();
     if (['hidden', 'submit', 'button', 'file', 'search', 'checkbox', 'radio'].includes(type) || e.disabled || e.readOnly) continue;
     if (e.closest('.iti__dropdown-content') || e.getAttribute('aria-hidden') === 'true') continue;
@@ -533,14 +552,14 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     else empty = !(e.value || '').trim();
     if (!empty) continue;
     const lab = clean(labelOf(e)) || e.id; const sk = e.id || lab; if (seen.has(sk)) continue; seen.add(sk);
-    out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs, exempt: ALLOW.test(lab + ' ' + (e.name || ''))});
+    out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs,
+              exempt: native && !req(e) && !apiRequired([e.id, e.name]) && CONSENT.test(lab)});
   }
   return out.slice(0, 40); }"""
 # Native constraint check of the APPLICATION form only (control review 3): form.checkValidity(); never
-# reportValidity, never submit. Invalid controls inside allowlisted opt-in / job-alert blocks are reported as exempt.
+# reportValidity, never submit. Native constraints are required markup, so nothing here is ever exempt.
 _VALIDITY_JS = """(a) => { a = a || {}; const keys = new Set(a.keys || []);
   const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
-  const ALLOW = /\\b(sms|text messag\\w*|marketing|newsletters?|promotion\\w*|opt[ -]?in|job alerts?|create (a )?job alert|talent (community|network|pool)|future (opportunities|openings|roles)|consent to (receive|be contacted))\\b/i;
   const labelOf = e => { let t = ''; if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
     if (!t) { const l = e.closest('label'); if (l) t = l.textContent; }
     return clean(t || e.getAttribute('aria-label') || e.name || e.id || ''); };
@@ -555,12 +574,7 @@ _VALIDITY_JS = """(a) => { a = a || {}; const keys = new Set(a.keys || []);
     const grpOk = e => e.type === 'checkbox' && e.name && !!f.querySelector('input[type=checkbox][name="' + CSS.escape(e.name) + '"]:checked');
     const raw = els.filter(e => e.willValidate && !e.validity.valid);
     const inv = raw.filter(e => !(e.validity.valueMissing && grpOk(e)));
-    for (const e of inv) {
-      const ctx = (e.closest('fieldset, [role=group], [data-field-path], .field-wrapper, .application-question') || e.parentElement || e).textContent || '';
-      const lab = labelOf(e);
-      if (ALLOW.test(lab + ' ' + (e.name || '') + ' ' + ctx.slice(0, 400))) { exempt.push(lab.slice(0, 80)); continue; }
-      bad.push(lab.slice(0, 80) || 'invalid field');
-    }
+    for (const e of inv) bad.push(labelOf(e).slice(0, 80) || 'invalid field');   // constrained -> required wins
     if (!raw.length) bad.push('form failed native validation');
   }
   return {bad: [...new Set(bad)].slice(0, 20), exempt: [...new Set(exempt)].slice(0, 20)}; }"""

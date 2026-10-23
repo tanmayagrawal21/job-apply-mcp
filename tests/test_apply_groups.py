@@ -260,7 +260,7 @@ async def test_ssr_form_waits_for_hydration_before_typing(drv, wait):
 # ---- control review: a consent group next to the real group; unwrapped required sets; near-miss options
 
 SMS_NEXT_HTML = """<html><body><div id=app>
-<div data-field-path="q-contact"><fieldset class=consent><legend>Text messages</legend>
+<div data-field-path="q-contact"><fieldset class=consent><legend>I agree to receive text message updates</legend>
 <label><input type=radio id=sms-yes name=smsConsent value=yes>Yes - I consent to receiving text messages</label>
 <label><input type=radio id=sms-no name=smsConsent value=no>No - I do not consent</label></fieldset>
 <fieldset class="radio-group"><label class="_required_ab12_9 question-title" for="q-contact">May we contact your references?</label>
@@ -316,7 +316,7 @@ async def test_unwrapped_required_radio_set_blocks_dry_run(drv, variant):
 
 async def test_unwrapped_optional_radio_set_does_not_block(drv):
     html = ("<html><body><form id=f><label for=first_name>First Name</label><input id=first_name name=first_name>"
-            "<div class=q><p>Newsletter?</p><label><input type=radio name=nl value=y> Yes</label>"
+            "<div class=q><p>Subscribe to our newsletter?</p><label><input type=radio name=nl value=y> Yes</label>"
             "<label><input type=radio name=nl value=n> No</label></div>"
             "<button type=submit>Submit application</button></form>"
             "<script>document.getElementById('f').onsubmit = e => e.preventDefault();</script></body></html>")
@@ -520,3 +520,59 @@ async def test_native_check_validity_on_the_application_form_only(drv, zip_value
         assert "Postal code (native validation)" in res.detail
     assert "alert" not in (res.detail or "").lower()                  # the separate job-alert form is never checked
     assert not [p for p in posts if p[0] in ("/submitted", "/reported")]   # never submit, never reportValidity
+
+
+# ---- control review 4: the opt-in exemption is tight. Required markup / API required:true always wins; only a
+# consent-intent phrase in the field's OWN label exempts; container text never does.
+
+NOT_OPTINS = ["Do you have B2B marketing experience? *", "Have you built SMS gateways? *",
+              "Are you open to future opportunities on other teams? *", "Marketing channel you manage *",
+              "Do you have B2B marketing experience?", "Newsletter?"]
+
+
+@pytest.mark.parametrize("wrapped", [True, False])
+@pytest.mark.parametrize("label", NOT_OPTINS)
+async def test_questions_that_mention_marketing_or_sms_are_never_exempt(drv, label, wrapped):
+    block = (f"<fieldset><legend>{label}</legend>{RADIOS}</fieldset>" if wrapped else f"<div><p>{label}</p>{RADIOS}</div>")
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/20", ApplicationForm(ref="greenhouse:acme:20", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", (label, res.detail)
+
+
+OPTIN = "I agree to receive text message updates"
+
+
+@pytest.mark.parametrize("shape", ["member-required", "asterisk", "aria-group", "api-required"])
+async def test_required_markup_or_api_beats_a_consent_intent_label(drv, shape):
+    req = "required" if shape == "member-required" else ""
+    mark = " *" if shape == "asterisk" else ""
+    aria = "aria-required=true" if shape == "aria-group" else ""
+    block = (f'<fieldset {aria}><legend>{OPTIN}{mark}</legend>'
+             f'<label><input type=radio name=sms value=y {req}> Yes</label><label><input type=radio name=sms value=n> No</label></fieldset>')
+    base, _ = _serve(_set_page(block))
+    fields = [GH_FIRST] + ([FormField(key="sms", label=OPTIN, kind=FieldKind.boolean, required=True)]
+                           if shape == "api-required" else [])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/21", ApplicationForm(ref="greenhouse:acme:21", fields=fields),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status != "dry_run", (shape, res.detail)
+
+
+async def test_plain_consent_intent_label_is_exempt(drv, caplog):
+    caplog.set_level("INFO")
+    block = (f'<fieldset><legend>{OPTIN}</legend><label><input type=radio name=sms value=y> Yes</label>'
+             f'<label><input type=radio name=sms value=n> No</label></fieldset>')
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/22", ApplicationForm(ref="greenhouse:acme:22", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "dry_run", res.detail
+    assert "left empty on purpose" in caplog.text
+
+
+async def test_consent_words_in_container_or_help_text_do_not_exempt(drv):
+    block = (f'<div class=q><p>Preferred contact method</p><small class=help>We may also send you job alerts and '
+             f'text message updates.</small>{RADIOS}</div>')
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/23", ApplicationForm(ref="greenhouse:acme:23", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete" and "Preferred contact" in res.detail, res.detail
