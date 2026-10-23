@@ -1,4 +1,6 @@
-# job-apply-mcp
+# job-apply-mcp (ApplyWise)
+
+<!-- mcp-name: io.github.tanmayagrawal21/applywise -->
 
 An MCP server that finds jobs and fills applications for you, and stops before anything irreversible. It is
 **modular** (pluggable platforms, LLM providers, browser drivers), **parallel**, **token-frugal** (compact,
@@ -13,6 +15,22 @@ hard prose escalates). Works with any MCP client on macOS, Linux and Windows.
 > (`handoff`), which is the intended behaviour. Free-text questions need `writing.reviewer = "router"` (local strict
 > review) to go out without you. Expect rough edges; every irreversible step is gated, logged and
 > never retried when the outcome is uncertain.
+
+## Install as a Claude Code plugin
+
+The repository is also a Claude Code plugin marketplace. The `applywise` plugin starts the MCP server for you
+(pinned to a reviewed version) and adds a skill that tells Claude how to use the tools safely:
+
+```bash
+claude plugin marketplace add tanmayagrawal21/job-apply-mcp
+claude plugin install applywise@applywise
+```
+
+Then run `init` and `doctor` from the quickstart below in your own terminal, and check `/mcp` for
+`plugin:applywise:applywise`. The same safety model applies: dry run by default, a human approves every real
+submit, and visible CAPTCHAs always come back to you; logins, codes and account creation stay with you unless
+you open a consent window yourself (safety model, items 7 and 8). To update, run
+`claude plugin update applywise@applywise`. How releases and the version pin work: [docs/release.md](docs/release.md).
 
 ## 5-minute quickstart
 
@@ -33,7 +51,8 @@ Then ask your assistant: "search jobs at greenhouse:examplecorp for data roles, 
 Everything is a dry run until you set `dry_run = false`.
 
 Install alternatives: `pipx install git+https://github.com/tanmayagrawal21/job-apply-mcp` (then the command is just
-`job-apply-mcp`), or `pip install` into a virtualenv. After the first PyPI release, `uvx job-apply-mcp`.
+`job-apply-mcp`), or `pip install` into a virtualenv. After the first PyPI release, `uvx applywise` (the PyPI distribution is
+`applywise`; the `job-apply-mcp` command stays as an alias).
 Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]`, `[litellm]`, `[keyring]`.
 
 ## Features
@@ -45,6 +64,8 @@ Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]
 | Runs | `run_applications` / `job-apply-mcp run`: links you pass, job links you emailed yourself (read-only mail) and discovery in one run, a run report and feedback applied to the next run |
 | Applying | Platform API where possible, browser driver otherwise, generic LLM-assisted adapter for other sites |
 | Local LLM routing | Complexity-scored tiers (small/medium/large/narrative), fallbacks, optional cloud, your MCP client as last resort |
+| Profile builder | Collects the questions your profile could not answer, ranks them, and asks **you** (`profile_questions`, `answer_profile_question`, `job-apply-mcp profile ask`); the model never supplies an answer |
+| Authorization | Per-country facts (`[authorization]` for your `home_country`, `[authorization.<CC>]` for others); no default country, and unknown countries stay unresolved |
 | Writing | Cover letters and answers with style rules, banned phrases and gap-avoidance checks |
 | Provenance | Every generated text is recorded and can be verified or edited by you |
 | Dedupe | Store of applications plus optional confirmation-email ingest so you never apply twice |
@@ -71,7 +92,8 @@ Every posting in a `run_applications` / `run_report` result has exactly one stat
 
 `max_applications` (a whole number >= 1) caps the eligible postings a run handles (ready to submit, or needing you),
 the same in dry and live mode; skipped and unsupported postings do not count. A dry run also returns
-`live_preview` with what the current live quotas would allow.
+`live_preview` with what the current live quotas would allow. Live submits also count against the daily (25 per
+rolling 24 h), per-platform (10) and per-run (10) limits; a user config can lower or raise them.
 
 ## Safety model
 
@@ -106,8 +128,15 @@ the same in dry and live mode; skipped and unsupported postings do not count. A 
    `--scopes ...`) is typed once, in a terminal, per period you choose. Inside the window submissions are approved
    automatically (logged with the consent id), a page whose only bot check is an invisible widget is submitted
    with one click, and an emailed code is read from the newest message of the expected sender and entered once.
+   Unattended codes stay off until `verification.trusted_authserv_ids` lists your own mail server's
+   Authentication-Results id (user config only), so a spoofed sender cannot supply a code.
    You review the results afterwards (`list_applications`). `consent --revoke` ends it; `consent_status` (MCP) is
    read-only and no tool can create one.
+9. **Owner-only questions (ADR-0050).** Contact, messaging and marketing permissions (SMS, WhatsApp, calls, email,
+   job alerts, talent community) are never answered Yes; only your own `optin:<channel>` answer applies, and only
+   to a single, plain permission question. Otherwise they stay with you, or are declined (labelled `assumed`) at
+   `answers.autonomy = "safe_default"` or `"infer"` (item 5). Authorization and sponsorship come only from
+   structured per-country facts.
 
 ## Transports
 
@@ -139,5 +168,7 @@ uv run python scripts/gen_config_docs.py     # after changing config.py
 
 Privacy scan: `python scripts/privacy_scan.py --terms ~/.config/job-apply-mcp/privacy_terms.txt`. Owner-accepted
 findings go in `~/.config/job-apply-mcp/privacy_allow.txt` (outside the repo, `--allow FILE`); see ADR-0051.
+The committed `.privacy-allow` holds only fully anchored regexes for fictional fixtures and the public project
+identity in manifests (ADR-0042); never add private terms or fingerprints to it.
 
 MIT licensed. Contributions welcome under the [Code of Conduct](CODE_OF_CONDUCT.md).

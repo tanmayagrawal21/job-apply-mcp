@@ -1,14 +1,14 @@
 [project]
-name = "job-apply-mcp"
+name = "applywise"
 version = "0.1.0"
 description = "Modular, parallel, token-frugal MCP server for discovering and applying to jobs, with local-first LLM routing."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["mcp", "model-context-protocol", "jobs", "job-application", "automation", "ollama", "local-llm"]
+keywords = ["applywise", "mcp", "model-context-protocol", "jobs", "job-application", "automation", "ollama", "local-llm"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
   "Operating System :: MacOS",
@@ -41,12 +41,14 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
 
 [project.urls]
 Homepage = "https://github.com/tanmayagrawal21/job-apply-mcp"
+Repository = "https://github.com/tanmayagrawal21/job-apply-mcp"
 Documentation = "https://github.com/tanmayagrawal21/job-apply-mcp/tree/main/docs"
 Issues = "https://github.com/tanmayagrawal21/job-apply-mcp/issues"
 Changelog = "https://github.com/tanmayagrawal21/job-apply-mcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
-job-apply-mcp = "job_apply_mcp.cli:main"
+applywise = "job_apply_mcp.cli:main"
+job-apply-mcp = "job_apply_mcp.cli:main"           # backward-compatible alias (pre-rename name)
 job-apply-mcp-init = "job_apply_mcp.cli:init_main"
 
 [build-system]

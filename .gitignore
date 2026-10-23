@@ -8,3 +8,6 @@ dist/
 *.local.toml
 profile.toml
 privacy_allow*.txt
+
+# release tooling installed by npm ci (.github/release-tools)
+node_modules/
