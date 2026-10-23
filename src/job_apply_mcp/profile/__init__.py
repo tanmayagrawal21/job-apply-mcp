@@ -60,7 +60,7 @@ class Demographics(BaseModel):
     gender_if_required: str = ""        # used instead of `gender` when the gender question is required; "" = `gender`
     hispanic_latino: str = DECLINE      # the separate "Are you Hispanic or Latino?" question (e.g. "Yes" / "No")
     race_ethnicity: str = DECLINE
-    race_detail: str = ""               # ADR-0055: optional finer race option ("South Asian"); "" = race_ethnicity only
+    race_detail: str = ""               # ADR-0055: optional finer race option; "" = race_ethnicity only
     veteran_status: str = DECLINE
     disability_status: str = DECLINE
     sexual_orientation: str = DECLINE

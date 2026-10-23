@@ -14,8 +14,8 @@ from job_apply_mcp.profile import Authorization, Contact, Education, Preferences
 YN = ["Yes", "No"]
 WORK = [Work(company="Initech", title="Software Engineer", start="2024-06"),
         Work(company="Globex", title="Software Engineering Intern", start="2023-05", end="2023-08")]
-EDU = [Education(school="Springfield State University", degree="MS", field="Computer Science", end="2024-05"),
-       Education(school="Shelbyville College", degree="BS", field="Mathematics", end="2022-05")]
+EDU = [Education(school="Springfield State University", degree="PhD", field="Marine Biology", end="2019-12"),
+       Education(school="Shelbyville College", degree="BS", field="Geology", end="2017-12")]
 PREFS = Preferences(willing_to_relocate=True, open_to_hybrid=True, open_to_onsite=True)
 
 
@@ -127,10 +127,10 @@ def test_legal_name_and_preferred_last_name():
 
 
 def test_degree_type_is_the_highest_degree():
-    opts = ["Undergraduate/Bachelor's", "Master's", "PhD"]
-    assert run("Degree Type", FieldKind.multiselect, opts) == (["Master's"], "rule:degree_type")
-    assert run("Degree Type", FieldKind.select, opts) == ("Master's", "rule:degree_type")
-    assert run("What is your highest level of education?", FieldKind.text, None) == ("MS", "rule:degree_type")
+    opts = ["Undergraduate/Bachelor's", "Associate's", "PhD"]
+    assert run("Degree Type", FieldKind.multiselect, opts) == (["PhD"], "rule:degree_type")
+    assert run("Degree Type", FieldKind.select, opts) == ("PhD", "rule:degree_type")
+    assert run("What is your highest level of education?", FieldKind.text, None) == ("PhD", "rule:degree_type")
     bs_only = view(edu=[EDU[1]])
     assert run("Degree Type", FieldKind.select, opts, p=bs_only)[0] == "Undergraduate/Bachelor's"
     assert run("Degree Type", FieldKind.select, opts, p=view(edu=[])) is None
@@ -146,13 +146,12 @@ def test_school_attended_and_most_recent_school():
 
 
 def test_most_recent_degree_obtained_skips_a_future_degree():
-    opts = ["High School", "Associate's Degree", "Bachelor's Degree", "Master's Degree",
-            "Master of Business Administration (M.B.A.)", "Doctor of Philosophy (Ph.D.)", "Other"]
+    opts = ["High School", "Associate's Degree", "Bachelor's Degree", "Doctor of Philosophy (Ph.D.)", "Other"]
     q = "What is the most recent degree you obtained?"
-    assert run(q, FieldKind.select, opts) == ("Master's Degree", "rule:recent_degree")
-    future = view(edu=[Education(school="S", degree="MS", end="2999-05"), EDU[1]])
+    assert run(q, FieldKind.select, opts) == ("Doctor of Philosophy (Ph.D.)", "rule:recent_degree")
+    future = view(edu=[Education(school="S", degree="PhD", end="2999-05"), EDU[1]])
     assert run(q, FieldKind.select, opts, p=future)[0] == "Bachelor's Degree"
-    assert run("Most recent degree", FieldKind.select, opts, p=future)[0] == "Master's Degree"
+    assert run("Most recent degree", FieldKind.select, opts, p=future)[0] == "Doctor of Philosophy (Ph.D.)"
 
 
 def test_last_internship_only_from_work():
@@ -268,34 +267,33 @@ def _race(opts, **demo):
     return {a.key: (a.value, a.source) for a in r.answers}.get("r")
 
 
-EEO1 = ["Asian", "Black or African American", "White", "Two or more races", "Decline to self-identify"]
-DETAIL = ["East Asian", "South Asian", "Southeast Asian", "Black or African American", "White",
-          "Decline to self-identify"]
+EEO1 = ["American Indian or Alaska Native", "Black or African American", "White", "Two or more races", "Decline to self-identify"]
+DETAIL = ["English", "Irish", "Scottish", "Black or African American", "Decline to self-identify"]
 
 
 def test_race_detail_picks_the_matching_option():
-    assert _race(DETAIL, race_ethnicity="Asian", race_detail="South Asian") == ("South Asian", "rule:race")
+    assert _race(DETAIL, race_ethnicity="White", race_detail="Irish") == ("Irish", "rule:race")
 
 
 def test_race_detail_falls_back_to_the_eeo1_option():
-    assert _race(EEO1, race_ethnicity="Asian", race_detail="South Asian") == ("Asian", "rule:race")
-    assert _race(EEO1, race_ethnicity="Asian") == ("Asian", "rule:race")
+    assert _race(EEO1, race_ethnicity="White", race_detail="Irish") == ("White", "rule:race")
+    assert _race(EEO1, race_ethnicity="White") == ("White", "rule:race")
 
 
 def test_race_detail_never_picks_a_broader_or_narrower_option():
-    # no "South Asian" option and no plain "Asian" option: decline, never "East Asian" / "Southeast Asian"
-    assert _race(DETAIL, race_ethnicity="Asian", race_detail="Pacific Islander")[0] == "Decline to self-identify"
-    assert _race(["Asian Indian", "Chinese", "Decline to self-identify"], race_ethnicity="Asian",
-                 race_detail="South Asian")[0] == "Decline to self-identify"
+    # no matching detail option and no plain "White" option: decline, never "English" / "Scottish"
+    assert _race(DETAIL, race_ethnicity="White", race_detail="Welsh")[0] == "Decline to self-identify"
+    assert _race(["Northern Irish", "Scottish", "Decline to self-identify"], race_ethnicity="White",
+                 race_detail="Irish")[0] == "Decline to self-identify"
 
 
 def test_declined_race_wins_over_detail():
-    assert _race(DETAIL, race_detail="South Asian")[0] == "Decline to self-identify"
+    assert _race(DETAIL, race_detail="Irish")[0] == "Decline to self-identify"
 
 
 def test_race_detail_stays_eeo_isolated():
     from job_apply_mcp.apply.mapper import eeo_class
     assert eeo_class("Race / Ethnicity") == (True, "race")          # the EEO path runs before every other rule
     other = F("q", "Which region do you prefer?", FieldKind.select, options=DETAIL)
-    p = ProfileView(Profile(demographics={"race_ethnicity": "Asian", "race_detail": "South Asian"}), Settings())
+    p = ProfileView(Profile(demographics={"race_ethnicity": "White", "race_detail": "Irish"}), Settings())
     assert map_fields([other], p).answers == []                      # never used outside a race question

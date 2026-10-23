@@ -73,9 +73,9 @@ the facts.
    100 characters and 12 words, one sentence. The deterministic text guard (charset, attestation, injection) still
    runs.
 8. **Race detail (owner request).** `[demographics].race_detail` (optional, default "") holds a finer race value
-   ("South Asian") next to `race_ethnicity` ("Asian"). A race/ethnicity select or radio takes the option that
+   ("Irish") next to `race_ethnicity` ("White"). A race/ethnicity select or radio takes the option that
    `exact_option` matches to `race_detail`. If none matches, it takes the `race_ethnicity` (EEO-1) option, as before.
-   A broader or narrower option is never chosen ("Asian" for "South Asian", or "Asian Indian"). A declined
+   A broader or narrower option is never chosen ("White" for "Irish", or "Northern Irish"). A declined
    `race_ethnicity` still declines. The value is used only on the EEO path (ADR-0040) and is never sent to a model.
 9. **One unresolved list.** `submit_application` lists open fields in full and in the plan's order, from the same
    mapping call as its answers (the cached or fresh plan). It also returns them as `unresolved`. Blocking still
