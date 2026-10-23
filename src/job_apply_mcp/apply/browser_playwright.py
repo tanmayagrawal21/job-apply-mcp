@@ -474,7 +474,7 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   const CONSENT_RE = [
     new RegExp('^' + LEAD + VERB + ' to receiv(?:e|ing) ' + CHAN + TAIL + '\\\\.?$'),
     /^(?:please )?(?:create (?:a )?job alert|(?:send me|get|receive) job alerts?|subscribe to (?:our |the )?(?:newsletter|mailing list)|join (?:our )?talent (?:community|network))(?: for (?:similar|new) (?:roles|jobs|opportunities))?\\.?$/];
-  const NOT_OPTIN = /\\b(certif\\w*|confirm\\w*|attest\\w*|true|accura\\w*|authori[sz]\\w*|eligib\\w*|18|age|background|arbitrat\\w*|relocat\\w*|sponsor\\w*|visa|criminal|legal|terms|waive\\w*|dispute\\w*|signature)\\b/;
+  const NOT_OPTIN = /\\b(certif\\w*|confirm\\w*|attest\\w*|true|accura\\w*|authori[sz]\\w*|eligib\\w*|18|age|background|arbitrat\\w*|relocat\\w*|sponsor\\w*|visa|criminal|legal|terms|waive\\w*|dispute\\w*|signature|clearance|citizen\\w*|ssn|social security|monitor\\w*|drug\\w*|nda|non-disclosure)\\b/;
   const STOP = (a.stop || []).map(x => String(x).toLowerCase().trim()).filter(Boolean);
   const CONSENT = { test: raw => { const t = (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
     if (!t || NOT_OPTIN.test(t) || STOP.some(p => t.includes(p))) return false;

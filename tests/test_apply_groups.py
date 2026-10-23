@@ -646,6 +646,7 @@ SECOND_CLAUSE_AFTER = [
     "Create a job alert and confirm you are over 18",
     "We may contact me by text about my background check",
     "You agree to receive emails about arbitration of disputes",
+    "I agree to receive text messages from acme regarding my clearance status",
 ]
 PLAIN_OPTINS = [
     "I agree to receive SMS updates about my application",
