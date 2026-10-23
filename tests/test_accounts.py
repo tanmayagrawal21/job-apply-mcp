@@ -299,8 +299,8 @@ def test_login_attempts_capped_at_two(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ consent gate
 
 
-def test_consent_stub_is_closed(cfg):
-    assert consent.active(cfg, "credentials") is False and consent.active(cfg, "mail") is False
+def test_consent_is_closed_without_a_window(cfg):
+    assert not consent.active(cfg, "credentials") and not consent.active(cfg, "mail")   # ADR-0048 replaced the stub
 
 
 def test_no_consent_nothing_is_used(cfg, vault, kr, tmp_path):
