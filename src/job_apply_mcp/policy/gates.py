@@ -27,7 +27,7 @@ class GateContext:
     location: str = ""
     salary: str = ""
     text: str = ""                  # posting description (and anything else worth scanning)
-    form_text: str = ""             # application form labels / attestations
+    form_text: str = ""             # application form labels / attestations, one field per line (ADR-0040)
     flags: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
@@ -226,11 +226,51 @@ def title_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     return None
 
 
+# ADR-0040: a stop phrase matches whole words within one segment (one form field line, or one sentence of the posting
+# text). Exactly two false-positive classes are removed, nothing else:
+#   1. substrings of other words or spans across two fields/options ("no aim", "casino airline", "...No | AI tools");
+#   2. in POSTING TEXT only, a "no ..." phrase followed by a requirement noun ("No AI experience", "no AI/ML
+#      background"). Form labels and options never get this exemption.
+# Required markers ("*", "(required)", "required", "needed", "mandatory") are stripped before matching and are never an
+# exemption: "This is my own work Required" and "No AI - required" still stop.
+_REQUIRED_MARKER = re.compile(r"\*|\(\s*(?:required|needed|mandatory)\s*\)|[\s,:-]*\b(?:required|needed|mandatory)\b\W*$",
+                              re.IGNORECASE)
+_REQUIREMENT_NOUN_AFTER = re.compile(r"^[ \t/,-]*(?:/?ml\b|/?machine learning\b)?[ \t/,-]*"
+                                     r"(?:prior |previous |professional )?(?:experience|background|knowledge|expertise|"
+                                     r"skills?|degree)\b", re.IGNORECASE)
+# sentence ends: newline, ! ? ; or a period after a word of 2+ characters ("A.I." and "U.S." stay whole)
+_SEGMENT_END = re.compile(r"\n|[!?;]|(?<=[A-Za-z0-9]{2})\.(?=\s|$)")
+
+
+def _phrase_rx(phrase: str) -> re.Pattern[str] | None:
+    words = re.findall(r"[a-z0-9]+", phrase.lower())
+    if not words:
+        return None
+    return re.compile(r"(?<![a-z0-9])" + r"[ \t_/.-]+".join(map(re.escape, words)) + r"\.?(?![a-z0-9])", re.IGNORECASE)
+
+
+def stop_phrase_hit(text: str, phrases: list[str], *, posting_text: bool = False) -> str | None:
+    """The first stop phrase found as whole words in one segment of `text`, else None. `posting_text=True` (the job
+    description only) lets "no <phrase> experience/background/..." through as a job requirement."""
+    segments = [_REQUIRED_MARKER.sub(" ", x) for x in _SEGMENT_END.split(text or "") if x.strip()]
+    for ph in phrases:
+        rx = _phrase_rx(ph)
+        if rx is None:
+            continue
+        exempt_ok = posting_text and re.findall(r"[a-z0-9]+", ph.lower())[:1] == ["no"]
+        for seg in segments:
+            for m in rx.finditer(seg):
+                if not (exempt_ok and _REQUIREMENT_NOUN_AFTER.match(seg[m.end():])):
+                    return ph
+    return None
+
+
 def stop_phrase_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
-    hay = f"{ctx.text} {ctx.form_text}".lower()
-    for ph in cfg.stop_phrases:
-        if ph.strip() and ph.lower() in hay:
-            return Decision.needs_human, f"attestation: '{ph}'"
+    for label in (ctx.form_text or "").split("\n"):
+        if ph := stop_phrase_hit(label, cfg.stop_phrases):
+            return Decision.needs_human, f"attestation: '{ph}' in field: {label.strip()[:120]}"
+    if ph := stop_phrase_hit(ctx.text, cfg.stop_phrases, posting_text=True):
+        return Decision.needs_human, f"attestation: '{ph}' in posting text"
     return None
 
 

@@ -65,7 +65,8 @@ async def test_low_confidence_invalid_and_sensitive_fields_never_answered_by_llm
     out = await e.plan(POSTING.ref)
     assert out.plan.answers == []                       # invalid option, low confidence, and sensitive: all rejected
     assert set(out.plan.unresolved) == {"a", "b", "c", "d"}
-    assert '"a"' not in r.calls[0][1] and '"c"' not in r.calls[0][1]
+    # ADR-0040: "Pick one" and "Nickname" are not on the short-answer allowlist, so no model call is made at all
+    assert not r.calls or ('"a"' not in r.calls[0][1] and '"c"' not in r.calls[0][1])
 
 
 async def test_prose_pipeline_used_for_long_text_when_available():

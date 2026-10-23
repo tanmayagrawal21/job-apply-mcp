@@ -78,6 +78,14 @@ class BaseAdapter:
         slug = re.sub(r"[^A-Za-z0-9]+", "_", board).strip("_").upper()
         return self.env.get(f"{self.cfg.api_key_env_prefix}_{self.name.upper()}_{slug}") or None
 
+    # ---------------------------------------------------------------- structured country (ADR-0040)
+    @staticmethod
+    def country_code(value: Any, *, allow_codes: bool = True) -> str | None:
+        """A structured country field -> ISO-2 ("United States" -> "US", "Canada" -> "CA"); None if empty or unknown.
+        `allow_codes=False` for free text, where a two-letter tail may be a state ("CA" = California)."""
+        from ..apply.places import country_iso  # data only; no apply-engine import at module load
+        return country_iso(value, allow_codes=allow_codes)
+
     # ---------------------------------------------------------------- posting assembly
     def finish(self, text: str, *, with_description: bool, api_salary: str | None = None, **p: Any) -> Posting:
         """Build a Posting: flags and salary always come from `text`; the description only on request."""
