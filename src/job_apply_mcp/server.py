@@ -81,19 +81,24 @@ async def get_form(ref_or_url: str) -> str:
 
 
 @mcp.tool()
-async def plan_application(ctx: Context, ref_or_url: str) -> str:
+async def plan_application(ctx: Context, ref_or_url: str, cursor: int = 0) -> str:
     """Run policy gates + duplicate check, fill answers from the profile and local LLMs, and list unresolved fields.
-    Unresolved free-text fields come back as `client_tasks` for the calling agent to write. The first call of a
-    session may ask the user the top open profile questions (elicitation) before planning."""
-    await _ask_start(ctx)
-    return _out(await svc().plan(ref_or_url))
+    Unresolved free-text fields come back as `client_tasks` for the calling agent to write. `src` names the source
+    of every answer that is not "profile". A result too large for one response is paged: it carries `next` and
+    `total`; call again with `cursor=next` to get the next page of the SAME plan (from memory, no re-plan) until
+    `next` is null. Pages keep the shape (answers/src stay dicts) so they merge. The first call of a session may
+    ask the user the top open profile questions (elicitation) before planning."""
+    if not cursor:
+        await _ask_start(ctx)
+    return _out(await svc().plan(ref_or_url, cursor))
 
 
 @mcp.tool()
-async def draft_answers(ref_or_url: str) -> str:
+async def draft_answers(ref_or_url: str, cursor: int = 0) -> str:
     """Draft the prose fields a plan left open (writing.mode="deferred", or ones that timed out): local writer +
-    reviewer under writing.timeout_s. Returns the same shape as plan_application with a fresh approval_id."""
-    return _out(await svc().draft(ref_or_url))
+    reviewer under writing.timeout_s. Returns the same shape as plan_application with a fresh approval_id, paged
+    the same way (`cursor=next` pages the last draft from memory)."""
+    return _out(await svc().draft(ref_or_url, cursor))
 
 
 class _Confirm(BaseModel):

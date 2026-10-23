@@ -119,17 +119,82 @@ def _paginate(o: Any, floor: int) -> bool:
                key=lambda t: t[0])
     if best is None:
         return False
-    _, c, _k, v = best
+    _, c, k, v = best
     keep = max(floor, len(v) // 2)
     omitted = len(v) - keep
     del v[keep:]
     if c is not None:
-        if "omitted" in c:   # already trimmed once: cursor moves back by what was just removed
-            c["next"] -= omitted
+        if c.get("paged", k) != k:   # `next` belongs to another list: record this cut without a cursor
+            t = c.setdefault("trimmed", {})
+            t[k] = t.get(k, 0) + omitted
+        elif "omitted" in c:   # already trimmed once: cursor moves back by what was just removed (stays >= 0)
+            c["next"] = max(0, c["next"] - omitted)
+            c["omitted"] += omitted
         else:
             c["next"] = _start.get() + keep   # absolute offset for the follow-up `cursor`
-        c["omitted"] = c.get("omitted", 0) + omitted
+            c["omitted"], c["paged"] = omitted, k
     return True
+
+
+def page_sections(d: dict[str, Any], cursor: int, budget: int, reserve: int = 80) -> dict[str, Any]:
+    """Page a result whose dict/list values are sections (ADR-0049, plan_application). Scalars are the header and
+    appear on every page; every section entry (a dict key or a list item) is one item, in order. Items are packed
+    until the page would pass `budget - reserve` chars. A paged result carries `next` (the `cursor` of the next page,
+    or null on the last page) and `total` (item count); a result that fits whole is returned unchanged. The shape
+    stays the same (dict sections stay dicts), so a page can be merged back into the full result."""
+    head = {k: v for k, v in d.items() if not isinstance(v, (dict, list))}
+    items: list[tuple[str, Any, Any]] = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            items += [(k, ik, iv) for ik, iv in v.items()]
+        elif isinstance(v, list):
+            items += [(k, None, iv) for iv in v]
+    cursor = max(0, int(cursor or 0))
+    if cursor == 0 and _size(d) <= budget - reserve:
+        return d
+    if cursor >= len(items) and items:
+        return {**head, "next": None, "total": len(items), "error": f"cursor {cursor} is past the end ({len(items)})"}
+    page: dict[str, Any] = {}
+
+    def put(sec: str, key: Any, val: Any) -> None:
+        if key is None:
+            page.setdefault(sec, []).append(val)
+        else:
+            page.setdefault(sec, {})[key] = val
+
+    def drop(sec: str, key: Any) -> None:
+        if key is None:
+            page[sec].pop()
+        else:
+            del page[sec][key]
+        if not page[sec]:
+            del page[sec]
+
+    limit = budget - reserve
+    i = cursor
+    while i < len(items):
+        sec, key, val = items[i]
+        put(sec, key, val)
+        if _size({**head, **page}) > limit:
+            if i > cursor:
+                drop(sec, key)
+                break
+            val = normalize(val)                  # a single item over budget: shorten its strings, never skip it
+            t = 2000
+            while t >= 16:
+                drop(sec, key)
+                if isinstance(val, str):
+                    val = val[:t] + f"…[+{len(val) - t} chars]" if len(val) > t else val
+                else:
+                    _truncate_strings(val, t)
+                put(sec, key, val)
+                if _size({**head, **page}) <= limit:
+                    break
+                t //= 2
+        i += 1
+    order = {k: n for n, k in enumerate(d)}
+    out = {**head, **dict(sorted(page.items(), key=lambda kv: order[kv[0]]))}
+    return {**out, "next": i if i < len(items) else None, "total": len(items)}
 
 
 def _strings(o: Any):
@@ -164,7 +229,8 @@ def _truncate_strings(o: Any, thresh: int) -> bool:
 
 
 def _paginate_deep(o: Any, keep: int) -> bool:
-    """Trim every nested list to `keep` items (parent dict records next/omitted)."""
+    """Trim every nested list to `keep` items. The parent dict records the cut per list in `trimmed` {key: n}; no
+    cursor is offered for this last-resort pass (a negative or shared `next` would be wrong)."""
     changed = False
     stack = [o]
     while stack:
@@ -172,8 +238,11 @@ def _paginate_deep(o: Any, keep: int) -> bool:
         if isinstance(x, dict):
             for k, v in list(x.items()):
                 if isinstance(v, list) and len(v) > keep:
-                    x["next"] = keep if "omitted" not in x else x["next"] - (len(v) - keep)
-                    x["omitted"] = x.get("omitted", 0) + len(v) - keep
+                    if x.get("paged") == k:   # the list `next` belongs to: the cursor follows the new cut
+                        x["next"], x["omitted"] = _start.get() + keep, x["omitted"] + len(v) - keep
+                    else:
+                        t = x.setdefault("trimmed", {})
+                        t[k] = t.get(k, 0) + len(v) - keep
                     del v[keep:]
                     changed = True
             stack.extend(x.values())
