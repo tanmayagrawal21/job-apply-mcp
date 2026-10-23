@@ -29,6 +29,17 @@ Profile builder (ADR-0047): gap collection, stored answers and interactive quest
 | `ask_limit` | `int` | `5` | questions per interactive round |
 | `min_hits` | `int` | `1` | a gap must have been seen on this many applications to be asked |
 
+## `[answers]`
+
+How much the agent may assume when the owner is not available (ADR-0052). Only the trusted user config may make it more permissive; a project file or JOB_APPLY__* can only make it stricter.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `autonomy` | `Literal['strict', 'safe_default', 'infer']` | `"strict"` |  |
+| `promote_after` | `int` | `3` | assumptions of one question kind before the owner is asked |
+| `infer_min_confidence` | `float` | `0.8` | an affirmative inferred answer needs this |
+| `referral_default` | `str` | `""` | "how did you hear" default; "" = the first apply.referral_preference entry |
+
 ## `[search]`
 
 Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on.

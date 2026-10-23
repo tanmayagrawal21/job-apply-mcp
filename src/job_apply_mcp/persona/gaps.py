@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS gap_hits(
   weight INTEGER NOT NULL, default_used TEXT NOT NULL DEFAULT '', company TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL, PRIMARY KEY(key, ref));
 CREATE INDEX IF NOT EXISTS idx_hits_key ON gap_hits(key);
+CREATE TABLE IF NOT EXISTS assumed_hits(
+  kind TEXT NOT NULL, ref TEXT NOT NULL, rule TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL, PRIMARY KEY(kind, ref));
 CREATE TABLE IF NOT EXISTS answers(
   key TEXT NOT NULL, scope TEXT NOT NULL, scope_value TEXT NOT NULL DEFAULT '', value TEXT NOT NULL,
   origin TEXT NOT NULL DEFAULT 'user_written', ts TEXT NOT NULL, PRIMARY KEY(key, scope, scope_value));
@@ -120,6 +122,21 @@ class ProfileDB:
         with self._lock:
             self._db.execute("UPDATE gaps SET status=? WHERE key=?", (status, key))
             self._db.commit()
+
+    # -- assumed answers (ADR-0052) -----------------------------------------------------------------
+    def record_assumed(self, kind: str, ref: str, rule: str = "") -> int:
+        """Count one assumption of a question kind for an application (idempotent per ref); returns the kind's total
+        across runs (distinct applications)."""
+        with self._lock:
+            self._db.execute("INSERT INTO assumed_hits(kind,ref,rule,ts) VALUES(?,?,?,?) "
+                             "ON CONFLICT(kind,ref) DO UPDATE SET rule=excluded.rule, ts=excluded.ts",
+                             (kind, ref, rule[:120], _now()))
+            self._db.commit()
+            return int(self._db.execute("SELECT COUNT(*) FROM assumed_hits WHERE kind=?", (kind,)).fetchone()[0])
+
+    def assumed_count(self, kind: str) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT COUNT(*) FROM assumed_hits WHERE kind=?", (kind,)).fetchone()[0])
 
     # -- answers -------------------------------------------------------------------------------
     def set_answer(self, key: str, value: str, scope: str = "global", scope_value: str = "",

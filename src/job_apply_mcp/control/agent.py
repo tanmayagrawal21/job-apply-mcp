@@ -360,6 +360,10 @@ class ControlAgent:
             "daily_limit": self.daily_limit_status(),
             "review": bool(self.reviewer and self.cfg.review_enabled),
             "recent_blocks": self.recent_blocks(),
+            # ADR-0052: how much the agent may assume when the owner is not available
+            "autonomy": {"level": self.settings.answers.autonomy, "promote_after": self.settings.answers.promote_after,
+                         **({"infer_min_confidence": self.settings.answers.infer_min_confidence}
+                            if self.settings.answers.autonomy == "infer" else {})},
         }
         if self.config_error:
             st["config_error"] = self.config_error
