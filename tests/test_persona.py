@@ -203,14 +203,13 @@ def test_mapper_claims_free_form_question_from_stored_and_persona_answers():
     assert map_fields(flds, v).unresolved                               # without the persona hook: unchanged behavior
 
 
-def test_stored_answer_fills_default_demographic_but_never_overrides_profile():
+def test_demographics_come_from_profile_only_even_for_human_answers():
     db = ProfileDB(":memory:")
     v = view(db=db)
-    assert v.lookup("gender") == "Decline to self-identify"
-    db.set_answer("gender", "Woman")
-    assert v.lookup("gender") == "Woman"
+    db.set_answer("gender", "Woman", origin="user_written")
+    assert v.lookup("gender") == "Decline to self-identify"             # default and deliberate decline are untouched
     p = profile('\n[demographics]\ngender = "Man"\n')
-    assert view(p, db).lookup("gender") == "Man"                        # profile.toml value wins
+    assert view(p, db).lookup("gender") == "Man"
 
 
 def test_scoped_stored_answer_uses_posting_context():
@@ -260,11 +259,11 @@ async def test_plan_records_unresolved_and_default_used_gaps():
     out = await e.plan(POSTING.ref)
     rows = {r["key"]: r for r in db.questions(10)}
     assert "q:favorite build tool" in rows and rows["q:favorite build tool"]["examples"] == ["Acme Robotics - Software Engineer"]
-    assert rows["gender"]["default_used"] == "Decline To Self Identify"
+    assert "gender" not in rows                                          # EEO defaults are never collected
     assert "persona.salary_no_range" in rows and "persona.experience_counting" not in rows   # experience is configured
     assert out.plan.unresolved == ["tool"] or "tool" in out.plan.unresolved
     again = await e.plan(POSTING.ref)                                    # re-plan: no double counting
-    assert {r["key"]: r["n"] for r in db.questions(10)}["gender"] == 1 and again
+    assert {r["key"]: r["n"] for r in db.questions(10)}["q:favorite build tool"] == 1 and again
 
 
 async def test_blocked_required_field_outranks_and_answers_apply_to_next_plan():
@@ -284,6 +283,7 @@ async def test_blocked_required_field_outranks_and_answers_apply_to_next_plan():
 def _settings_for(db, monkeypatch=None):
     s = Settings()
     s.paths.data_dir = ":memory:"
+    s.apply.approval_mode = "agent"
     ptools.shared = lambda _d: db            # route the tools to the test database
     return s
 
@@ -325,7 +325,7 @@ def seeded(monkeypatch):
     for i in range(2):
         db.record_hit("q:favorite build tool", "Favorite build tool", ref=f"r{i}", kind="unresolved", blocked=True,
                       company="Acme", title="Engineer")
-    db.record_hit("gender", "Gender", ref="r0", kind="default", default_used="Decline", company="Acme", title="Engineer")
+    db.record_hit("work_authorized", "Authorized to work?", ref="r0", kind="unresolved", company="Acme", title="Engineer")
     monkeypatch.setattr(ptools, "_asked", False)
     return db, s
 
@@ -341,7 +341,7 @@ async def test_tools_questions_and_answer(seeded):
     assert len(q) == 1 and q[0]["key"] == "q:favorite build tool" and q[0]["n"] == 2
     r = json.loads((await m.call_tool("answer_profile_question",
                                        {"key": "q:favorite build tool", "value": "Bazel", "scope": "company:Acme"}))[0][0].text)
-    assert r["ok"] and r["origin"] == "user_written" and db.answer("q:favorite build tool", company="acme") == "Bazel"
+    assert r["ok"] and r["origin"] == "client" and db.answer("q:favorite build tool", company="acme") == "Bazel"
     bad = json.loads((await m.call_tool("answer_profile_question", {"key": "k", "value": "v", "scope": "company"}))[0][0].text)
     assert bad["ok"] is False
 
@@ -352,7 +352,7 @@ async def test_ask_at_start_runs_once_and_saves_answers(seeded):
     assert await ptools.ask_at_start(ctx, lambda: _Svc(s)) == 1
     assert await ptools.ask_at_start(ctx, lambda: _Svc(s)) == 0 and ctx.calls == 1       # once per session
     assert db.answer("q:favorite build tool") == "Bazel"
-    assert db.gap("gender")["status"] == "skipped"
+    assert db.gap("work_authorized")["status"] == "skipped"
     assert db.questions(5) == []
 
 
@@ -372,9 +372,11 @@ def test_cli_ask_list_answer(seeded, capsys):
     assert pcli.cli(["ask"], s, is_tty=False) == 2
     replies = iter(["Bazel", ""])
     assert pcli.cli(["ask"], s, input_fn=lambda _p: next(replies), is_tty=True) == 0
-    assert db.answer("q:favorite build tool") == "Bazel" and db.gap("gender")["status"] == "skipped"
-    assert pcli.cli(["answer", "gender", "Woman", "--scope", "global"], s) == 0 and db.answer("gender") == "Woman"
-    assert pcli.cli(["answer", "gender", "x", "--scope", "company"], s) == 2
+    assert db.answer("q:favorite build tool") == "Bazel" and db.gap("work_authorized")["status"] == "skipped"
+    assert pcli.cli(["answer", "work_authorized", "Yes"], s, is_tty=True) == 0
+    assert db.answer_row("work_authorized") == ("Yes", "user_written")
+    assert pcli.cli(["answer", "work_authorized", "Yes"], s, is_tty=False) == 2        # not from a script
+    assert pcli.cli(["answer", "k", "x", "--scope", "company"], s, is_tty=True) == 2
 
 
 def test_cli_routes_profile_subcommand():
@@ -391,3 +393,102 @@ def test_owner_style_profile_roundtrip_is_not_rewritten(tmp_path):
     p = load_profile(f)
     assert p.persona.experience_counting.note == "Only full-time roles count; internships do not."
     assert f.read_bytes() == before
+
+
+# ---- review round: sensitive keys, labels and origin ------------------------------------------------------------
+SENSITIVE_KEYS = ["work_authorized", "requires_sponsorship", "us_citizen", "citizenship", "clearance", "export_control",
+                  "privacy_ack", "acknowledge_privacy_notices", "persona.salary_floor"]
+
+
+async def _agent_answer(s, key, value, scope="global"):
+    from mcp.server.fastmcp import FastMCP
+    m = FastMCP("t")
+    ptools.register(m, lambda: _Svc(s))
+    return json.loads((await m.call_tool("answer_profile_question", {"key": key, "value": value, "scope": scope}))[0][0].text)
+
+
+@pytest.mark.parametrize("key", SENSITIVE_KEYS)
+async def test_agent_answer_to_sensitive_key_is_a_suggestion_never_used(seeded, key):
+    db, s = seeded
+    r = await _agent_answer(s, key, "Yes")
+    assert r["ok"] and r["origin"] == "client" and "suggestion" in r["note"]
+    v = view(db=db)
+    assert v.persona.stored(key) is None and v.lookup(key) in (None, "")
+    db.record_hit(key, "Q", ref="r9", kind="unresolved")
+    assert next(x for x in ptools.questions(s, 10) if x["key"] == key)["suggested"] == "Yes"   # shown to the human
+
+
+async def test_agent_cannot_store_demographics_and_human_mode_refuses_unconfirmed(seeded):
+    db, s = seeded
+    assert (await _agent_answer(s, "race", "x"))["ok"] is False
+    s.apply.approval_mode = "human"
+    r = await _agent_answer(s, "q:favorite build tool", "Bazel")
+    assert r["ok"] is False and db.answer("q:favorite build tool") is None
+
+
+async def test_elicited_confirmation_is_user_written(seeded, monkeypatch):
+    db, s = seeded
+    from mcp.server.fastmcp import FastMCP
+    m = FastMCP("t")
+    ptools.register(m, lambda: _Svc(s))
+
+    async def fake(ctx, key, value, scope, sv):
+        return "Edited by human"
+    monkeypatch.setattr(ptools, "_confirm", fake)
+    r = json.loads((await m.call_tool("answer_profile_question", {"key": "work_authorized", "value": "Yes"}))[0][0].text)
+    assert r["origin"] == "user_written" and db.answer_row("work_authorized") == ("Edited by human", "user_written")
+    assert view(db=db).persona.stored("work_authorized") == "Edited by human"
+
+
+BLOCKED = ["I certify that the information provided is true and complete", "Do you agree to the terms and conditions?",
+           "Do you consent to receive SMS messages?", "Was AI used to write this application?",
+           "Have you ever been convicted of a felony?", "Are you a U.S. person as defined by ITAR?",
+           "Do you identify as transgender?", "What is your race?", "Do you agree to binding arbitration?",
+           "I attest that my Python answers are accurate", "Do you certify you have 5 years of Python?",
+           "Do you consent to remote monitoring?", "Do you identify as LGBTQ+?"]
+
+
+@pytest.mark.parametrize("label", BLOCKED)
+def test_stored_and_persona_answers_never_answer_blocked_labels(label):
+    from job_apply_mcp.persona.keys import normalize_question
+    db = ProfileDB(":memory:")
+    p = Profile(persona=Persona(answers={"python": "Yes", "remote": "Yes", normalize_question(label): "Yes"}))
+    v = view(p, db)
+    db.set_answer("q:" + normalize_question(label)[:120], "Yes", origin="user_written")
+    for ctype in (FieldKind.text, FieldKind.textarea):
+        r = map_fields([F("f", label, ctype)], v, persona=v.persona, stop_phrases=["certify"])
+        assert not r.answers, label
+
+
+def test_whole_question_match_only_for_persona_patterns():
+    p = Profile(persona=Persona(answers={"python": "Python 3"}))
+    v = view(p)
+    assert not map_fields([F("f", "Describe your Python experience")], v, persona=v.persona).answers
+    assert map_fields([F("f", "Python")], v, persona=v.persona).answers[0].value == "Python 3"
+
+
+def test_hook_runs_after_mapper_guards_consent_rescoping():
+    """A privacy-notice label reaches the mapper's own rules first (ADR-0038); a stored q: answer cannot pre-empt it."""
+    db = ProfileDB(":memory:")
+    v = view(db=db)
+    lbl = "Gender (see our Privacy Notice)"
+    db.set_answer("q:" + "gender see our privacy notice", "Yes", origin="user_written")
+    r = map_fields([F("f", lbl, FieldKind.select, options=["Male", "Female", "Decline to self-identify"])], v, persona=v.persona)
+    base = map_fields([F("f", lbl, FieldKind.select, options=["Male", "Female", "Decline to self-identify"])], v)
+    assert [a.value for a in r.answers] == [a.value for a in base.answers]     # identical with and without the hook
+    assert "Yes" not in [a.value for a in r.answers]
+
+
+def test_salary_profile_floor_cannot_lower_policy_floor():
+    cfg = Settings().policy.model_copy(update={"salary_floor": 120000})
+    pol = PersonaPolicy(Persona.model_validate({"salary_policy": {"floor": 50000}}))
+    assert pol.salary(cfg, _posting("$100,000 - $140,000")).ask == 120000
+
+
+def test_collector_skips_blocked_and_demographic_gaps():
+    from job_apply_mcp.persona.collector import collect_gaps
+    db = ProfileDB(":memory:")
+    fl = [F("a", "I certify the information is true", FieldKind.text), F("b", "What is your race?", FieldKind.text),
+          F("c", "Favorite build tool", FieldKind.text), F("d", "Will you require visa sponsorship?", FieldKind.text)]
+    collect_gaps(db, None, None, ref="r", posting=POSTING, fields=fl, answers=[], unresolved=["a", "b", "c", "d"])
+    assert {r["key"] for r in db.questions(10)} == {"q:favorite build tool", "requires_sponsorship"}

@@ -12,13 +12,14 @@ each other's posting and the mapper keeps its signature.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from .gaps import ProfileDB
+from .guard import blocked_label, is_demographic_key, sensitive_key
 from .keys import gap_key, normalize_question, role_family
 from .models import ExceptionalWork, ExperienceCounting, Persona, Project, SalaryPolicy, pick_project
 
@@ -44,7 +45,7 @@ def posting_scope(company: str, title: str, text: str = "") -> Iterator[None]:
 
 @runtime_checkable
 class PersonaLike(Protocol):
-    def claim(self, label: str, canonical: str | None) -> str | None: ...
+    def claim(self, label: str, canonical: str | None, stop_phrases: Sequence[str] = ()) -> str | None: ...
     def stored(self, key: str) -> str | None: ...
 
 
@@ -104,10 +105,16 @@ class PersonaPolicy:
         return _CURRENT.get() or PostingCtx()
 
     def _scoped(self, key: str) -> str | None:
-        if self.db is None:
+        """Stored answer for `key`. Demographic keys never come from here ([demographics] only); other sensitive
+        keys (authorization, sponsorship, citizenship, clearance, export, privacy ack, salary floor) only when the
+        human gave the answer (origin user_written). Everything else accepts client-origin answers."""
+        if self.db is None or is_demographic_key(key):
             return None
         c = self.current()
-        return self.db.answer(key, company=c.company, family=role_family(c.title) if c.title else "")
+        row = self.db.answer_row(key, company=c.company, family=role_family(c.title) if c.title else "")
+        if row is None or (row[1] != "user_written" and sensitive_key(key)):
+            return None
+        return row[0]
 
     # -- effective persona = TOML overlaid with stored answers to the persona.* questions ----------
     def effective(self) -> Persona:
@@ -143,9 +150,10 @@ class PersonaPolicy:
     def stored(self, key: str) -> str | None:
         return self._scoped(key) or self.persona.answers.get(key)
 
-    def claim(self, label: str, canonical: str | None) -> str | None:
-        """Free-form (non-canonical) questions only: a stored or persona answer for the normalized question."""
-        if canonical is not None:
+    def claim(self, label: str, canonical: str | None, stop_phrases: Sequence[str] = ()) -> str | None:
+        """Free-form (non-canonical, non-sensitive) questions only: a stored or persona answer for the whole
+        normalized question. Attestation, consent, legal, EEO and stop-phrase labels are never claimed."""
+        if canonical is not None or blocked_label(label, stop_phrases):
             return None
         key = gap_key(label, None)
         if key.startswith("persona."):
@@ -153,13 +161,10 @@ class PersonaPolicy:
         if (v := self.stored(key)) is not None:
             return v
         q = normalize_question(label)
-        best: tuple[int, str] | None = None
         for pat, val in self.persona.answers.items():
-            p = normalize_question(pat)
-            if (p and not pat.startswith(("q:", "ai_tools")) and re.search(rf"\b{re.escape(p)}\b", q)
-                    and (best is None or len(p) > best[0])):
-                best = (len(p), val)
-        return best[1] if best else None
+            if q and not pat.startswith(("q:", "ai_tools")) and normalize_question(pat) == q:
+                return val
+        return None
 
     # -- experience --------------------------------------------------------------------------------
     def counted_spans(self, roles: list[Role]) -> list[tuple[str, str]]:
@@ -172,8 +177,9 @@ class PersonaPolicy:
         from ..policy.gates import parse_salary
         sp: SalaryPolicy = self.effective().salary_policy
         upd: dict[str, Any] = {}
-        if sp.floor is not None:
-            upd.update(base_salary=sp.floor, salary_floor=sp.floor, col_multipliers={})
+        if sp.floor is not None:      # a profile floor can raise the configured policy floor, never lower it
+            base = max(sp.floor, cfg.base_salary if cfg.base_salary is not None else (cfg.salary_floor or 0))
+            upd.update(base_salary=base)
         fig = sp.fixed if sp.fixed is not None else (expected if expected is not None else cfg.default_ask)
         if fig is not None:
             upd["default_ask"] = fig

@@ -123,7 +123,8 @@ class ProfileDB:
 
     # -- answers -------------------------------------------------------------------------------
     def set_answer(self, key: str, value: str, scope: str = "global", scope_value: str = "",
-                   origin: str = "user_written") -> None:
+                   origin: str = "user_written", settle: bool = True) -> None:
+        """`settle=False` stores a suggestion (e.g. a client-origin answer to a sensitive key) and leaves the gap open."""
         if scope not in SCOPES:
             raise ValueError(f"scope must be one of {SCOPES}")
         if scope != "global" and not scope_value:
@@ -134,21 +135,33 @@ class ProfileDB:
                 "INSERT INTO answers(key,scope,scope_value,value,origin,ts) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(key,scope,scope_value) DO UPDATE SET value=excluded.value, origin=excluded.origin, ts=excluded.ts",
                 (key, scope, scope_value, value, origin, _now()))
-            self._db.execute("UPDATE gaps SET status='answered' WHERE key=?", (key,))
+            if settle:
+                self._db.execute("UPDATE gaps SET status='answered' WHERE key=?", (key,))
             self._db.commit()
 
     def answer(self, key: str, *, company: str = "", family: str = "") -> str | None:
-        """Most specific scope wins: company, then role family, then global."""
+        r = self.answer_row(key, company=company, family=family)
+        return r[0] if r else None
+
+    def answer_row(self, key: str, *, company: str = "", family: str = "") -> tuple[str, str] | None:
+        """(value, origin) from the most specific scope: company, then role family, then global."""
         with self._lock:
             for scope, sv in (("company", _norm_scope("company", company)),
                               ("role_family", _norm_scope("role_family", family)), ("global", "")):
                 if scope != "global" and not sv:
                     continue
-                r = self._db.execute("SELECT value FROM answers WHERE key=? AND scope=? AND scope_value=?",
+                r = self._db.execute("SELECT value,origin FROM answers WHERE key=? AND scope=? AND scope_value=?",
                                      (key, scope, sv)).fetchone()
                 if r:
-                    return str(r["value"])
+                    return str(r["value"]), str(r["origin"])
         return None
+
+    def suggestion(self, key: str) -> str | None:
+        """A non-human (origin != user_written) answer waiting for the human to confirm."""
+        with self._lock:
+            r = self._db.execute("SELECT value FROM answers WHERE key=? AND origin!='user_written' ORDER BY ts DESC",
+                                 (key,)).fetchone()
+            return str(r["value"]) if r else None
 
     def all_answers(self) -> list[dict[str, Any]]:
         with self._lock:

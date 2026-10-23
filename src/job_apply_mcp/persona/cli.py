@@ -30,14 +30,17 @@ def cli(argv: list[str], settings: Any, *, input_fn=input, is_tty: bool | None =
         rows = questions(settings, args.limit)
         _show(rows) if rows else print("no open gaps")
         return 0
+    tty = sys.stdin.isatty() if is_tty is None else is_tty
     if args.cmd == "answer":
+        if not tty:
+            print("profile answer is stored as written by you only from a terminal.", file=sys.stderr)
+            return 2
         try:
-            print(store_answer(settings, args.key, args.value, args.scope))
+            print(store_answer(settings, args.key, args.value, args.scope, origin="user_written"))
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
         return 0
-    tty = sys.stdin.isatty() if is_tty is None else is_tty
     if not tty:
         print("profile ask needs an interactive terminal; use `profile list` and `profile answer` instead.",
               file=sys.stderr)

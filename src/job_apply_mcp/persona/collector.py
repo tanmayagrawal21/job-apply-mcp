@@ -7,9 +7,12 @@ from ..apply.mapper import DEMOGRAPHIC_KEYS, canonical_key
 from ..apply.salary import is_salary_field
 from ..core.models import FieldKind
 from ..policy.gates import parse_salary
-from ..profile import DECLINE
 from .gaps import ProfileDB
+from .guard import blocked_label, is_demographic_key
 from .keys import gap_key, is_exceptional_label
+
+# canonical authorization-type keys a human may be asked about (their answers need origin user_written)
+_ASKABLE = {"work_authorized", "requires_sponsorship", "us_citizen", "citizenship", "willing_to_relocate"}
 
 
 def collect_gaps(db: ProfileDB, policy: Any, profile: Any, *, ref: str, posting: Any, fields: list[Any],
@@ -27,7 +30,10 @@ def collect_gaps(db: ProfileDB, policy: Any, profile: Any, *, ref: str, posting:
         f = by_key.get(k)
         if f is None or f.kind == FieldKind.file:
             continue
-        add(gap_key(f.label, canonical_key(f.label)), f.label, "unresolved", bool(f.required))
+        ck = canonical_key(f.label)
+        if blocked_label(f.label) and not (ck and not is_demographic_key(ck) and ck in _ASKABLE):
+            continue                        # attestations, consents, legal and EEO questions are never collected
+        add(gap_key(f.label, ck), f.label, "unresolved", bool(f.required))
 
     has_range = bool(parse_salary(getattr(posting, "salary", "") or ""))
     for a in answers:
@@ -37,9 +43,11 @@ def collect_gaps(db: ProfileDB, policy: Any, profile: Any, *, ref: str, posting:
         ck = canonical_key(f.label)
         src = a.source or ""
         val = str(a.value)[:120]
-        if ck in DEMOGRAPHIC_KEYS and src.startswith("rule:") and _is_default(profile, ck):
-            add(ck, f.label, "default", False, val)
+        if ck in DEMOGRAPHIC_KEYS:
+            continue                        # EEO answers come from [demographics] only; the default is not a gap
         elif src.startswith("llm:"):
+            if blocked_label(f.label):
+                continue
             add(gap_key(f.label, ck), f.label, "default", False, f"model guess: {val}")
         elif ck == "years_experience" and policy is not None and not policy.configured("experience_counting"):
             add("persona.experience_counting", "Which roles count as professional experience? Answer full_time_only, include_internships or all.",
@@ -59,11 +67,3 @@ def collect_gaps(db: ProfileDB, policy: Any, profile: Any, *, ref: str, posting:
         db.record_hit(key, q, ref=ref, kind=kind, blocked=blocked, default_used=default,
                       company=getattr(posting, "company", ""), title=getattr(posting, "title", ""))
     return len(seen)
-
-
-def _is_default(profile: Any, ck: str) -> bool:
-    try:
-        v = profile.p.demographic_for(ck) if hasattr(profile, "p") else profile.lookup(ck)
-    except Exception:  # noqa: BLE001
-        return False
-    return v in (None, "", DECLINE) or str(v).lower().startswith("decline")

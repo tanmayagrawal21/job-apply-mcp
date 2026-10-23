@@ -838,9 +838,6 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 res.answers.append(Answer(key=f.key, value=str(v), source="derived:geo"))
             continue
         ck = canonical_key(f.label)
-        if persona is not None and (pv := persona.claim(f.label, ck)) is not None and (c := _coerce(f, pv, min_score)):
-            res.answers.append(Answer(key=f.key, value=c, source="persona:answer"))     # ADR-0047
-            continue
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
             ck = canonical_key(f.label, skip=("privacy_ack",))
         # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0038)
@@ -888,6 +885,10 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                     res.answers.append(Answer(key=f.key, value=c, source=f"rule:{ck}"))
                 continue
         value: Any | None = profile.lookup(ck) if ck else None
+        persona_src = False
+        if value is None and ck is None and persona is not None:   # ADR-0047: after every sensitive guard above
+            value = persona.claim(f.label, ck, stop_phrases)
+            persona_src = value is not None
         if value is None:
             value = profile.lookup(normalize(f.label))
         coerced = _coerce(f, value, min_score) if value is not None else None
@@ -897,7 +898,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         if coerced is None or coerced == "":
             res.unresolved.append(f)
         else:
-            res.answers.append(Answer(key=f.key, value=coerced, source="profile" if ck is None else f"rule:{ck}"))
+            res.answers.append(Answer(key=f.key, value=coerced, source="persona:answer" if persona_src else "profile" if ck is None else f"rule:{ck}"))
     return res
 
 

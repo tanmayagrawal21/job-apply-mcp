@@ -29,13 +29,24 @@ The tool must work for any user, so none of this may encode one person's choices
    `exceptional`). Mapper: one `persona=` hook that claims free-form (non-canonical) questions from stored/persona
    answers. Experience years: `ProfileView._experience_spans` counts only qualifying roles. Salary: the engine calls
    `persona.salary`, which wraps `compute_ask` (midpoint, never below the floor, never above the top); with no range
-   it uses `fixed`, then `[salary].expected`, then `policy.default_ask`, else the gap is recorded. Writer:
+   never below the floor unless the posted top is lower (then the top); a profile floor can only raise `policy.salary_floor`; with no range it uses `fixed`, then `[salary].expected`, then `policy.default_ask`, else the gap is recorded. Writer:
    `ProfileView.facts` leads with the best-matching project for exceptional-work questions. The current posting
    reaches the policy through a ContextVar, so parallel plans stay isolated.
 5. **Stored answers fill gaps, never override.** `ProfileView.lookup` consults stored answers only when the profile has
    no value (or the declining default). Precedence: company, role family, global. Answers to `persona.*` questions
    overlay the policy (`persona.experience_counting`, `persona.salary_no_range`, `persona.exceptional_work`).
 6. Config: `[persona] enabled, ask_on_start, ask_limit, min_hits`.
+
+7. **Trust boundary (amendment after review).** `answer_profile_question` asks the human through MCP elicitation
+   (confirm or edit); only a confirmed value, or one typed in the TTY CLI, is stored `user_written`. Any other call
+   stores `origin=client`; in `approval_mode=human` it is refused. For sensitive keys (authorization, sponsorship,
+   citizenship, clearance, export, privacy acknowledgement, salary floor; country-agnostic, so `key:DE` style and
+   per-country maps match) a client answer is only a suggestion shown to the human and is never applied.
+   Demographic keys come from `[demographics]` only. Blocked labels (attestation, certification, consent, arbitration,
+   criminal, AI-use, clearance/export, EEO, stop phrases, `is_sensitive_question`) are never collected, asked, stored
+   or claimed. The mapper hook runs after all sensitive guards, only for non-canonical fields, and persona patterns
+   must match the whole question. `ProfileView.lookup` uses stored answers for canonical keys only. Elicitation is
+   once per client session.
 
 ## Consequences
 - Safe defaults remain (decline, full-time only, midpoint); every default use becomes a ranked, askable question.

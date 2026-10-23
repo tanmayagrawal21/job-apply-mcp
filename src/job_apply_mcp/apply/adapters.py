@@ -7,7 +7,6 @@ from typing import Any, ClassVar
 
 from ..config import Settings
 from ..core.models import ApplicationForm, GateResult, Posting
-from ..profile import DECLINE as _DECLINE
 from .mapper import is_us_country
 from .ports import ComponentMissing
 
@@ -189,7 +188,7 @@ class ProfileView:
 
     def lookup(self, key: str) -> Any | None:
         v = self._lookup(key)
-        if self.persona is not None and (v is None or v == "" or v == _DECLINE):
+        if self.persona is not None and (v is None or v == "") and " " not in key:   # canonical keys only
             s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile
             if s is not None:
                 return s
