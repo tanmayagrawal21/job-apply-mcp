@@ -87,6 +87,15 @@ the same in dry and live mode; skipped and unsupported postings do not count. A 
    runs from a terminal (item 8). Account creation is off by default; it needs `accounts.auto_create = true` in your
    own user config file AND an open credentials consent window (ADR-0046).
 5. **No invented facts.** Answers come from your profile or are marked; unresolved required fields stop the run.
+   **Autonomy level (ADR-0052).** `[answers] autonomy` in your own user config decides what the agent may assume
+   when you are not available: `strict` (default: every unresolved field waits for you), `safe_default` (decline
+   contact/marketing permission, the configured "how did you hear" default, "decline to self-identify"), or `infer`
+   (also skill/experience questions about a tool or technology, answered from your resume: Yes only when it
+   clearly says so, otherwise No; willingness, availability, location and terms questions are never inferred).
+   Authorization/visa/identity, background and other screening, accommodation, recording, attestations, legal
+   agreements and employment terms, salary without a policy, start date and location facts are never assumed. Every assumed answer is labelled (`assumed`, plan, evidence, run report); after
+   `promote_after` (3) assumptions of one question you are asked once and your answer is reused. A project file or
+   env var can only make the level stricter. `init` asks which level to use; `control_status` shows it.
 6. **Privacy.** Profile and secrets stay on your machine, are never committed, and API keys are read only from
    the environment. See [SECURITY.md](SECURITY.md).
 7. **Credentials never reach the model.** ATS logins live in the OS keychain (`job-apply-mcp vault add <host>

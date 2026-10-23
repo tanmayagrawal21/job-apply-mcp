@@ -36,9 +36,12 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
+from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
 from ..writing import checks
+from . import autonomy
 from .approvals import ApprovalBook, evidence_path
+from .autonomy import Assumption
 from .mapper import (
     DEMOGRAPHIC_KEYS,
     SEMANTIC_SENSITIVE,
@@ -186,6 +189,11 @@ class PlanOut(BaseModel):
             d["skipped_voluntary"] = self.skipped_voluntary
         if self.profile_gaps:
             d["profile_gaps"] = self.profile_gaps
+        assumed = {a.key: {"value": a.value, "rule": a.source, **({"why": a.rationale} if a.rationale else {}),
+                           **({"confidence": a.confidence} if a.source.startswith("assumed:infer") else {})}
+                   for a in self.plan.answers if a.assumed}
+        if assumed:
+            d["assumed"] = assumed         # ADR-0052: answers the agent assumed, never facts the owner gave
         if self.approval_id:
             d["approval_id"] = self.approval_id
         if self.timings:
@@ -396,8 +404,195 @@ class ApplyEngine:
         else:
             long_ += short
         long_ += owner_only
-        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
-                              profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
+        assumptions: list[Assumption] = []
+        if self.s.answers.autonomy != "strict":      # ADR-0052: assume a safe answer where one exists
+            vol_fields = [f for f in mapped.skipped_voluntary if f.key in voluntary]
+            assumptions, long_ = await self._assume(long_, vol_fields, ctx)
+            answers += [x.answer for x in assumptions]
+            voluntary = {k: v for k, v in voluntary.items() if k not in {x.field.key for x in assumptions}}
+            if assumptions:
+                audit["assumed"] = {x.field.key: {"rule": x.answer.source, "why": x.answer.rationale or ""}
+                                    for x in assumptions}
+        out = self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
+                             profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
+        if assumptions:
+            out.profile_gaps += self._track_assumed(ref, ctx, assumptions)
+        return out
+
+    # ------------------------------------------------------------- autonomy (ADR-0052)
+    def _owner_answer(self, key: str, company: str) -> str | None:
+        """A stored owner answer for an assumed question kind (scoped persona answers first)."""
+        with contextlib.suppress(Exception):
+            if self.persona is not None and (v := self.persona.stored(key)) is not None:
+                return v
+        with contextlib.suppress(Exception):
+            if self.gaps is not None:
+                return self.gaps.answer(key, company=company)
+        return None
+
+    async def _assume(self, fields: list[FormField], voluntary: list[FormField],
+                      ctx: _Ctx) -> tuple[list[Assumption], list[FormField]]:
+        """Replace unresolved fields with a SAFE assumed answer where one exists (safe_default), plus conservative
+        model answers to ordinary capability questions (infer). Hard limits are never assumed."""
+        level = self.s.answers.autonomy
+        out: list[Assumption] = []
+        left: list[FormField] = []
+        infer: list[FormField] = []
+        prefs = [p for p in [self.s.answers.referral_default, *self.s.apply.referral_preference] if p]
+
+        def take(f: FormField, value: Any, rule: str, why: str, kind: str | None, question: str = "",
+                 conf: float = 1.0) -> None:
+            stored = self._owner_answer(kind, ctx.posting.company) if kind else None
+            if stored is not None:              # the owner answered this kind: it is no longer assumed
+                v = autonomy.stored_value(f, stored)
+                if v is None:
+                    left.append(f)
+                else:
+                    out.append(Assumption(f, Answer(key=f.key, value=v, source="persona:answer"), None))
+                return
+            out.append(Assumption(f, Answer(key=f.key, value=value, source=f"assumed:{rule}", assumed=True,
+                                            rationale=why, confidence=conf), kind, question))
+
+        for f in [*fields, *voluntary]:
+            if f.kind == FieldKind.file or geo_kind(f):
+                left.append(f)
+                continue
+            chans = autonomy.contact_channels(f, ctx.posting.company)
+            if chans is not None:
+                if autonomy.hard_limit(f, contact=True) is None and (v := autonomy.decline_contact(f)) is not None:
+                    take(f, v, "decline_contact_permission", f"contact permission ({', '.join(chans)}): declined",
+                         autonomy.contact_kind(chans), autonomy.contact_question(chans, f.label))
+                else:
+                    left.append(f)
+                continue
+            if autonomy.hard_limit(f) is not None:
+                left.append(f)
+                continue
+            if autonomy.eeo_field(f):
+                v = autonomy.eeo_decline(f)
+                if v is None:
+                    left.append(f)               # no decline option: blank (optional) or the owner (required)
+                else:
+                    take(f, v, "eeo_decline", "decline to self-identify", None)
+                continue
+            if canonical_key(f.label) == "referral_source":
+                v = autonomy.referral_default(f, prefs)
+                if v is None:
+                    left.append(f)
+                else:
+                    take(f, v, "referral_default", "configured 'how did you hear' default", "assumed.referral_source",
+                         "What should 'How did you hear about us?' say when none of your configured sources is "
+                         "offered? (the option or text to use)")
+                continue
+            if level == "infer" and f.required and autonomy.capability_question(f) and self._infer_allowed(f):
+                infer.append(f)
+                continue
+            left.append(f)
+        if infer:
+            got, rest = await self._infer(infer, ctx)
+            for f in infer:
+                if f.key in got:
+                    v, conf, why = got[f.key]
+                    take(f, v, "infer", why, autonomy.infer_kind(f), f"{f.label[:160]} (Yes/No, or the option to pick)",
+                         conf)
+            left += rest
+        keep = {f.key for f in left}
+        return out, [f for f in fields if f.key in keep]
+
+    def _infer_allowed(self, f: FormField) -> bool:
+        """#54 gate on the infer path: the full never-LLM check plus every _llm_allowed reason except the
+        "years of" wording of a skill-years question (the capability allowlist already anchors that)."""
+        ck = canonical_key(f.label)
+        label = re.sub(r"\b(?:how many )?years of\b", " ", f.label, flags=re.IGNORECASE)
+        return not (never_llm(f) or (ck in _SENSITIVE_KEYS and ck != "years_experience") or _SENSITIVE_LABEL.search(label)
+                    or eeo_class(f.label)[0] or self._needs_human(f) or _NO_FABRICATE_LABEL.search(f.label)
+                    or geo_kind(f) or f.kind == FieldKind.file)
+
+    def _infer_provider_ok(self) -> bool:
+        """Same provider policy as writing: the router (local-first, allow_cloud honoured by the router itself). With
+        writing.reviewer="client" (model judgement stays with the user's own side) and cloud allowed, infer runs only
+        when every candidate for the short tier is local; otherwise the field stays unresolved."""
+        if not self.s.llm.allow_cloud or self.s.writing.reviewer == "router":
+            return True
+        is_cloud = getattr(self.router, "_is_cloud", None)
+        cfg = getattr(self.router, "cfg", None)
+        if not callable(is_cloud) or cfg is None:
+            return True                       # a router without provider metadata (tests, custom wiring)
+        try:
+            first = next(iter(cfg.tiers))
+            cands = [cfg.tiers[first], *cfg.fallbacks.get(first, [])]
+            return not any(is_cloud(c.provider) for c in cands) and not cfg.client_on_failure
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _infer(self, fields: list[FormField], ctx: _Ctx) -> tuple[dict[str, tuple[Any, float, str]],
+                                                                        list[FormField]]:
+        """ONE conservative model call; an affirmative answer needs confidence >= answers.infer_min_confidence AND
+        every topic word in the resume/profile facts, otherwise the honest No / lowest option."""
+        if self.router is None or not self._infer_provider_ok():
+            return {}, list(fields)
+        facts = list(self.profile.facts(" ".join(f.label for f in fields), 20))
+        prompt = autonomy.infer_prompt(fields, facts, f"{ctx.posting.title} @ {ctx.posting.company}")
+        try:
+            raw = await self.router.complete(prompt, task_class="short", max_tokens=80 + 80 * len(fields),
+                                             json_schema={"type": "object"})
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
+        except Exception:  # noqa: BLE001 - a flaky model must never break planning
+            return {}, list(fields)
+        got: dict[str, tuple[Any, float, str]] = {}
+        rest: list[FormField] = []
+        all_facts = facts + list(self.profile.facts("", 60))
+        for f in fields:
+            d = data.get(f.key) if isinstance(data, dict) else None
+            low = autonomy.lowest_value(f)
+            if not isinstance(d, dict):
+                rest.append(f)
+                continue
+            try:
+                conf = max(0.0, min(1.0, float(d.get("confidence") or 0)))
+            except (TypeError, ValueError):
+                conf = 0.0
+            why = redact(re.sub(r"\s+", " ", str(d.get("rationale") or "")))[:160]   # never a secret
+            v = self._validate(f, d.get("value")) if d.get("value") not in (None, "") else None
+            if v is not None and v != low and not (conf >= self.s.answers.infer_min_confidence
+                                                   and autonomy.topic_supported(f.label, all_facts)):
+                v, why = low, f"not clearly supported by the resume (model said {d.get('value')!r}); lowest option"
+            if v is None:
+                v = low
+                why = why or "no usable model answer; lowest option"
+            if v is None:
+                rest.append(f)
+                continue
+            got[f.key] = (v, conf, why or "model answer")
+        return got, rest
+
+    def _track_assumed(self, ref: str, ctx: _Ctx, assumptions: list[Assumption]) -> list[dict[str, Any]]:
+        """Evidence + pattern tracking: count each assumed kind; at answers.promote_after the question becomes a
+        profile gap the owner is asked once. Never breaks planning."""
+        rows = [{"key": x.field.key, "label": x.field.label[:160], "value": x.answer.value, "rule": x.answer.source,
+                 "assumed": x.answer.assumed, "confidence": x.answer.confidence, "rationale": x.answer.rationale or "",
+                 **({"kind": x.kind} if x.kind else {})} for x in assumptions]
+        if any(r["assumed"] for r in rows):
+            autonomy.write_evidence(self.s.paths.data_dir, ref, rows)
+        promoted: list[dict[str, Any]] = []
+        if self.gaps is None:
+            return promoted
+        n_max = self.s.answers.promote_after
+        for x in assumptions:
+            if not x.kind or not x.answer.assumed:
+                continue
+            try:
+                n = self.gaps.record_assumed(x.kind, ref, x.answer.source)
+                if n >= n_max:
+                    self.gaps.record_hit(x.kind, x.question or x.field.label, ref=ref, kind="default",
+                                         default_used=f"assumed: {x.answer.value}", company=ctx.posting.company,
+                                         title=ctx.posting.title)
+                    promoted.append({"key": x.field.key, "gap": x.kind, "assumed_times": n,
+                                     "note": "assumed repeatedly; ask the owner once (profile_questions)"})
+            except Exception:  # noqa: BLE001, S112
+                continue
+        return promoted
 
     def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
                   tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,

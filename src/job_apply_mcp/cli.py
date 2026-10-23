@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--force", action="store_true", help="overwrite existing files (old ones saved as .bak)")
     i.add_argument("--config-dir", type=Path, help="target directory (default: platform config dir)")
     i.add_argument("--model", help="Ollama model tag for the small tier (overrides RAM-based default)")
+    i.add_argument("--autonomy", choices=["strict", "safe_default", "infer"], default=None,
+                   help="what the agent may assume when you are not available (default strict; ADR-0052)")
     i.add_argument("--client-command", choices=["auto", "uvx", "python", "script"], default="auto",
                    help="how the printed client snippet launches the server")
     for k in ("first-name", "last-name", "email", "phone", "city", "region", "country", "postal-code"):
@@ -99,7 +101,7 @@ def main(argv: list[str] | None = None) -> None:
 
         contact = {k: getattr(args, k) for k in CONTACT_KEYS if getattr(args, k, None)}
         raise SystemExit(run_init(yes=args.yes, force=args.force, config_dir=args.config_dir, contact=contact,
-                                  model=args.model, command_style=args.client_command))
+                                  model=args.model, command_style=args.client_command, autonomy=args.autonomy))
     elif args.cmd in ("approve", "deny", "pending", "resolve"):
         from .apply.approvals import cli as approvals_cli
         from .config import load_settings
