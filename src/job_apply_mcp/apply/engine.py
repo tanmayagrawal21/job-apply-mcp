@@ -44,9 +44,13 @@ from .mapper import (
     SEMANTIC_SENSITIVE,
     best_option,
     canonical_key,
+    eeo_class,
     geo_kind,
+    job_country,
+    llm_safe_short,
     looks_fabricated,
     map_fields,
+    never_llm,
     normalize,
     polarity,
     tokens,
@@ -159,6 +163,8 @@ class PlanOut(BaseModel):
     client_tasks: list[dict[str, Any]] = Field(default_factory=list)
     approval_id: str | None = None
     timings: dict[str, int] = Field(default_factory=dict)
+    skipped_voluntary: dict[str, str] = Field(default_factory=dict)   # key -> label (ADR-0040)
+    profile_gaps: list[dict[str, Any]] = Field(default_factory=list)  # per-country facts to ask the owner (ADR-0040)
 
     def compact(self) -> dict[str, Any]:
         d: dict[str, Any] = {"ref": self.plan.ref, "gate": self.plan.gate.decision.value}
@@ -173,6 +179,10 @@ class PlanOut(BaseModel):
             d["unresolved"] = self.plan.unresolved
         if self.client_tasks:
             d["client_tasks"] = self.client_tasks
+        if self.skipped_voluntary:
+            d["skipped_voluntary"] = self.skipped_voluntary
+        if self.profile_gaps:
+            d["profile_gaps"] = self.profile_gaps
         if self.approval_id:
             d["approval_id"] = self.approval_id
         if self.timings:
@@ -203,6 +213,7 @@ class _Cached:
     gate: GateResult | None = None                                  # for draft_answers (ADR-0041)
     plan_answers: list[Answer] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)            # ADR-0040 hints / gaps kept for draft_answers
 
 
 @dataclass
@@ -284,8 +295,11 @@ class ApplyEngine:
         return _Ctx(adapter, posting, form, summarize_posting(posting.description, self.s.apply.context_chars))
 
     def _stop_hits(self, form: ApplicationForm) -> list[str]:
-        phrases = [p.lower() for p in self.s.policy.stop_phrases]
-        return [f.label for f in form.fields if any(p in f.label.lower() for p in phrases)]
+        """Labels of fields whose label or options contain a stop phrase as whole words (ADR-0040)."""
+        from ..policy.gates import stop_phrase_hit
+        phrases = list(self.s.policy.stop_phrases)
+        return [f.label for f in form.fields
+                if any(stop_phrase_hit(t, phrases) for t in (f.label, *f.options))]
 
     async def _gate(self, ctx: _Ctx) -> GateResult:
         ref = ctx.form.ref
@@ -354,10 +368,18 @@ class ApplyEngine:
                                 min_score=self.s.apply.option_min_score,
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
-                                company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona)
+                                company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona,
+                                job_country=job_country(ctx.posting.location, ctx.posting.countries,
+                                                        ctx.posting.locations))
         answers = sal_answers + list(mapped.answers)
-        short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
-        long_ = [f for f in mapped.unresolved if f not in short]
+        # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
+        voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
+        pending = [f for f in mapped.unresolved if f.key not in voluntary]
+        owner_only = [f for f in pending if never_llm(f)]        # legal status / place: never a model (ADR-0040)
+        pending = [f for f in pending if f not in owner_only]
+        # ADR-0040: the short-answer model only sees allowlisted questions; _llm_allowed is defence in depth
+        short = [f for f in pending if self._is_short(f) and llm_safe_short(f) and self._llm_allowed(f)]
+        long_ = [f for f in pending if f not in short]
         tasks: list[dict[str, Any]] = []
         if self.router is not None:
             # one batched short-field call and the prose pipeline run concurrently
@@ -370,12 +392,17 @@ class ApplyEngine:
             tasks += wtasks
         else:
             long_ += short
-        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit)
+        long_ += owner_only
+        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
+                              profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
 
     def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
-                  tasks: list[dict[str, Any]], audit: dict[str, Any]) -> PlanOut:
+                  tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,
+                  voluntary: dict[str, str] | None = None,
+                  profile_gaps: list[dict[str, Any]] | None = None, no_gap_keys: set[str] | None = None) -> PlanOut:
         """Cache the plan, issue the server-held approval, and list unresolved fields as client_tasks.
         Only `answers` are ever approved/submitted; drafts inside client_tasks never are (ADR-0041)."""
+        hints = hints or {}
         unresolved_keys: list[str] = []
         have = {t["key"] for t in tasks}
         for f in long_:
@@ -384,20 +411,27 @@ class ApplyEngine:
             if not f.required and not (f.kind == FieldKind.textarea and self.s.apply.write_optional):
                 continue
             unresolved_keys.append(f.key)
-            tasks.append(self._task(f, ctx))
+            tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
-        self._record_gaps(ref, ctx, answers, unresolved_keys)
+        # ADR-0040 x ADR-0047: a per-country authorization gap is recorded with its country
+        # ("authorization.CA.requires_sponsorship"), never as the unscoped home-country key
+        country_gaps = [g for g in (profile_gaps or []) if g.get("key") in unresolved_keys]
+        scoped = {g["key"] for g in country_gaps} | set(no_gap_keys or ())   # unconfirmed country: no key at all
+        self._record_gaps(ref, ctx, answers, [k for k in unresolved_keys if k not in scoped], country_gaps)
         planned = {a.key: a.value for a in answers}
         self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
                                    time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary,
-                                   gate, list(answers), audit)
+                                   gate, list(answers), audit,
+                                   {"hints": hints, "voluntary": voluntary, "profile_gaps": profile_gaps,
+                                    "no_gap_keys": no_gap_keys})
         _, files = self._split(ctx.form, planned)
         aid = self.approvals.issue(ref, self._url(ctx), ctx.posting.company, ctx.posting.title, planned, files)
         self.approvals.set_state(ref, "planned", company=ctx.posting.company, title=ctx.posting.title,
                                  approval_id=aid, url=self._url(ctx), only_from=("planned", "approved", "failed", "handoff"))
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
-                       client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}))
+                       client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}),
+                       skipped_voluntary=voluntary or {}, profile_gaps=list(profile_gaps or []))
 
     def _salary(self, posting: Posting):
         """Persona salary policy when wired (ADR-0047); otherwise the deterministic rule from PolicyCfg."""
@@ -406,7 +440,8 @@ class ApplyEngine:
         exp = getattr(getattr(getattr(self.profile, "p", None), "salary", None), "expected", None)
         return self.persona.salary(self.s.policy, posting, exp)
 
-    def _record_gaps(self, ref: str, ctx: _Ctx, answers: list[Answer], unresolved: list[str]) -> None:
+    def _record_gaps(self, ref: str, ctx: _Ctx, answers: list[Answer], unresolved: list[str],
+                     country_gaps: list[dict[str, Any]] | None = None) -> None:
         """Record unresolved fields and default-used answers as profile gaps; must never break planning."""
         if self.gaps is None:
             return
@@ -414,6 +449,11 @@ class ApplyEngine:
             from ..persona.collector import collect_gaps
             collect_gaps(self.gaps, self.persona, self.profile, ref=ref, posting=ctx.posting,
                          fields=ctx.form.fields, answers=answers, unresolved=unresolved)
+            labels = {f.key: (f.label, f.required) for f in ctx.form.fields}
+            for g in country_gaps or []:
+                label, required = labels.get(g["key"], ("", False))
+                self.gaps.record_hit(f"authorization.{g['country']}.{g['fact']}", label, ref=ref, kind="unresolved",
+                                     blocked=bool(required), company=ctx.posting.company, title=ctx.posting.title)
         except Exception:  # noqa: BLE001, S110
             pass
 
@@ -458,7 +498,8 @@ class ApplyEngine:
         return True
 
     def _llm_allowed(self, f: FormField) -> bool:
-        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label)
+        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label) or eeo_class(f.label)[0]
+                    or never_llm(f)
                     or self._needs_human(f) or _NO_FABRICATE_LABEL.search(f.label)
                     or geo_kind(f) or f.kind == FieldKind.file)
 
@@ -651,7 +692,8 @@ class ApplyEngine:
         with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
                 ctx.posting.company, ctx.posting.title, ctx.summary):
             written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
-        out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit)
+        out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit,
+                             **cached.extra)
         out.timings = dict(self.timings.get(ref, {}))
         return out
 
@@ -1202,6 +1244,8 @@ class ApplyEngine:
             if drv is None:
                 continue
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
+            if g := self.profile.lookup("gender_if_required"):   # the driver fills required EEO selects only
+                demo["demographic:gender"] = g
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
             async with self._browser_sem:
@@ -1231,13 +1275,14 @@ class ApplyEngine:
             if out.plan.unresolved:
                 human = any(t.get("needs_human") for t in out.client_tasks)
                 return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,
-                        "client_tasks": out.client_tasks, "approval_id": out.approval_id, "t": out.timings}
+                        "client_tasks": out.client_tasks, "approval_id": out.approval_id, "t": out.timings,
+                        **({"skipped_voluntary": out.skipped_voluntary} if out.skipped_voluntary else {})}
             if not dry and not self.s.apply.auto_approve_active:
                 return {"ref": ref, "status": "awaiting_approval", "approval_id": out.approval_id, "t": out.timings}
             async with browser_cap:
                 r = await self.submit(ref, {}, out.approval_id, dry)
             row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail, "pending_id": r.pending_id,
-                   "t": self.timings.get(ref, {})}
+                   "t": self.timings.get(ref, {}), "skipped_voluntary": out.skipped_voluntary}
             return {k: v for k, v in row.items() if v}
 
         # every ref starts at once; the pools above (plan_sem, browser_cap/_browser_sem) do the limiting

@@ -123,7 +123,8 @@ class ProfileView:
     def _structured(self, key: str) -> bool | None:
         a, pr = self.p.authorization, self.p.preferences
         return {"work_authorized": a.work_authorized, "requires_sponsorship": a.requires_sponsorship,
-                "us_citizen": a.citizen, "willing_to_relocate": pr.willing_to_relocate,
+                # ADR-0040: US citizenship comes from the US facts (flat `citizen` only when home_country is US)
+                "us_citizen": a.facts_for("US").citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
                 "open_to_onsite": pr.open_to_onsite,
                 "acknowledge_privacy_notices": pr.acknowledge_privacy_notices}.get(key)
@@ -148,6 +149,22 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key == "derived:region":                 # ADR-0040: state/region for the continental-US rule
+            return self.p.contact.region or None
+        if key == "home_country":
+            return self.p.authorization.home_country.upper()
+        if key.startswith("auth:"):                 # ADR-0040: "auth:<ISO-2>:<fact>" per-country authorization facts
+            _, cc, fact = key.split(":", 2)
+            a = self.p.authorization
+            facts = a.facts_for(cc)
+            v = getattr(facts, fact, None)
+            if v is None and fact == "citizen" and (c := self._citizenship_country()):
+                from .places import country_iso
+                iso = country_iso(c)
+                v = (iso == cc.upper()) if iso else None
+            if v is None and self.persona is not None:   # ADR-0047: the owner's answer to the recorded per-country gap
+                return self.persona.stored(f"authorization.{cc.upper()}.{fact}")   # an explicit profile fact wins
+            return None if v is None else self._TRI[v]
         if key == "citizenship_country":
             return self._citizenship_country()
         if key.startswith("gpa:"):
@@ -196,7 +213,9 @@ class ProfileView:
 
     def _lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
-                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:"))):
+                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:",
+                                                                        "derived:", "auth:"))
+                or key == "home_country"):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v
@@ -212,7 +231,8 @@ class ProfileView:
             "school": e.school if e else None, "degree": e.degree if e else None,
             "discipline": e.field if e else None, "graduation": e.end if e else None,
             "lat": c.lat, "lon": c.lon, "sexual_orientation": d.sexual_orientation,
-            "gender": d.gender, "hispanic": d.race_ethnicity, "race": d.race_ethnicity,
+            "gender": d.gender, "gender_if_required": d.gender_if_required, "hispanic": d.hispanic_latino,
+            "race": d.race_ethnicity,
             "veteran": d.veteran_status, "disability": d.disability_status, "pronouns": d.pronouns,
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),
@@ -249,7 +269,9 @@ class PolicyGates:
         self.cfg = settings.policy
 
     async def evaluate(self, posting: Posting, form: ApplicationForm) -> GateResult:
-        return self._eval(posting, self.cfg, " ".join(f.label for f in form.fields))
+        # one line per field (label and its options) so a phrase never spans two fields (ADR-0040)
+        lines = [" | ".join([f.label, *f.options]).replace("\n", ". ") for f in form.fields]
+        return self._eval(posting, self.cfg, "\n".join(lines))
 
 
 class RouterView:

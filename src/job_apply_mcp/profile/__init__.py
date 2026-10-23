@@ -9,8 +9,9 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..persona.models import Persona
 
@@ -54,8 +55,10 @@ class Work(BaseModel):
 
 
 class Demographics(BaseModel):
-    """Every field defaults to declining to answer."""
+    """Every field defaults to declining to answer. Values are matched to an option exactly (ADR-0040)."""
     gender: str = DECLINE
+    gender_if_required: str = ""        # used instead of `gender` when the gender question is required; "" = `gender`
+    hispanic_latino: str = DECLINE      # the separate "Are you Hispanic or Latino?" question (e.g. "Yes" / "No")
     race_ethnicity: str = DECLINE
     veteran_status: str = DECLINE
     disability_status: str = DECLINE
@@ -79,12 +82,57 @@ class Preferences(BaseModel):
     acknowledge_privacy_notices: bool | None = None
 
 
-class Authorization(BaseModel):
-    """Work-authorization facts. None = not configured (falls back to [answers] patterns)."""
+class CountryAuthorization(BaseModel):
+    """Work-authorization facts for ONE country. None = not configured (the question stays with the owner)."""
     work_authorized: bool | None = None
     requires_sponsorship: bool | None = None
-    citizen: bool | None = None            # US citizenship
+    citizen: bool | None = None
+
+
+class Authorization(BaseModel):
+    """Work-authorization facts, per country (ADR-0040):
+
+        [authorization]            # flat keys: an alias for the home country (default US, the old behaviour)
+        home_country = "US"
+        work_authorized = true
+        [authorization.CA]         # any ISO-2 code
+        work_authorized = false
+        requires_sponsorship = true
+    """
+    home_country: str = "US"
+    work_authorized: bool | None = None
+    requires_sponsorship: bool | None = None
+    citizen: bool | None = None            # citizenship of the home country (US citizenship by default)
     citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
+    countries: dict[str, CountryAuthorization] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _collect_countries(cls, data: Any) -> Any:
+        """`[authorization.CA]` tables (ISO-2 keys) go into `countries`."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        countries = dict(out.pop("countries", None) or {})
+        for k in list(out):
+            if re.fullmatch(r"[A-Za-z]{2}", k) and isinstance(out[k], dict):
+                countries[k.upper()] = out.pop(k)
+        out["countries"] = {k.upper(): v for k, v in countries.items()}
+        if "home_country" in out:
+            out["home_country"] = str(out["home_country"] or "US").strip().upper() or "US"
+        return out
+
+    def facts_for(self, country: str) -> CountryAuthorization:
+        """Per-country facts; for the home country, missing per-country values fall back to the flat keys."""
+        c = (country or "").upper()
+        mine = self.countries.get(c, CountryAuthorization())
+        if c != self.home_country.upper():
+            return mine
+        return CountryAuthorization(
+            work_authorized=mine.work_authorized if mine.work_authorized is not None else self.work_authorized,
+            requires_sponsorship=(mine.requires_sponsorship if mine.requires_sponsorship is not None
+                                  else self.requires_sponsorship),
+            citizen=mine.citizen if mine.citizen is not None else self.citizen)
 
 
 class Profile(BaseModel):
@@ -139,6 +187,7 @@ class Profile(BaseModel):
         """Answer for EEO-style questions; declines by default. None if not a demographic question."""
         q = normalize_question(question)
         table = {
+            "hispanic": self.demographics.hispanic_latino, "latino": self.demographics.hispanic_latino,
             "gender": self.demographics.gender, "race": self.demographics.race_ethnicity,
             "ethnic": self.demographics.race_ethnicity, "veteran": self.demographics.veteran_status,
             "disabilit": self.demographics.disability_status,

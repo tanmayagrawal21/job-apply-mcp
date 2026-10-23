@@ -46,7 +46,8 @@ class AshbyAdapter(BaseAdapter):
             j.get("descriptionPlain") or "", with_description=with_description, api_salary=pay,
             ref=self.ref(board, j["id"]), company=board, title=j.get("title", ""), location=j.get("location") or "",
                  url=url, apply_url=j.get("applyUrl") or url + "/application",
-                 posted_at=self._posted(j))
+                 posted_at=self._posted(j),
+                 countries=self._countries(j), locations=self._locations(j))
 
     @staticmethod
     def _posted(j: dict) -> str | None:
@@ -55,6 +56,25 @@ class AshbyAdapter(BaseAdapter):
     @staticmethod
     def _listed(d: Any) -> list[dict]:
         return [j for j in (d.get("jobs", []) if isinstance(d, dict) else []) if j.get("isListed", True)]
+
+    def _countries(self, j: dict) -> list[str]:
+        """addressCountry of the primary and every secondary location (ADR-0040). Every entry must parse: a non-dict,
+        malformed or country-less entry is "UNCONFIRMED", never skipped."""
+        raw = j.get("secondaryLocations") or []
+        entries = [j] + (raw if isinstance(raw, list) else [None])
+        out: list[str] = []
+        for e in entries:
+            addr = e.get("address") if isinstance(e, dict) else None
+            post = addr.get("postalAddress") if isinstance(addr, dict) else None
+            c = self.country_code(post.get("addressCountry")) if isinstance(post, dict) else None
+            out.append(c or "UNCONFIRMED")
+        return sorted(set(out))
+
+    @staticmethod
+    def _locations(j: dict) -> list[str]:
+        raw = j.get("secondaryLocations") or []
+        return [str(s.get("location")) for s in (raw if isinstance(raw, list) else [])
+                if isinstance(s, dict) and str(s.get("location") or "").strip()]
 
     async def _board(self, board: str) -> list[dict]:
         try:
