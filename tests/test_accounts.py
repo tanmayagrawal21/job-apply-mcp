@@ -62,8 +62,10 @@ class FakeOps:
         self.vault = vault
         self.stored_before_fill: bool | None = None
 
+    current_url = f"https://{HOST}/en-US/careers/login"
+
     def url(self):
-        return f"https://{HOST}/en-US/careers/login"
+        return self.current_url
 
     async def captcha_visible(self):
         self.calls.append("captcha_visible")
@@ -520,9 +522,9 @@ def _random_secrets(n=60, seed=46):
 class LeakyPage:
     """Fake Playwright page whose fill raises an error that ECHOES the value, like a careless driver might."""
 
-    url = f"https://{HOST}/login"
-
-    def __init__(self):
+    def __init__(self, url=f"https://{HOST}/login", frame_url=None):
+        self.url = url
+        self.frame_url = frame_url or url
         self.received: list[str] = []
 
     def locator(self, sel):
@@ -538,6 +540,9 @@ class LeakyPage:
 
             async def is_visible(self):
                 return True
+
+            async def evaluate(self, js):
+                return page.frame_url
 
             async def fill(self, value):
                 if value == USER:
@@ -581,8 +586,8 @@ def test_property_secrets_never_in_logs_output_or_exceptions(cfg, tmp_path, capl
             logging.getLogger("job_apply_mcp.test").exception("caught")
         # login flow end to end, page raising errors that contain the value
         m = AccountManager(cfg, v, AccountsDB(tmp_path / f"d{k}"), RunReport())
-        page = LeakyPage()
-        ops = PlaywrightLoginOps(page, lambda: asyncio.sleep(0, result=False), settle_ms=0)
+        page = LeakyPage(f"https://{host}/login")
+        ops = PlaywrightLoginOps(page, lambda: asyncio.sleep(0, result=False), expected_host=page.url, settle_ms=0)
         out = run(m.handle_wall(ops, f"https://{host}/login", email=USER, dry_run=False))
         assert page.received == [secret]              # it did reach the page, and only the page
         sink += [repr(out), out.detail(), str(ops.last_error), json.dumps(m.report.compact())]
@@ -612,3 +617,133 @@ def test_property_secrets_never_in_logs_output_or_exceptions(cfg, tmp_path, capl
             assert form not in everything, f"secret #{k} leaked"
         assert MASK in caplog.text
         caplog.clear()
+
+
+# ------------------------------------------------------------------ control review (f24b2ba7): host pinning etc.
+
+EVIL = "https://evil.example.net/login"
+
+
+class MovingOps(FakeOps):
+    """open_signin / open_signup / fill_username navigate to another host (redirect or lookalike link)."""
+
+    def __init__(self, move_on, **kw):
+        super().__init__(**kw)
+        self.move_on = move_on
+
+    async def open_signin(self):
+        if self.move_on == "open":
+            self.current_url = EVIL
+        return await super().open_signin()
+
+    async def open_signup(self):
+        if self.move_on == "open":
+            self.current_url = EVIL
+        return await super().open_signup()
+
+    async def fill_username(self, u):
+        if self.move_on == "username":
+            self.current_url = EVIL
+        return await super().fill_username(u)
+
+    async def fill_password(self, secret, *, confirm=False):
+        r = await super().fill_password(secret, confirm=confirm)
+        if self.move_on == "password":
+            self.current_url = EVIL
+        return r
+
+
+@pytest.mark.parametrize("move_on", ["open", "username", "password"])
+def test_login_never_fills_or_submits_on_another_host(cfg, vault, consent_on, tmp_path, move_on):
+    vault.put(HOST, USER, Secret(PW))
+    m = mgr(cfg, vault, tmp_path)
+    ops = MovingOps(move_on, kind="none")
+    out = run(m.handle_wall(ops, f"https://{HOST}/x"))
+    assert out.status == "needs_human" and "another host" in out.reason
+    assert "submit_login" not in ops.calls
+    if move_on != "password":
+        assert "password" not in ops.filled
+    assert "host_moved" in m.report.compact()[HOST]
+
+
+@pytest.mark.parametrize("move_on", ["open", "username", "password"])
+def test_signup_never_fills_or_submits_on_another_host(cfg, vault, kr, consent_on, tmp_path, move_on):
+    cfg.accounts.auto_create = True
+    m = mgr(cfg, vault, tmp_path)
+    ops = MovingOps(move_on, kind="none")
+    out = run(m.handle_wall(ops, f"https://{HOST}/x", email=USER, dry_run=False))
+    assert out.status == "needs_human" and "another host" in out.reason
+    assert "submit_signup" not in ops.calls and kr.items == {}
+    if move_on != "password":
+        assert "password" not in ops.filled
+    assert m.db.get(HOST, USER) in (None,) or m.db.get(HOST, USER)["status"] == "failed"
+
+
+def test_browser_ops_refuses_password_in_cross_host_frame():
+    from job_apply_mcp.accounts.browser_ops import PlaywrightLoginOps
+    page = LeakyPage(f"https://{HOST}/login", frame_url="https://login.evil.example.net/frame")
+    ops = PlaywrightLoginOps(page, lambda: asyncio.sleep(0, result=False), expected_host=page.url, settle_ms=0)
+    assert run(ops.fill_password(Secret(PW))) is False
+    assert page.received == [] and ops.last_error == "FrameHostMismatch"
+
+
+def test_browser_ops_without_expected_host_never_fills():
+    from job_apply_mcp.accounts.browser_ops import PlaywrightLoginOps
+    page = LeakyPage()
+    ops = PlaywrightLoginOps(page, lambda: asyncio.sleep(0, result=False), settle_ms=0)
+    assert run(ops.fill_password(Secret(PW))) is False and page.received == []
+
+
+def test_login_checks_captcha_between_fill_and_submit(cfg, vault, consent_on, tmp_path):
+    vault.put(HOST, USER, Secret(PW))
+
+    class LateCaptcha(FakeOps):
+        async def captcha_visible(self):
+            self.calls.append("captcha_visible")
+            return "fill_password" in self.calls
+
+    ops = LateCaptcha()
+    out = run(mgr(cfg, vault, tmp_path).handle_wall(ops, HOST))
+    assert out.status == "needs_human" and "CAPTCHA" in out.reason and "submit_login" not in ops.calls
+
+
+def test_evidence_json_is_redacted(cfg, tmp_path):
+    from job_apply_mcp.apply.browser_playwright import PlaywrightDriver
+    secret = Secret("evidence-leak-test-pw")
+
+    class Page:
+        url = f"https://{HOST}/apply?pw={secret.reveal()}"
+
+        async def screenshot(self, **kw):
+            pass
+
+        def locator(self, sel):
+            class L:
+                async def inner_text(self):
+                    return f"typed {secret.reveal()}"
+            return L()
+
+    d = PlaywrightDriver(cfg)
+
+    async def none(*a, **k):
+        return []
+
+    d._validation_errors = none
+    d._records = none
+    d._captcha_widgets = none
+    d._button_summary = none
+    shown = run(d._save_evidence(Page(), "greenhouse:1", "handoff", extra={"note": secret.reveal()}))
+    assert "evidence=" in shown
+    files = list((tmp_path / "data" / "evidence").rglob("*.json"))
+    assert files and all(secret.reveal() not in f.read_text() for f in files)
+
+
+def test_terms_review_flag_surfaces_in_run_report_and_vault_status(cfg, vault, consent_on, tmp_path, monkeypatch):
+    from job_apply_mcp.accounts import tools
+    cfg.accounts.auto_create = True
+    report = RunReport()
+    monkeypatch.setattr(tools, "RUN_REPORT", report)
+    m = AccountManager(cfg, vault, AccountsDB(tmp_path / "data"), report)
+    run(m.handle_wall(FakeOps(kind="signup", terms=[REQ]), HOST, email=USER, dry_run=False))
+    st = vault_status(cfg, vault)
+    assert "account_created_terms_to_review" in st["run_flags"][HOST]

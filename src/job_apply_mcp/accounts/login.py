@@ -99,6 +99,17 @@ def _stop_hit(text: str, phrases: list[str]) -> str | None:
     return next((p for p in phrases if p.strip() and p.lower() in low), None)
 
 
+_MOVED = "login form moved to another host; not filling or submitting"
+
+
+def _on_host(ops: LoginOps, host: str) -> bool:
+    """The page must still be on the exact host whose credential is in use (redirects and links can leave it)."""
+    try:
+        return normalize_host(ops.url()) == host
+    except VaultError:
+        return False
+
+
 class AccountManager:
     def __init__(self, settings: Any, vault: Vault, db: AccountsDB, report: RunReport | None = None):
         self.s = settings
@@ -164,9 +175,23 @@ class AccountManager:
             if await ops.captcha_visible():
                 self.report.flag(host, "captcha")
                 return LoginOutcome(host, "needs_human", "visible CAPTCHA: human handoff (never solved)", user)
-            if not (await ops.fill_username(user) and await ops.fill_password(secret)):
+            if not _on_host(ops, host):
+                self.report.flag(host, "host_moved")
+                return LoginOutcome(host, "needs_human", _MOVED, user)
+            if not await ops.fill_username(user):
+                return LoginOutcome(host, "needs_human", "sign-in fields not fillable", user)
+            if not _on_host(ops, host):
+                self.report.flag(host, "host_moved")
+                return LoginOutcome(host, "needs_human", _MOVED, user)
+            if not await ops.fill_password(secret):
                 return LoginOutcome(host, "needs_human", "sign-in fields not fillable", user)
             del secret
+            if await ops.captcha_visible():
+                self.report.flag(host, "captcha")
+                return LoginOutcome(host, "needs_human", "visible CAPTCHA before sign-in submit: human handoff", user)
+            if not _on_host(ops, host):
+                self.report.flag(host, "host_moved")
+                return LoginOutcome(host, "needs_human", _MOVED, user)
             if not await ops.submit("login"):
                 return LoginOutcome(host, "needs_human", "sign-in button not found", user)
             res = await ops.login_result()
@@ -196,6 +221,9 @@ class AccountManager:
         self._attempts[host] = self.attempts(host) + 1
         if await ops.kind() != "signup" and not await ops.open_signup():
             return LoginOutcome(host, "needs_human", "could not find the create-account form", user)
+        if not _on_host(ops, host):
+            self.report.flag(host, "host_moved")
+            return LoginOutcome(host, "needs_human", _MOVED, user)
         if await ops.captcha_visible():
             self.report.flag(host, "captcha")
             return LoginOutcome(host, "needs_human", "visible CAPTCHA on sign-up: human handoff", user)
@@ -217,9 +245,17 @@ class AccountManager:
         except VaultError as e:
             return LoginOutcome(host, "needs_human", f"not creating an account: {e}", user)
         self.db.record(host, user, "creating", terms_url)
-        ok = await ops.fill_username(user) and await ops.fill_password(secret)
-        ok = ok and await ops.fill_password(secret, confirm=True)
+        ok = await ops.fill_username(user)
+        moved = not _on_host(ops, host)
+        ok = ok and not moved and await ops.fill_password(secret)
+        moved = moved or not _on_host(ops, host)
+        ok = ok and not moved and await ops.fill_password(secret, confirm=True)
         del secret
+        if moved:
+            self.db.record(host, user, "failed")
+            self.vault.remove(host, user)
+            self.report.flag(host, "host_moved")
+            return LoginOutcome(host, "needs_human", _MOVED, user)
         for t in to_accept:
             ok = ok and await ops.accept_terms(t)
         if not ok:
@@ -231,6 +267,11 @@ class AccountManager:
             self.vault.remove(host, user)
             self.report.flag(host, "captcha")
             return LoginOutcome(host, "needs_human", "visible CAPTCHA on sign-up: human handoff", user)
+        if not _on_host(ops, host):
+            self.db.record(host, user, "failed")
+            self.vault.remove(host, user)
+            self.report.flag(host, "host_moved")
+            return LoginOutcome(host, "needs_human", _MOVED, user)
         if not await ops.submit("signup"):
             self.db.record(host, user, "failed")
             self.vault.remove(host, user)

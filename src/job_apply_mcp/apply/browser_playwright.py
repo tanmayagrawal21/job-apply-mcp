@@ -27,6 +27,7 @@ from .. import consent
 from ..config import Settings
 from ..core import registry
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
+from ..core.secrets import redact
 from .geo import location_queries, pick_location
 from .mapper import (
     _DEMOGRAPHIC_LABEL,
@@ -586,7 +587,8 @@ class PlaywrightDriver(VerificationMixin):
             st = await self._captcha_state(page)
             return bool(st["visible"] or st["unsafe"])
 
-        return await manager_for(self.s).handle_wall(PlaywrightLoginOps(page, captcha), page.url or url,
+        start = page.url or url
+        return await manager_for(self.s).handle_wall(PlaywrightLoginOps(page, captcha, expected_host=start), start,
                                                      email=email, dry_run=dry_run)
 
     async def ensure_login(self, url: str, email: str | None = None, *, dry_run: bool = True) -> str:
@@ -761,7 +763,7 @@ class PlaywrightDriver(VerificationMixin):
                     "captcha_widgets": await self._captcha_widgets(page),
                     "submit_buttons": await self._button_summary(page),
                     "text": trim(text, self.b.evidence_text_chars), **(extra or {})}
-            (d / f"{tag}.json").write_text(json.dumps(meta, indent=1))
+            (d / f"{tag}.json").write_text(redact(json.dumps(meta, indent=1)))   # ADR-0046 defense in depth
             home = str(Path.home())
             shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
             return f" evidence={shown}"

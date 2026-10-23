@@ -14,6 +14,7 @@ from typing import Any
 
 from ..core.secrets import Secret
 from .login import LoginResult, PageKind, SignupResult, Terms
+from .vault import normalize_host
 
 USER_SEL = ("[data-automation-id=email], [data-automation-id=userName], input[type=email], "
             "input[autocomplete=username], input[autocomplete=email], input[name*=user i], input[id*=user i], "
@@ -64,8 +65,10 @@ _TERMS_JS = r"""() => {
 
 
 class PlaywrightLoginOps:
-    def __init__(self, page: Any, captcha_fn: Callable[[], Awaitable[bool]], *, settle_ms: int = 2500):
+    def __init__(self, page: Any, captcha_fn: Callable[[], Awaitable[bool]], *, expected_host: str = "",
+                 settle_ms: int = 2500):
         self.page = page
+        self.expected_host = normalize_host(expected_host) if expected_host else ""
         self._captcha = captcha_fn
         self.settle_ms = settle_ms
         self.last_error: str | None = None      # a type name only
@@ -163,9 +166,24 @@ class PlaywrightLoginOps:
                 el = els.nth(1)
         else:
             el = await self._first_visible(PASS_SEL)
-        if el is None:
+        if el is None or not await self._element_on_host(el):
             return False
         ok = await self._fill(el, secret.reveal())   # the ONLY place a secret value is handed to the page
+        return ok
+
+    async def _element_on_host(self, el: Any) -> bool:
+        """The password field's own document (its frame, which may be a cross-origin iframe) must be on the
+        expected host. Unreadable -> refuse (fail closed)."""
+        if not self.expected_host:
+            return False
+        try:
+            href = await el.evaluate("e => e.ownerDocument.location.href")
+            ok = normalize_host(href) == self.expected_host
+        except Exception as e:
+            self.last_error = type(e).__name__
+            return False
+        if not ok:
+            self.last_error = "FrameHostMismatch"
         return ok
 
     async def terms(self) -> list[Terms]:

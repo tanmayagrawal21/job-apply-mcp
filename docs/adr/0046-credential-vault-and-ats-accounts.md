@@ -44,7 +44,14 @@ unattended needs a credential store whose secrets the calling LLM can never see,
    in the keychain **before** any field is filled; the DB (`accounts.db`, table `ats_accounts`) records host,
    username, created_at, status and the terms URL, never the password. A failure before submit or an "account
    already exists" page removes the new keychain item; an unclear result keeps it (`unknown`).
-7. **Email verification.** If the site asks to confirm the email, a registered verifier
+7. **Host pinning.** The credential's host is fixed at the start. Before every username fill, password fill and
+   submit (login and sign-up), `normalize_host(ops.url())` must still equal it. If a link or redirect moved the page,
+   the flow stops (`needs_human`, flag `host_moved`), and a new sign-up's keychain item is removed. On top of that,
+   `PlaywrightLoginOps.fill_password` refuses a field whose own document (including a cross-origin iframe) is on
+   another host, and refuses when no expected host is set. Login also re-checks for a CAPTCHA between fill and
+   submit. Evidence JSON passes through `redact()`. Terms ticked on sign-up surface as
+   `account_created_terms_to_review` in `apply_batch.account_flags` and `vault_status.run_flags`.
+8. **Email verification.** If the site asks to confirm the email, a registered verifier
    (`login.register_email_verifier`) runs only when `consent.active(settings, "mail")`; otherwise, or with no
    verifier (the case today), the account is `pending_verification`.
 
