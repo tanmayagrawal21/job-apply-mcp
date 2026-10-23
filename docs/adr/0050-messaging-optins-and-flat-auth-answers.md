@@ -27,14 +27,20 @@ QA (#70) found two wrong answers on Greenhouse postings:
      contact), "on call", "phone screen", "availability", "tools", "platform" and similar are cut out of the label,
      and the remainder is checked again. So "Do you have WhatsApp experience, and may we message you there?" stays
      owner-only, and an authorization, EEO or own-rule question keeps its rule unless another clause asks to contact.
-   - **The one exception: the owner's own answer.** If the owner stored `optin:<channel>` (Yes or No) in `[answers]`
-     for every named channel (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`, `viber`, `imessage`,
-     `marketing`, plus `phone`, `email`, `push`), that value answers a **narrow** permission question:
-     delivery wording (`_PERMISSION_ASK`: "opt in to", "subscribe to", "sign me up for", "consent/agree to receive",
-     "(may|can) we|recruiters text/call/email/message/reach you", "ok to text you", "would you like to receive", "join
-     our talent community") with a named messaging channel or a marketing communication, and a contact as the thing
-     delivered (messages, texts, updates, emails, newsletters ... or "text you"). "Would you like to receive WhatsApp
-     training?" or "Are you comfortable making cold calls?" never take a stored value.
+   - **The one exception: the owner's own answer, on a single-clause ask.** If the owner stored `optin:<channel>`
+     (Yes or No) in `[answers]` for every named channel (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`,
+     `viber`, `imessage`, `marketing`, plus `phone`, `email`, `push`), that value is used only when the **whole**
+     trimmed label is one permission clause (`is_single_permission_ask`, exported for the autonomy-level PR): an
+     optional lead-in ("do you", "would you like to", "I"), a permission verb ("opt in to", "subscribe to", "sign me up
+     for", "consent/agree to receive" or "to be texted/contacted", "would you like to receive", "(may|can) we
+     text/call/email/message/contact/reach you", "(is it) ok to text you"), a channel object of a few fixed words,
+     and an optional tail limited to "about (this|my|your) application", "about (new|future) (roles|jobs|
+     opportunities)" or "from <company>/us/recruiting", plus an optional trailing "?" or ".". The label is rejected
+     if it has a second clause anywhere (`and`, `or`, `;`, `,`, text after `?`, `.` or `!`) or any legal,
+     attestation, EEO or third-party term (arrest, criminal, citizen, authoriz, sponsor, visa, 18, age, certify,
+     true, accurate, background, drug, gender, race, veteran, disability, reference, manager, employer, third,
+     emergency, ...). Otherwise the field stays unresolved. "Have you been arrested, and may we text you?" or "Would
+     you like to receive WhatsApp training?" never take a stored value.
    - **Automatic declines move out.** A safe automatic No for required opt-ins is left to the planned autonomy-level
      `safe_default` mode; this rule never decides one.
    - Opt-out wording, unclear options, or bundling with a notice, terms, attestation or recording consent stay

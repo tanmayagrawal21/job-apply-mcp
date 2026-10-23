@@ -1460,23 +1460,62 @@ _AUTO_CHANNELS = frozenset({"whatsapp", "sms", "signal", "telegram", "wechat", "
                             "marketing"})
 
 
-def permission_ask(f: FormField, chans: Sequence[str]) -> bool:
-    """A narrow opt-in: permission wording AND at least one named messaging or marketing channel."""
-    return (bool(chans) and bool(_AUTO_CHANNELS & set(chans))
-            and bool(_PERMISSION_ASK.search(_strip_exceptions(normalize(f.label)))))
+# ---- the single-clause permission template (control round 6; shared with the autonomy-level PR) -----------------
+# A stored optin:<channel> is applied ONLY when the whole label is one permission clause. A second clause ("Have you
+# been arrested, and may we text you?", "May we text you? Are you a US citizen?") or any legal, attestation, EEO or
+# third-party term anywhere rejects it, and the field stays unresolved.
+_SECOND_CLAUSE = re.compile(r"\band\b|\bor\b|;|,|\?\s*\S|\.\s+\S|!\s*\S", re.IGNORECASE)
+_SINGLE_ASK_BLOCK = re.compile(
+    r"arrest|criminal|convict|felon|citizen|authori[sz]|sponsor|visa|\b18\b|\bage\b|certif|attest|\btrue\b|accura|"
+    r"background|drug|gender|\brace\b|ethnic|veteran|disab|referen|referee|manager|employer|third|emergency|\bkin\b|"
+    r"terms|arbitrat|privacy|record(?:ed|ing)?\b|relocat|salary|clearance|export", re.IGNORECASE)
+_ASK_LEAD = r"(?:(?:do you|would you like to|i would like to|i d like to|i|yes)\s)?"
+_ASK_VERB = (r"(?:opt in (?:to|for)(?: receive| receiving)?|subscribe to|sign (?:me )?up (?:for|to)|"
+             r"(?:consent|agree) to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged))|"
+             r"would you like to (?:receive|get)|"
+             r"(?:may|can|could) we (?:send|contact|text|call|email|message|reach|whats ?app) (?:you|your)|"
+             r"(?:is it )?ok(?:ay)? to (?:text|call|email|contact|message|whats ?app) (?:you|your))")
+_ASK_TAIL = (r"(?:\s(?:about (?:this|my|your) application|about (?:new|future) (?:roles|jobs|opportunities)|"
+             r"from (?:us|[a-z0-9 ]{1,40})))?")
+_ASK_OBJECT_WORDS = frozenset(["a", "the", "our", "your", "my", "via", "by", "on", "over", "through", "mobile", "phone",
+                               "cell", "number", "messages", "message", "updates", "update", "alerts", "alert",
+                               "notifications", "notification", "texts", "text", "emails", "email", "e", "mail",
+                               "communications", "newsletter", "newsletters", "marketing", "promotional", "offers",
+                               "recruiting", "recruiter", "job", "sms", "mms", "whatsapp", "whats", "app", "signal",
+                               "telegram", "wechat", "line", "viber", "imessage", "reminders", "talent", "community",
+                               "mailing", "list"])
+_ASK_RX = re.compile(rf"^{_ASK_LEAD}{_ASK_VERB}(?P<obj>(?:\s[a-z0-9]+){{0,5}}?){_ASK_TAIL}$")
 
 
-# the thing delivered must be a contact itself ("WhatsApp messages", "text you"), not "WhatsApp training"
-_DELIVERED = re.compile(r"\b(?:send|contact|text|call|email|message|reach|whats ?app)\w* (?:you|your|me)\b|"
-                        r"\b(?:messages?|texts|text messages?|updates|notifications?|alerts?|reminders?|e ?mails|"
-                        r"communications?|calls|newsletters?|offers)\b")
-
-
-def optin_value(f: FormField, chans: list[str], profile: ProfileLike) -> Any | None:
-    """ADR-0050 (descoped): never an automatic answer. Only the owner's own stored `optin:<channel>` value, set for
-    EVERY named channel, answers a narrow contact-permission ask; anything else is None (owner-only, unresolved)."""
-    if not permission_ask(f, chans) or not _DELIVERED.search(_strip_exceptions(normalize(f.label))):
+def is_single_permission_ask(label: str, company: str = "") -> list[str] | None:
+    """The channels of a label that is exactly ONE permission-to-contact clause (lead-in, permission verb, channel,
+    optional short tail), else None. Shared with the autonomy-level `safe_default` mode."""
+    raw = (label or "").strip()
+    body = re.sub(r"[?.!]+\s*$", "", raw)          # one trailing ? or . is allowed
+    if not body or _SECOND_CLAUSE.search(body) or _SINGLE_ASK_BLOCK.search(raw):
         return None
+    n = normalize(body)
+    m = _ASK_RX.match(n)
+    if not m:
+        return None
+    tail = n[m.end("obj"):].strip()
+    if tail.startswith("from ") and tail[5:] not in ("us", "recruiting"):
+        allowed = set(normalize(company).split()) | {"recruiting", "recruiters", "team", "talent", "hiring", "s"}
+        if not company or not set(tail[5:].split()) <= allowed:
+            return None
+    if not all(w in _ASK_OBJECT_WORDS for w in m.group("obj").split()):
+        return None
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n) and c != "contact"]
+    return chans if _AUTO_CHANNELS & set(chans) else None
+
+
+def optin_value(f: FormField, chans: list[str], profile: ProfileLike, company: str = "") -> Any | None:
+    """ADR-0050 (descoped): never an automatic answer. Only the owner's own stored `optin:<channel>` value, set for
+    EVERY named channel, answers a label that is exactly one permission clause (is_single_permission_ask)."""
+    single = is_single_permission_ask(f.label, company)
+    if not single:
+        return None
+    chans = single
     stored = [_truth(profile.lookup(f"optin:{c}")) for c in chans]
     if any(v is None for v in stored):
         return None                     # no automatic No: the owner (or a later safe-default mode) decides
@@ -1558,7 +1597,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             continue
         chans = optin_channels(f)
         if chans is not None:            # ADR-0050: messaging/marketing opt-in, before every answer source
-            ov = optin_value(f, chans, profile)
+            ov = optin_value(f, chans, profile, company)
             if ov is not None:            # the owner's own optin:<channel> answer
                 res.answers.append(Answer(key=f.key, value=ov, source="rule:messaging_optin"))
             else:

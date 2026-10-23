@@ -80,11 +80,13 @@ def test_stored_optin_is_the_owners_own_answer(label):
 def test_only_an_exact_channel_value_counts():
     yes_wa = view({"optin:whatsapp": "Yes"})
     owner_only(OTHER_CHANNELS[0], yes_wa)                                      # SMS question, WhatsApp key
-    owner_only("Do you agree to receive WhatsApp and SMS messages?", yes_wa)   # every channel needs its own value
-    assert run("Do you agree to receive WhatsApp and SMS messages?",
-               p=view({"optin:whatsapp": "Yes", "optin:sms": "Yes"}))[0] == ("Yes", "rule:messaging_optin")
-    assert run("Do you agree to receive WhatsApp and SMS messages?",
-               p=view({"optin:whatsapp": "Yes", "optin:sms": "No"}))[0] == ("No", "rule:messaging_optin")
+    owner_only("Can we email you about future roles?", view({"optin:email": "Yes"}))   # every channel needs a value
+    assert run("Can we email you about future roles?",
+               p=view({"optin:email": "Yes", "optin:marketing": "Yes"}))[0] == ("Yes", "rule:messaging_optin")
+    assert run("Can we email you about future roles?",
+               p=view({"optin:email": "Yes", "optin:marketing": "No"}))[0] == ("No", "rule:messaging_optin")
+    # two channels joined by "and" is a second clause: never answered from stored values
+    owner_only("Do you agree to receive WhatsApp and SMS messages?", view({"optin:whatsapp": "Yes", "optin:sms": "Yes"}))
     owner_only(WHATSAPP[0], view({"opt in whatsapp": "Yes", "re:whatsapp": "Yes"}))   # flat patterns never count
 
 
@@ -222,9 +224,11 @@ CONTROL_LABELS = [
 
 
 # labels whose stored optin value is used (narrow ask about a contact); the rest stay owner-only even when stored
-STORED_APPLIES = {"Is it OK to text you?", "May we text your mobile?", "Can we send you a text?",
-                  "Can we text you about interview scheduling?", "Can recruiters call or text you?",
-                  "Okay to WhatsApp you?", "Can we reach you on Signal?", "Can we email you about future roles?"}
+# whole label is one permission clause (is_single_permission_ask); "Can recruiters call or text you?" (second clause)
+# and "... about interview scheduling?" (tail outside the template) stay unresolved even when stored
+STORED_APPLIES = {"Is it OK to text you?", "May we text your mobile?", "Do you agree to be texted?",
+                  "Can we send you a text?", "Okay to WhatsApp you?", "Can we reach you on Signal?",
+                  "Can we email you about future roles?"}
 
 
 @pytest.mark.parametrize("label,chans", CONTROL_LABELS)
@@ -335,7 +339,8 @@ def test_compound_labels_are_owner_only(label, _was):
 
 def test_narrow_optin_with_stored_yes_for_every_channel():
     p = view(EVERY_FLAT | {"optin:whatsapp": "Yes", "optin:sms": "Yes"})
-    assert run("Can we text you using WhatsApp?", p=p)[0] == ("Yes", "rule:messaging_optin")
+    assert run("Can we text you?", p=p)[0] == ("Yes", "rule:messaging_optin")
+    owner_only("Can we text you using WhatsApp?", p)                  # "using" is outside the single-clause template
     assert run("Are you comfortable making cold calls?", p=view({"optin:phone": "Yes"}))[:2] == (None, ["q"])
 
 
@@ -385,3 +390,33 @@ def test_round5_labels_stay_unresolved(label):
                                    "Select 'Yes' to join Acme Robotics's Talent Community and receive newsletters"])
 def test_older_marketing_optin_rule_no_longer_answers(label):
     owner_only(label, view())
+
+
+# control round 6: a second clause or a legal / third-party term never takes a stored optin
+ALL_OPTINS = {f"optin:{c}": "Yes" for c in ("whatsapp", "sms", "phone", "email", "signal", "telegram", "wechat", "line",
+                                            "viber", "imessage", "push", "marketing", "contact")}
+
+
+@pytest.mark.parametrize("label", [
+    "Have you been arrested, and may we text you?",
+    "May we text you? Are you a US citizen?",
+    "Can we text you and confirm you are over 18?",
+    "Have you been contacted by us before, and may we text you?",
+    "Can we text you or your references?",
+])
+def test_compound_labels_never_take_a_stored_optin(label):
+    from job_apply_mcp.apply.mapper import is_single_permission_ask
+    assert is_single_permission_ask(label, "Acme Robotics") is None
+    owner_only(label, view(EVERY_FLAT | ALL_OPTINS))
+
+
+@pytest.mark.parametrize("label,chans", [
+    ("Do you opt-in to receive WhatsApp messages from Acme Recruiting?", ["whatsapp"]),
+    ("Is it OK to text you?", ["sms"]),
+    ("Can we email you about future roles?", ["email", "marketing"]),
+    ("Do you consent to receive SMS messages about your application?", ["sms"]),
+])
+def test_single_permission_ask_template(label, chans):
+    from job_apply_mcp.apply.mapper import is_single_permission_ask
+    assert is_single_permission_ask(label, "Acme Robotics") == chans
+    assert run(label, p=view({f"optin:{c}": "Yes" for c in chans}))[0] == ("Yes", "rule:messaging_optin")
