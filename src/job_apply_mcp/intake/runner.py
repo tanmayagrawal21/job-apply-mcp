@@ -413,6 +413,7 @@ class IntakeRunner:
             c.status = _SUBMIT_MAP.get(r.status, "unknown")
             if c.status == "needs_human" and _quota_hit(r.detail or ""):
                 c.status = "quota_blocked"   # the engine's control layer refused it; nothing was sent
+                c.deferred = True            # not final: its mail message stays unprocessed so a later run retries
             c.why = f"{r.status}: {r.detail}" if r.detail and c.status != "submitted" else (r.detail or "")
             st = None
             with contextlib.suppress(Exception):

@@ -177,3 +177,19 @@ async def test_plan_service_pages_from_memory_without_replanning():
         await svc.plan("greenhouse:other:2", 5)
     with pytest.raises(ValueError, match="cursor must be"):
         await svc.plan("greenhouse:fict:1", -1)
+
+
+async def test_quota_blocked_and_cap_skipped_mail_links_stay_pending(tmp_path):
+    keys = ["<links-001@fixture.test>", "<links-002@fixture.test>"]
+    r, ad, eng = make(tmp_path, live=True)
+    eng.control = FakeControl()                       # greenhouse at 25/25: every live greenhouse submit is refused
+    rep = await r.run(sources=["mail"], max_applications=10)
+    assert rep["counts"].get("quota_blocked") and ad.submits == []
+    assert await r.store.processed(keys) == set()     # quota_blocked is not final: the links are retried later
+    eng.control = FakeControl(platform_used=0, day_used=0)
+    r.s.intake.plan_factor = 1.0
+    rep = await r.run(sources=["mail"], max_applications=1)
+    assert rep["counts"]["submitted"] == 1 and any("max_applications" in x["why"] for x in rep["skipped"])
+    assert await r.store.processed(keys) != set(keys)  # the message with a cap-skipped link stays pending
+    rep = await r.run(sources=["mail"], max_applications=10)
+    assert await r.store.processed(keys) == set(keys)  # every link reached a final state: now processed
