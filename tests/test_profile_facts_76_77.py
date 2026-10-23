@@ -132,11 +132,51 @@ def test_affiliate_form_is_yes_only_when_the_company_is_in_work_history():
 
 
 @pytest.mark.parametrize("label", ["Have you worked with Acme Robotics?", "Have you ever worked with Acme?"])
-def test_worked_with_posting_company_is_work_history_not_a_skill(label):
-    assert run(label) == (False, "rule:prior_employee")
+def test_worked_with_posting_company_is_yes_only_never_no(label):   # control: "with" may be a vendor relationship
+    assert run(label) is None
     assert run(label.replace("Acme Robotics", "Initech").replace("Acme", "Initech"), company="Initech") == \
         (True, "rule:prior_employee")
     assert canonical_key("Have you worked with Python?") is None
+
+
+@pytest.mark.parametrize("label", ["Have you ever worked for Acme Robotics?", "Have you worked at Acme Robotics?",
+                                   "Have you ever been employed by Acme Robotics?",
+                                   "Have you been previously employed by Acme Robotics?"])
+def test_worked_for_at_or_employed_by_is_deterministic(label):
+    assert run(label) == (False, "rule:prior_employee")
+    worked = [Work(company="Acme Robotics", title="Engineer", start="2019-01", end="2020-01")]
+    assert run(label, p=view(work=worked)) == (True, "rule:prior_employee")
+
+
+# ---------------------------------------------------------------- "now"-only sponsorship (control)
+NOW_Q = ["Do you currently require visa sponsorship?", "Do you require sponsorship now?",
+         "Do you require sponsorship at this time?"]
+
+
+@pytest.mark.parametrize("label", NOW_Q)
+def test_now_only_sponsorship_needs_the_now_fact(label):
+    p = view(requires_sponsorship=True)
+    assert run(label, p=p) is None
+    assert run.gaps == ["requires_sponsorship_now"]
+    assert run(label, p=view(requires_sponsorship=True, requires_sponsorship_now=False)) == \
+        (False, "rule:requires_sponsorship")
+    assert run(label, p=view(requires_sponsorship=True, requires_sponsorship_now=True)) == \
+        (True, "rule:requires_sponsorship")
+    assert run(label, p=view(requires_sponsorship=False)) == (False, "rule:requires_sponsorship")   # never: no now
+    assert run(label, p=view(requires_sponsorship=True, requires_sponsorship_now=False), job="CA") is None
+
+
+def test_now_or_future_keeps_requires_sponsorship():
+    q = "Will you now or in the future require visa sponsorship?"
+    assert run(q, p=view(requires_sponsorship=True)) == (True, "rule:requires_sponsorship")
+    assert run(q, p=view(requires_sponsorship=True, requires_sponsorship_now=False)) == (True, "rule:requires_sponsorship")
+
+
+def test_per_country_now_fact():
+    p = view(requires_sponsorship=True, CA={"work_authorized": True, "requires_sponsorship": True,
+                                           "requires_sponsorship_now": False})
+    assert run("Do you currently require sponsorship to work in Canada?", p=p, job="CA") == \
+        (False, "rule:requires_sponsorship")
 
 
 def test_prior_employment_without_any_work_history_is_a_gap():
@@ -168,12 +208,15 @@ def test_city_and_state_of_residence():
 
 @pytest.mark.parametrize("label,want", [("Are you located in Canada?", False), ("Are you based in Illinois?", True),
                                         ("Do you live in Texas?", False), ("Are you located in Springfield, IL?", True),
-                                        ("Do you live within 50 miles of Springfield, Illinois?", True)])
+                                        ("Do you live within 50 miles of Springfield, Illinois?", True),
+                                        ("Are you located in Springfield, USA?", True)])
 def test_located_in_place_when_computable(label, want):
     assert run(label) == (want, f"rule:{canonical_key(label)}")
 
 
-@pytest.mark.parametrize("label", ["Are you located in Chicago?", "Are you located in New York?",
+@pytest.mark.parametrize("label", ["Are you located in Springfield?", "Do you live within 25 km of Springfield?",
+                                   "Are you located in Springfield, MO?", "Are you located in Springfield, Canada?",
+                                   "Are you located in Chicago?", "Are you located in New York?",
                                    "Do you live within 50 miles of Chicago, IL?", "Are you based in the Bay Area?",
                                    "Are you located in Canada or Mexico?"])
 def test_located_in_place_not_computable_stays_unresolved(label):
@@ -220,3 +263,10 @@ async def test_fact_rule_fields_are_never_assumed_or_inferred(level, label):
     else:                                                                    # not a fact question: unaffected
         assert all(not a.source.startswith("rule:") for a in out.plan.answers)
     assert fact_rule_field(F("q", "Have you worked with Acme Robotics?"), "Acme Robotics")
+
+
+def test_worked_with_salesforce_without_history_stays_unresolved():   # reviewer: blocking case
+    assert run("Have you worked with Salesforce?", company="Salesforce") is None
+    worked = [Work(company="Salesforce", title="Engineer", start="2019-01", end="2020-01")]
+    assert run("Have you worked with Salesforce?", company="Salesforce", p=view(work=worked)) == \
+        (True, "rule:prior_employee")

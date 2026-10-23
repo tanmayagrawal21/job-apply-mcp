@@ -37,12 +37,20 @@ holds these facts. Root causes:
      untouched.
    - A sponsorship select with separate "now" and "in the future" Yes options is never guessed when sponsorship is
      required.
+   - **"Now"-only sponsorship** ("Do you currently require sponsorship?"). `requires_sponsorship` means now OR in
+     the future, so it cannot answer this on its own. The answer comes from the new optional structured fact
+     `requires_sponsorship_now` (`[authorization]` for the home country, or `[authorization.<CC>]`). If
+     `requires_sponsorship = false`, the answer is No, because that covers now as well. Otherwise the field stays
+     unresolved and becomes a `requires_sponsorship_now` profile gap. "Now or in the future" questions still use
+     `requires_sponsorship`.
 3. **Prior employment from work history.** This covers the `[[work]]` companies plus the resume experience
    organisations.
    - "been previously/formerly employed by X" is a direct-employment form.
    - A label about the posting company (or a configured alias) is treated as `prior_employee` before any persona,
-     inference or flat lookup, even when no alias matched ("Have you worked with Acme?"). The answer is Yes only if
-     the company is in the work history, otherwise No.
+     inference or flat lookup, even when no alias matched. "Worked for/at", "been employed by" and "previously
+     employed" are Yes when the company is in the work history, otherwise No.
+   - "Have you worked WITH <company>?" may mean a vendor or partner relationship. It is Yes when the company is in
+     the work history and otherwise stays unresolved. It is never No.
    - "X or an X affiliate/subsidiary" is Yes when X is in the history. Otherwise it stays unresolved, because a No
      would also deny affiliates the profile cannot know about.
    - With no work history at all, the field stays unresolved and becomes a profile gap (`work`).
@@ -57,8 +65,11 @@ holds these facts. Root causes:
    - `residence_city_state`: "City, Region" from `[contact]`. "If located in the US, ..." is answered only when the
      contact country is the US.
    - `located_in_place` ("are you located in X") is Yes or No when X is a country, or a US state named in full (not
-     "New York" or "Washington", which are also cities). It is Yes when X is the owner's own city.
-   - `located_near` ("within N miles of X") is Yes only when X is the owner's own city. There is no geocoder, so
+     "New York" or "Washington", which are also cities). It is Yes for the owner's own city only when the question
+     also names a region (state or province) or country, and that matches the profile ("Springfield, IL"). A bare
+     "Springfield" stays unresolved.
+   - `located_near` ("within N miles of X") is Yes only when X is the owner's own city with the same region or
+     country rule. There is no geocoder, so
      anything else is not computable. Any other place stays unresolved; only the owner's own `[answers]` pattern for
      that exact wording may apply.
    - Relocation, hybrid and onsite questions (yes/no style only) use `[preferences]` when they are set.

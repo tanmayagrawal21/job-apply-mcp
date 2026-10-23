@@ -737,7 +737,13 @@ def auth_legal_blocked(f: FormField) -> bool:
     return any(_AUTH_LEGAL_BLOCK.search(normalize(t)) for t in (f.label, *f.options))
 
 
-_FLAT_KEY = {"work_authorized": "work_authorized", "requires_sponsorship": "requires_sponsorship", "citizen": "us_citizen"}
+_FLAT_KEY = {"work_authorized": "work_authorized", "requires_sponsorship": "requires_sponsorship", "citizen": "us_citizen",
+             "requires_sponsorship_now": "requires_sponsorship_now"}
+# ADR-0053: a sponsorship question about NOW only ("Do you currently require sponsorship?"). requires_sponsorship means
+# now OR in the future, so only requires_sponsorship_now (or requires_sponsorship = false) answers it.
+_NOW_ONLY = re.compile(r"\b(?:now|currently|presently|at (?:this|the present) time|today|at present)\b")
+_FUTURE = re.compile(r"\bfuture\b|\bever\b|\blater\b|\bgoing forward\b|\bat any (?:point|time)\b|\bwill (?:you )?(?:ever )?"
+                     r"(?:need|require)\b|\bupcoming\b|\bduring (?:your|the) employment\b|\bnext\b")
 
 
 def country_fact(profile: ProfileLike, country: str, fact: str) -> bool | None:
@@ -817,6 +823,11 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
             missing("work_authorized" if auth is None else "requires_sponsorship")
         return True, None
     if ck == "requires_sponsorship" or (has_sp and not has_auth):
+        if _NOW_ONLY.search(n) and not _FUTURE.search(n) and req is not False:
+            now = country_fact(profile, country, "requires_sponsorship_now")
+            if now is None:
+                return missing("requires_sponsorship_now")
+            req = now
         if req is None:
             return missing("requires_sponsorship")
         return True, _yn(not req if _SPONS_NEG.search(n) else req)
@@ -998,11 +1009,17 @@ def _place_answer(place: str, profile: ProfileLike, near: bool, gap: Any) -> Any
     if not x:
         return None
     parts = [normalize(t) for t in raw.split(",") if normalize(t)]
-    if city and parts and parts[0] == normalize(city):        # the owner's own city (optionally ", <region>")
+    if city and parts and parts[0] == normalize(city):
+        # ADR-0053 (control): the owner's own city counts only with a named region (state/province) or country that
+        # matches the profile; a bare "Springfield" may be another Springfield
         rest = parts[1:]
-        if len(rest) > 1 or (rest and _region_code(rest[0]) != _region_code(region) and rest[0] != normalize(region)):
+        if len(rest) != 1:
             return None
-        return "Yes"
+        r = rest[0]
+        same_region = bool(region) and (r == normalize(region) or (_region_code(r) is not None
+                                                                    and _region_code(r) == _region_code(region)))
+        same_country = home is not None and country_iso(r, allow_codes=False) == home
+        return "Yes" if same_region or same_country else None
     if near:                                                  # no geocoder: another place is never "computable"
         if not city:
             gap("contact.city")
@@ -1134,6 +1151,11 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return True, re.sub(r"\s*/.*$", "", str(raw).strip())
     if ck == "prior_employee":
         worked = bool(company) and bool(profile.lookup("employer:" + normalize(company)))
+        if company and re.search(r"\b(?:worked|work|working) with\b", n):
+            # ADR-0053 (control): "worked WITH <company>" may mean a vendor or partner relationship. Employment
+            # proves Yes; its absence proves nothing, so never a No
+            return True, ("Yes" if worked and about_this_company(_AFFILIATE_TAIL.sub("", n), company, company_aliases)
+                          else None)
         if company and not about_this_company(f.label, company, company_aliases):   # ADR-0038: government/competitor/other employers
             # ADR-0053: "... <Company> or a <Company> affiliate?" is Yes when <Company> is in the work history; a No
             # would also deny every affiliate, which the profile cannot know, so that case stays with the owner

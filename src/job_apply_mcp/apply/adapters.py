@@ -137,6 +137,7 @@ class ProfileView:
         home = a.facts_for(a.home_country) if a.home_country else None   # ADR-0050: flat keys need a home country
         return {"work_authorized": home and home.work_authorized,
                 "requires_sponsorship": home and home.requires_sponsorship,
+                "requires_sponsorship_now": home and home.requires_sponsorship_now,
                 # ADR-0040: US citizenship comes from the US facts (flat `citizen` only when home_country is US)
                 "us_citizen": a.facts_for("US").citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,

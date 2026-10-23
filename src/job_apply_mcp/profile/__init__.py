@@ -85,7 +85,8 @@ class Preferences(BaseModel):
 class CountryAuthorization(BaseModel):
     """Work-authorization facts for ONE country. None = not configured (the question stays with the owner)."""
     work_authorized: bool | None = None
-    requires_sponsorship: bool | None = None
+    requires_sponsorship: bool | None = None          # now OR in the future
+    requires_sponsorship_now: bool | None = None      # ADR-0053: now only (requires_sponsorship=false implies false)
     citizen: bool | None = None
 
 
@@ -102,6 +103,7 @@ class Authorization(BaseModel):
     home_country: str = ""                 # ADR-0050: no US default; see Profile.home_country
     work_authorized: bool | None = None
     requires_sponsorship: bool | None = None
+    requires_sponsorship_now: bool | None = None   # ADR-0053: "do you require sponsorship NOW?" only
     citizen: bool | None = None            # citizenship of the home country
     citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
     countries: dict[str, CountryAuthorization] = Field(default_factory=dict)
@@ -133,6 +135,8 @@ class Authorization(BaseModel):
             work_authorized=mine.work_authorized if mine.work_authorized is not None else self.work_authorized,
             requires_sponsorship=(mine.requires_sponsorship if mine.requires_sponsorship is not None
                                   else self.requires_sponsorship),
+            requires_sponsorship_now=(mine.requires_sponsorship_now if mine.requires_sponsorship_now is not None
+                                      else self.requires_sponsorship_now),
             citizen=mine.citizen if mine.citizen is not None else self.citizen)
 
 
