@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,7 @@ def engine(tmp_path, router, *, form=FORM, trusted=True, reviewer="router", auto
     s.answers.autonomy = autonomy
     s.paths.data_dir = str(tmp_path)
     s._autodraft_trusted = trusted
+    s.writing.local_essays = True
     adapter = FakeAdapter(form=form)
     return ApplyEngine(s, resolve_adapter=lambda ref: adapter, profile=FakeProfile(), router=router,
                        gates=FakeGates(), store=FakeStore())
@@ -195,7 +197,7 @@ async def test_local_only_class_without_a_tier_fails_closed():
 
 
 # ------------------------------------------------------------------------------------------------ trust
-USER = '[writing]\nreviewer = "router"\n[answers]\nautonomy = "infer"\n'
+USER = '[writing]\nreviewer = "router"\nlocal_essays = true\n[answers]\nautonomy = "infer"\n'
 
 
 def test_trusted_user_config_enables_autodraft(tmp_path, monkeypatch):
@@ -203,14 +205,18 @@ def test_trusted_user_config_enables_autodraft(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kw", [
-    {"proj": '[writing]\nreviewer = "router"\n', "user": '[answers]\nautonomy = "infer"\n'},
+    {"proj": '[writing]\nreviewer = "router"\nlocal_essays = true\n', "user": '[answers]\nautonomy = "infer"\n'},
+    {"user": '[writing]\nreviewer = "router"\n[answers]\nautonomy = "infer"\n'},           # local_essays is off by default
+    {"user": '[writing]\nreviewer = "router"\n[answers]\nautonomy = "infer"\n',
+     "env": {"JOB_APPLY__WRITING__LOCAL_ESSAYS": "true"}},
     {"env": {"JOB_APPLY__WRITING__REVIEWER": "router"}, "user": '[answers]\nautonomy = "infer"\n'},
     {"user": USER, "env": {"JOB_APPLY__LLM__TASK_TIERS__ESSAY_REVIEW__MODEL": "other:1b"}},
     {"user": USER, "env": {"JOB_APPLY__LLM__ALLOW_CLOUD": "false"}},
     {"user": USER, "proj": '[llm]\nlocal_only_classes = []\n'},
     {"user": USER, "proj": '[writing]\nbanned_phrases = []\n'},
     {"user": USER, "via_env": True},
-    {"user": USER, "mode": 0o666},
+    pytest.param({"user": USER, "mode": 0o666}, id="world-writable",
+                 marks=pytest.mark.skipif(os.name == "nt", reason="posix permission model")),
 ])
 def test_autodraft_never_enabled_or_widened_outside_the_trusted_user_config(tmp_path, monkeypatch, kw):
     assert not _cfg(tmp_path, monkeypatch, **kw).essay_autodraft
@@ -235,6 +241,7 @@ async def test_run_applications_autodrafts_required_essay_and_reports_it(tmp_pat
                        writing__reviewer="router", writing__timeout_s=5)
     eng.s.answers.autonomy = "safe_default"
     eng.s._autodraft_trusted = True
+    eng.s.writing.local_essays = True
     rep = await r.run(links=[prose, "https://boards.greenhouse.io/plain/jobs/2"], sources=["links"])
     assert rep["counts"] == {"dry_run_ok": 2}, rep
     assumed = rep["plan_context"].get("assumed") or rep.get("assumed")
@@ -248,6 +255,7 @@ async def test_run_applications_rejected_essay_needs_the_owner(tmp_path):
                       writing__reviewer="router", writing__timeout_s=5, writing__max_rounds=1)
     eng.s.answers.autonomy = "infer"
     eng.s._autodraft_trusted = True
+    eng.s.writing.local_essays = True
     rep = await r.run(links=[prose], sources=["links"])
     assert rep["counts"] == {"needs_human": 1} and ad.submits == []
 
@@ -274,3 +282,19 @@ def test_long_essay_is_not_judged_by_cover_letter_rules():
     kinds = {v.kind for v in lint(text, WritingCfg(), company="Acme Robotics", essay=True)}
     assert len(text) > 600 and not kinds & {"structure", "company", "addressee", "closing"}
     assert {"structure", "company"} <= {v.kind for v in lint(text, WritingCfg(), company="Acme Robotics")}
+
+
+async def test_run_applications_returns_unresolved_essays_as_client_tasks_and_accepts_them_back(tmp_path):
+    prose = "https://boards.greenhouse.io/wordy/jobs/1"
+    router = EssayRouter()
+    r, _ad, eng = make(tmp_path, adapter=MultiAdapter(prose_for=[prose]), router=router, writing__reviewer="router",
+                       writing__timeout_s=5)
+    assert not eng.s.essay_autodraft                                   # off by default: the client path
+    rep = await r.run(links=[prose], sources=["links"])
+    ct = rep["client_tasks"][prose]
+    e = ct["essays"][0]
+    assert e["key"] == "q_why" and e["max_words"] == 200 and e["facts"] and "at most 200 words" in e["prompt"]
+    assert not [c for c, _ in router.calls if c.startswith("essay")]  # nothing drafted locally
+    res = await eng.submit(prose, {"q_why": GOOD}, ct["approval_id"], True)
+    assert res.status == "dry_run", (res.status, res.detail, res.client_tasks)
+    assert "essay_review" in [c for c, _ in router.calls]             # judged by the local strict reviewer, not the client

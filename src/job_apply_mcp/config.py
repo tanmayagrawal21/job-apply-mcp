@@ -392,6 +392,8 @@ class WritingCfg(BaseModel):
     # "inline": plan_application drafts prose. "deferred": plan lists prose as client_tasks and the separate
     # draft_answers tool runs writer + reviewer later, so batch planning stays fast (ADR-0041).
     mode: Literal["inline", "deferred"] = "inline"
+    local_essays: bool = False          # ADR-0057: local essay autodraft (with reviewer="router"); trusted user config only
+    client_essay_words: int = 200       # word limit given to the client for an essay with no max length (ADR-0057)
     review_client_prose: bool = True    # agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044)
     rules: list[str] = Field(default_factory=lambda: [
         "Formal register; no contractions.",
@@ -621,7 +623,8 @@ class Settings(BaseModel):
     def essay_autodraft(self) -> bool:
         """ADR-0057: required essays are drafted locally, strictly reviewed locally and filled (labelled assumed)
         only when the TRUSTED user config chose reviewer="router" and autonomy is safe_default or infer."""
-        return (self._autodraft_trusted and self.writing.enabled and self.writing.reviewer == "router"
+        return (self._autodraft_trusted and self.writing.enabled and self.writing.local_essays
+                and self.writing.reviewer == "router"
                 and self.answers.autonomy in ("safe_default", "infer"))
 
 
@@ -903,7 +906,7 @@ def _autodraft_view(s: Settings) -> tuple:
     w, llm = s.writing, s.llm
     tiers = {k: (llm.task_tiers[k].model_dump() if k in llm.task_tiers else None,
                  [t.model_dump() for t in llm.fallbacks.get(k, [])]) for k in ("essay", "essay_review")}
-    return (w.reviewer, w.enabled, list(w.rules), list(w.banned_phrases), list(w.gap_patterns), w.max_rounds,
+    return (w.reviewer, w.local_essays, w.enabled, list(w.rules), list(w.banned_phrases), list(w.gap_patterns), w.max_rounds,
             w.style_exemplar, list(w.style_corpus), w.timeout_s, tiers, list(llm.local_only_classes), llm.allow_cloud,
             repr(sorted(llm.providers.items())), dict(llm.system_prefix))
 
@@ -975,9 +978,9 @@ def load_settings(project_dir: Path | None = None) -> Settings:
         for k, raw in qhits:
             log.warning("submission cap control.params.quota.%s=%r is loosened by the trusted user config %s",
                         k, raw, user)
-    s._autodraft_trusted = (trusted_user and base.writing.reviewer == "router"
+    s._autodraft_trusted = (trusted_user and base.writing.reviewer == "router" and base.writing.local_essays
                             and _autodraft_view(s) == _autodraft_view(base))
-    if base.writing.reviewer == "router" and not s._autodraft_trusted:
+    if base.writing.local_essays and not s._autodraft_trusted:
         log.info("essay autodraft disabled: writing.reviewer='router' is not from the trusted user config, or a project "
                  "file / the environment changed the prose models or rules (ADR-0057)")
     urf = udata.get("control", {}).get("rules_file") if isinstance(udata.get("control"), dict) else None

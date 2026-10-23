@@ -407,7 +407,7 @@ class ApplyEngine:
             answers += got
             long_ += leftover
             answers += written
-            tasks += wtasks
+            tasks += [{**t, "prose": True} for t in wtasks]
         else:
             long_ += short
         long_ += owner_only
@@ -983,6 +983,7 @@ class ApplyEngine:
         with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
                 ctx.posting.company, ctx.posting.title, ctx.summary):
             written, rest, tasks = await self._write_long(open_, ctx, deferred=False, ref=ref)
+            tasks = [{**t, "prose": True} for t in tasks]
         drafted = [a for a in written if essays.is_essay(a.source)]
         if drafted:   # ADR-0057: assumed essays join the ref's evidence next to the plan's other assumptions
             labels = {f.key: f.label for f in ctx.form.fields}
@@ -1175,8 +1176,10 @@ class ApplyEngine:
             coro = review_text(
                 self.router, w, text, kind="cover_letter" if "cover" in normalize(f.label) else "free_text",
                 label=f.label, company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
-                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
-                resume=resume, corpus=corpus)
+                facts=self.profile.facts(f.label, 40), max_len=f.max_length, exemplar=self._exemplar or "",
+                resume=resume, corpus=corpus,
+                # ADR-0057: a client-written essay is judged by the LOCAL strict reviewer, never by the client itself
+                review_class="review" if "cover" in normalize(f.label) else "essay_review")
             if deadline is None:
                 return await coro
             async with asyncio.timeout_at(deadline):

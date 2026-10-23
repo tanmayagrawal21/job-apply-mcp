@@ -262,6 +262,8 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `reviewer` | `str` | `"client"` | "client" = review is a client_task; "router" = task_class="review" |
 | `timeout_s` | `float` | `90.0` |  |
 | `mode` | `Literal['inline', 'deferred']` | `"inline"` |  |
+| `local_essays` | `bool` | `false` | ADR-0057: local essay autodraft (with reviewer="router"); trusted user config only |
+| `client_essay_words` | `int` | `200` | word limit given to the client for an essay with no max length (ADR-0057) |
 | `review_client_prose` | `bool` | `true` | agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044) |
 | `rules` | `list[str]` | `["Formal register; no contractions.", "Every factual claim must map to a provided profi...` |  |
 | `banned_phrases` | `list[str]` | `["excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "w...` |  |

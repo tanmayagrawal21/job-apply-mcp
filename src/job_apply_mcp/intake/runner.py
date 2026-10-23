@@ -78,6 +78,7 @@ class Cand:
     approval_id: str | None = None
     deferred: bool = False  # not handled this run (over the cap): its mail message stays unprocessed
     assumed: list[dict[str, Any]] | None = None   # ADR-0052: answers the agent assumed for this posting
+    prose: list[dict[str, Any]] | None = None     # ADR-0057: unresolved essays for the MCP client to draft
 
     def row(self) -> dict[str, Any]:
         r = {"ref": self.target, "url": self.target if self.target.startswith("http") else None,
@@ -295,13 +296,17 @@ class IntakeRunner:
                        for p in pending_pa],
                    "awaiting_confirmation": getattr(self, "_awaiting", []),
                    # ADR-0052: every assumed answer, labelled, per posting
-                   "assumed": {c.target: c.assumed for c in cands if c.target and c.assumed}}
+                   "assumed": {c.target: c.assumed for c in cands if c.target and c.assumed},
+                   # ADR-0057: unresolved essays the MCP client can draft and hand back through submit_application
+                   "client_tasks": {c.target: {"approval_id": c.approval_id, "essays": c.prose}
+                                    for c in cands if c.target and c.prose}}
             rep = self._build(run_id, rows, cfg.report_rows)
             await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live",
                                           "autonomy": self.s.answers.autonomy})
         out = {**rep, "mode": "dry_run" if dry else "live", "autonomy": self.s.answers.autonomy,
                "max_applications": n or None, "assumed": ctx["assumed"] or None,
-               "plan_context": {k: v for k, v in ctx.items() if v and k != "assumed"}}
+               "client_tasks": ctx["client_tasks"] or None,
+               "plan_context": {k: v for k, v in ctx.items() if v and k not in ("assumed", "client_tasks")}}
         if preview is not None:
             out["live_preview"] = preview
         return {k: v for k, v in out.items() if v is not None}
@@ -379,7 +384,8 @@ class IntakeRunner:
         for c, out in prose_only:
             if not c.status and id(c) not in seen:
                 c.status = "skipped"
-                c.why = f"required prose not approved yet: {self._prose_keys(out)[:4]} (draft_answers, then submit)"
+                c.why = (f"required prose not approved yet: {self._prose_keys(out)[:4]} (client_tasks: draft each, then "
+                         "submit_application with the answers; or draft_answers)")
         # The cap counts every eligible posting (ready, or needing the owner) in priority order, in dry and live mode
         # alike (ADR-0049). Skipped, failed and unsupported postings never take a slot.
         order = {id(c): i for i, c in enumerate(pool)}
@@ -407,7 +413,9 @@ class IntakeRunner:
         c.assumed = [{"key": a.key, "value": _assumed_value(a), "rule": a.source,
                       **({"why": a.rationale} if a.rationale else {})}
                      for a in out.plan.answers if a.assumed] or None
+        c.prose = self._client_essays(c, out, cached) or None
         if g.decision != Decision.submit:
+            c.prose = None
             c.status = "skipped" if g.decision == Decision.skip else "needs_human"
             c.why = "; ".join(g.reasons) or g.decision.value
             if c.status == "needs_human":
@@ -428,6 +436,27 @@ class IntakeRunner:
         postings.add(pid)
         eligible.append(c)
         return ""
+
+    def _client_essays(self, c: Cand, out: Any, cached: Any) -> list[dict[str, Any]]:
+        """ADR-0057: every unresolved essay as a structured client task: prompt, grounding facts, word limit and how to
+        hand it back (submit_application answers, reviewed server-side per ADR-0044). Rejected local drafts are never
+        included."""
+        from ..apply.writing import client_essay_prompt
+        rows: list[dict[str, Any]] = []
+        fields = {f.key: f for f in getattr(getattr(cached, "form", None), "fields", [])}
+        prof = getattr(self.engine, "profile", None)
+        for t in out.client_tasks:
+            if not t.get("prose") or t["key"] not in out.plan.unresolved:
+                continue
+            f = fields.get(t["key"])
+            label = t.get("label") or (f.label if f else t["key"])
+            facts = list(prof.facts(label, 14)) if prof is not None else list(t.get("context", {}).get("facts", []))
+            summary = getattr(cached, "summary", "") or t.get("context", {}).get("posting", "")
+            prompt, words = client_essay_prompt(label=label, company=c.co, title=c.title, summary=summary,
+                                                facts=facts, cfg=self.s.writing, max_len=t.get("max_len") or None)
+            rows.append({"key": t["key"], "label": label, "required": bool(f.required) if f else True,
+                         "max_words": words, "max_len": t.get("max_len") or None, "prompt": prompt, "facts": facts})
+        return rows
 
     async def _autodraft(self, prose_only: list[tuple[Cand, Any]], pool: list[Cand], postings: set[str],
                          eligible: list[Cand], n: int) -> None:
