@@ -27,6 +27,21 @@ def get_agent(settings: Settings) -> ControlAgent:
     return _agent
 
 
+async def last_run_info(data_dir: Any) -> dict[str, Any] | None:
+    """Effective mode of the latest run_applications run, so a dry run is not read as live (#78)."""
+    from ..intake.store import IntakeStore
+
+    store = IntakeStore(data_dir)
+    try:
+        run = await store.get_run()
+    finally:
+        store.close()
+    if run is None:
+        return None
+    return {"run_id": run["run_id"], "dry_run": bool(run["params"].get("dry_run")),
+            "finished": run["finished_at"] is not None}
+
+
 def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
     @mcp.tool()
     async def control_check(action: str, payload: dict[str, Any] | None = None) -> str:
@@ -45,6 +60,12 @@ def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
         """Active mode, quotas used/remaining, enabled controls and recent blocks."""
         settings = get_settings()
         st = get_agent(settings).status()
+        try:
+            lr = await last_run_info(settings.paths.data_dir)
+            if lr:
+                st["last_run"] = lr    # st["dry_run"] is the global setting; this is the run's effective mode
+        except Exception as e:  # noqa: BLE001
+            log.debug("last run unavailable: %s", e)
         try:  # ADR-0025: confirmation checks still pending (counts only)
             from ..apply.approvals import ApprovalBook
             from ..ingest.reconcile import pending_summary
