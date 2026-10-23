@@ -168,6 +168,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `plan_ttl_s` | `int` | `1800` | how long a plan (and its token) stays valid |
 | `context_chars` | `int` | `900` | cap on the posting summary inside client_tasks |
 | `plan_workers` | `int` | `4` | concurrent planners; separate from browser_workers (pipelining) |
+| `plan_workers_deferred` | `int` | `16` | concurrent planners when prose is deferred (no narrative calls; ADR-0045) |
 | `write_optional` | `bool` | `false` | also write optional long free-text fields (default: skip them) |
 | `option_min_score` | `float` | `0.78` | fuzzy option snap threshold; below it the field stays unresolved |
 | `top_languages` | `int` | `3` | "select the languages you are most proficient in": at most this many (ADR-0030) |
@@ -346,6 +347,20 @@ Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only
 | `otp_window_min` | `int` | `10` | otp_assist reads only a message newer than this |
 | `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available; only the user config file may disable it |
 
+## `[intake]`
+
+run_applications (ADR-0045): explicit links, emailed links and discovery through one pipeline.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `sources` | `list[str]` | `["links", "mail", "discovery"]` |  |
+| `max_applications` | `int` | `10` | default per run; the caller or run_size feedback may change it |
+| `max_applications_cap` | `int` | `50` | upper bound for any per-run value |
+| `plan_factor` | `float` | `3.0` | candidates planned per run = ceil(max_applications * plan_factor) |
+| `submit_parallel` | `int` | `4` | global concurrent submits; always at most 1 per host |
+| `writing_mode` | `Literal['inline', 'deferred']` | `"deferred"` | batch runs never block on prose |
+| `report_rows` | `int` | `20` | rows per category in compact reports |
+
 ## `[search.sessions]`
 
 Search sessions (ADR-0024): the first search_jobs call builds the full result set once; pages read from it.
@@ -441,6 +456,38 @@ Read-only IMAP (ADR-0016). Holds only *names* of environment variables / a keych
 | `senders` | `list[str]` | `[]` | extra FROM terms (union with subjects) |
 | `subjects` | `list[str]` | `["application", "applying", "applied"]` |  |
 | `max_messages` | `int` | `500` |  |
+
+## `[intake.mail]`
+
+Job links the user emailed (ADR-0045). Read-only: the mailbox is never modified.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | `bool` | `true` |  |
+| `source` | `str \| None` | `none` | mbox \| imap \| client; None -> ingest.source |
+| `path` | `str \| None` | `none` | mbox file or .eml directory; None -> ingest.path |
+| `sender` | `str` | `"self"` | "self" \| "" (any) \| an address or substring |
+| `recipient` | `str` | `"self"` | "self" \| "" (any) \| an address or substring |
+| `self_address` | `str` | `""` | "" -> the profile's contact email, else $<ingest.imap.user_env> |
+| `query` | `str` | `""` | case-insensitive text the subject or body must contain (IMAP: TEXT) |
+| `label` | `str` | `""` | IMAP folder / Gmail label to EXAMINE; mbox: X-Gmail-Labels header |
+| `since_days` | `int` | `14` |  |
+| `since` | `str \| None` | `none` | YYYY-MM-DD; wins over since_days |
+| `max_messages` | `int` | `200` |  |
+| `max_links_per_message` | `int` | `20` |  |
+| `peek_bytes` | `int` | `65536` | IMAP BODY.PEEK partial fetch size |
+| `job_url_patterns` | `list[str]` | `["/jobs?(/\|$\|\\?)", "/careers?(/\|$\|\\?)", "/positions?/", "/openings?/", "/vacanc", "/r...` |  |
+| `ignore_url_patterns` | `list[str]` | `["unsubscribe", "/preferences", "\\.(png\|jpe?g\|gif\|svg\|css\|js)(\\?\|$)", "/privacy", "/t...` |  |
+
+## `[intake.discovery]`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `query` | `str` | `""` |  |
+| `boards` | `list[str]` | `[]` |  |
+| `platforms` | `list[str]` | `[]` |  |
+| `location` | `str` | `""` |  |
+| `since_days` | `int` | `7` |  |
 
 ## Profile `[preferences]` (profile.toml)
 

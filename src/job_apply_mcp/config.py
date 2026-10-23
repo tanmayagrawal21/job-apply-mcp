@@ -289,6 +289,7 @@ class ApplyCfg(BaseModel):
     plan_ttl_s: int = 1800              # how long a plan (and its token) stays valid
     context_chars: int = 900            # cap on the posting summary inside client_tasks
     plan_workers: int = 4               # concurrent planners; separate from browser_workers (pipelining)
+    plan_workers_deferred: int = 16     # concurrent planners when prose is deferred (no narrative calls; ADR-0045)
     write_optional: bool = False        # also write optional long free-text fields (default: skip them)
     option_min_score: float = 0.78      # fuzzy option snap threshold; below it the field stays unresolved
     top_languages: int = 3              # "select the languages you are most proficient in": at most this many (ADR-0030)
@@ -479,6 +480,49 @@ class DedupeCfg(BaseModel):
     title_threshold: float = Field(0.6, ge=0.0, le=1.0)    # token-Jaccard for the company+title fallback
 
 
+class IntakeMailCfg(BaseModel):
+    """Job links the user emailed (ADR-0045). Read-only: the mailbox is never modified."""
+    enabled: bool = True
+    source: str | None = None           # mbox | imap | client; None -> ingest.source
+    path: str | None = None             # mbox file or .eml directory; None -> ingest.path
+    sender: str = "self"                # "self" | "" (any) | an address or substring
+    recipient: str = "self"             # "self" | "" (any) | an address or substring
+    self_address: str = ""              # "" -> the profile's contact email, else $<ingest.imap.user_env>
+    query: str = ""                     # case-insensitive text the subject or body must contain (IMAP: TEXT)
+    label: str = ""                     # IMAP folder / Gmail label to EXAMINE; mbox: X-Gmail-Labels header
+    since_days: int = 14
+    since: str | None = None            # YYYY-MM-DD; wins over since_days
+    max_messages: int = 200
+    max_links_per_message: int = 20
+    peek_bytes: int = 65536             # IMAP BODY.PEEK partial fetch size
+    job_url_patterns: list[str] = Field(default_factory=lambda: [
+        r"/jobs?(/|$|\?)", r"/careers?(/|$|\?)", r"/positions?/", r"/openings?/", r"/vacanc", r"/requisitions?/",
+        r"/job-?postings?/", r"/apply(/|$|\?)", r"[?&](gh_jid|jobid|job_id|jid|reqid|req_id)="])
+    ignore_url_patterns: list[str] = Field(default_factory=lambda: [
+        r"unsubscribe", r"/preferences", r"\.(png|jpe?g|gif|svg|css|js)(\?|$)", r"/privacy", r"/terms"])
+
+
+class IntakeDiscoveryCfg(BaseModel):
+    query: str = ""
+    boards: list[str] = Field(default_factory=list)
+    platforms: list[str] = Field(default_factory=list)
+    location: str = ""
+    since_days: int = 7
+
+
+class IntakeCfg(BaseModel):
+    """run_applications (ADR-0045): explicit links, emailed links and discovery through one pipeline."""
+    sources: list[str] = Field(default_factory=lambda: ["links", "mail", "discovery"])
+    max_applications: int = Field(10, ge=1)     # default per run; the caller or run_size feedback may change it
+    max_applications_cap: int = Field(50, ge=1)  # upper bound for any per-run value
+    plan_factor: float = Field(3.0, ge=1.0)     # candidates planned per run = ceil(max_applications * plan_factor)
+    submit_parallel: int = Field(4, ge=1)       # global concurrent submits; always at most 1 per host
+    writing_mode: Literal["inline", "deferred"] = "deferred"   # batch runs never block on prose
+    report_rows: int = 20                       # rows per category in compact reports
+    mail: IntakeMailCfg = Field(default_factory=IntakeMailCfg)
+    discovery: IntakeDiscoveryCfg = Field(default_factory=IntakeDiscoveryCfg)
+
+
 class Settings(BaseModel):
     search: SearchCfg = Field(default_factory=SearchCfg)
     dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
@@ -497,6 +541,7 @@ class Settings(BaseModel):
     tune: TuneCfg = Field(default_factory=TuneCfg)
     ingest: IngestCfg = Field(default_factory=IngestCfg)
     grants: GrantsCfg = Field(default_factory=GrantsCfg)
+    intake: IntakeCfg = Field(default_factory=IntakeCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this

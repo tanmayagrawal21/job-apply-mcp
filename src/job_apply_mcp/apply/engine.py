@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import re
 import time
@@ -108,6 +109,14 @@ class PlanOut(BaseModel):
         return d
 
 
+# Per-task override of writing.mode (ADR-0045): batch runs plan with "deferred" without mutating settings.
+WRITE_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("jam_write_mode", default=None)
+
+
+def _write_mode(settings: Settings) -> str:
+    return WRITE_MODE.get() or settings.writing.mode
+
+
 Approver = Callable[[dict[str, Any]], Awaitable[bool | None]]   # True approve, False deny, None unavailable
 
 
@@ -150,6 +159,7 @@ class ApplyEngine:
         self.approvals = approvals or ApprovalBook(":memory:", ttl_s=settings.apply.approval_ttl_s)
         self._browser_sem = asyncio.Semaphore(max(1, settings.concurrency.browser_workers))
         self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
+        self._plan_sem_deferred = asyncio.Semaphore(max(1, settings.apply.plan_workers_deferred))
         self.timings: dict[str, dict[str, int]] = {}
         self._exemplar: str | None = None
 
@@ -222,7 +232,9 @@ class ApplyEngine:
 
     # ------------------------------------------------------------------- plan
     async def plan(self, ref: str) -> PlanOut:
-        async with self._plan_sem:
+        # deferred prose makes planning fetch + mapping + one small batched call, so more may run at once (ADR-0045)
+        sem = self._plan_sem_deferred if _write_mode(self.s) == "deferred" else self._plan_sem
+        async with sem:
             ctx = await self._context(ref)
             return await self._plan_ctx(ref, ctx)
 
@@ -475,7 +487,7 @@ class ApplyEngine:
                 todo.append(f)
             else:
                 rest.append(f)
-        if deferred if deferred is not None else w.mode == "deferred":
+        if deferred if deferred is not None else _write_mode(self.s) == "deferred":
             tasks += [self._task(f, ctx, {"deferred": True}) for f in todo]   # no model call at all
             return written, rest, tasks
         if self._exemplar is None:
