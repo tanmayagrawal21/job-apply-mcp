@@ -359,6 +359,7 @@ class WritingCfg(BaseModel):
     # "inline": plan_application drafts prose. "deferred": plan lists prose as client_tasks and the separate
     # draft_answers tool runs writer + reviewer later, so batch planning stays fast (ADR-0041).
     mode: Literal["inline", "deferred"] = "inline"
+    review_client_prose: bool = True    # agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044)
     rules: list[str] = Field(default_factory=lambda: [
         "Formal register; no contractions.",
         "Every factual claim must map to a provided profile fact.",
@@ -568,6 +569,7 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("grants", "use_keyring"): _bool_off,
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
+    ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
 }
 
 # Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy
