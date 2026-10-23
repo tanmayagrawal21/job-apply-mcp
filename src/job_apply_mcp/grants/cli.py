@@ -6,6 +6,7 @@ import sys
 import time
 from typing import Any
 
+from ..config import state_path
 from .store import SCOPES, GrantStore, os_user, parse_duration
 
 
@@ -33,7 +34,7 @@ def cli(argv: list[str], settings: Any, *, stdin: Any = None, stdout: Any = None
         a = p.parse_args(argv)
     except SystemExit as e:
         return int(e.code or 2)
-    st = store or GrantStore(settings.paths.data_dir, use_keyring=settings.grants.use_keyring)
+    st = store or GrantStore(state_path(settings), use_keyring=settings.grants.use_keyring)
 
     if a.list:
         rows = st.active()

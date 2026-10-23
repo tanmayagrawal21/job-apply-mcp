@@ -8,10 +8,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
-from ..config import Settings, parse_cap
+from ..config import Settings, parse_cap, state_path
 from . import builtin  # noqa: F401  (registers built-in controls)
 from .builtin import effective_limits
 from .controls import (
@@ -92,7 +91,7 @@ class ControlAgent:
         self.config_error: str | None = None
         self._params: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
-        data_dir = Path(settings.paths.data_dir).expanduser()
+        data_dir = state_path(settings)
         self.audit_path = data_dir / "control_audit.jsonl"
         try:
             self._load()

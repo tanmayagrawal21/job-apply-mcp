@@ -10,7 +10,7 @@ from job_apply_mcp.control.sanitize import sanitize_untrusted
 
 
 def mk(tmp_path, clock=None, reviewer=None, **control):
-    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path)}, "control": control})
+    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)}, "control": control})
     return ControlAgent(s, reviewer=reviewer, **({"clock": clock} if clock else {}))
 
 
@@ -32,7 +32,7 @@ async def test_unknown_action_rejected(tmp_path):
 
 
 async def test_mode_global_dry_run_blocks_live(tmp_path):
-    s = Settings.model_validate({"dry_run": True, "paths": {"data_dir": str(tmp_path)}})
+    s = Settings.model_validate({"dry_run": True, "paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)}})
     rep = await ControlAgent(s).check("submit", {"dry_run": False})
     assert rep.decision == "block" and "mode" in ids(rep)
     assert (await ControlAgent(s).check("submit", {"dry_run": True})).decision == "pass"
@@ -351,7 +351,7 @@ async def test_tools_registered_and_compact(tmp_path, monkeypatch):
         def tool(self):
             return lambda f: self.fns.setdefault(f.__name__, f)
 
-    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path)}})
+    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)}})
     tools._agent = None
     m = FakeMCP()
     tools.register(m, lambda: s)

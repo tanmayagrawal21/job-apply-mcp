@@ -19,7 +19,7 @@ def test_fixture_redirects_paths_and_env(tmp_path):
 
 def test_loader_honours_trusted_user_config_sanity(tmp_path):
     # sanity: the loader really would honour such a file, so the subprocess test below is meaningful
-    cfg = paths.config_dir()
+    cfg = paths.trusted_config_file().parent
     cfg.mkdir(parents=True)
     f = cfg / "config.toml"
     f.write_text("dry_run = false\n" + HOSTILE, encoding="utf-8")
