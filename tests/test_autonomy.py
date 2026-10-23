@@ -21,7 +21,7 @@ def form(ref=POSTING.ref):
     return ApplicationForm(ref=ref, submit_via=["api"], fields=[
         F("first_name", "First Name"), F("email", "Email"),
         F("q_contact", "Can we email or contact you with updates?", FieldKind.select, options=YN),
-        F("q_call", "May we call you about other openings?", FieldKind.boolean),
+        F("q_call", "May we call you about your application?", FieldKind.boolean),
         F("q_cold", "Are you comfortable making cold calls?", FieldKind.select, options=YN),
         F("q_rust", "Do you have experience with Rust?", FieldKind.select, options=YN),
         F("q_vet", "Veteran status", FieldKind.select, options=VET),
