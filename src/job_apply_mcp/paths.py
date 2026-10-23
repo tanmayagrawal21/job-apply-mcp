@@ -63,9 +63,9 @@ def _real_home() -> Path:
 
 def fixed_config_dir() -> Path:
     """Where the TRUSTED config and security-state secrets live. Never follows XDG_* or any other env a project can
-    set (ADR-0054); Windows has no passwd database, so it uses %APPDATA%."""
+    set (ADR-0054); Windows has no passwd database, so it uses <profile>/AppData/Roaming."""
     if _is_windows():
-        return Path(os.environ.get("APPDATA") or _real_home() / "AppData" / "Roaming") / APP
+        return _real_home() / "AppData" / "Roaming" / APP
     return _real_home() / ".config" / APP
 
 
@@ -73,7 +73,7 @@ def state_dir() -> Path:
     """Default home of the security-state stores (consent, grants, approvals, quota/audit): fixed, ignores
     XDG_DATA_HOME. A trusted user config may relocate it with `paths.state_dir`."""
     if _is_windows():
-        return Path(os.environ.get("LOCALAPPDATA") or _real_home() / "AppData" / "Local") / APP
+        return _real_home() / "AppData" / "Local" / APP
     return _real_home() / ".local" / "share" / APP
 
 
