@@ -252,6 +252,12 @@ class PathsCfg(BaseModel):
     data_dir: str = Field(default_factory=paths.default_data_dir_str)
     profile: str = Field(default_factory=lambda: paths.default_config_dir_str() + "/profile.toml")
     resume: str | None = None
+    state_dir: str | None = None        # security-state stores (consent, grants, approvals, audit); trusted user config only
+
+
+def state_path(s: Settings) -> Path:
+    """Where consent, grants, approvals and the control audit/quota log live (ADR-0054)."""
+    return Path(s.paths.state_dir).expanduser() if s.paths.state_dir else paths.state_dir()
 
 
 class ImproveCfg(BaseModel):
@@ -873,9 +879,9 @@ def _mail_view(s: Settings) -> tuple:
 
 
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
-    """Only the platform-default user config, owned by this user and not group/world-writable, may relax
+    """Only the FIXED-location user config (never one found through XDG_CONFIG_HOME or the environment), owned by this user and not group/world-writable, may relax
     security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
-    default = paths.default_config_file()
+    default = paths.trusted_config_file()
     try:
         if user.resolve() != default.resolve():
             return False, "not the platform-default user config path"
@@ -914,6 +920,8 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     data = _deep_merge(data, _restrict(edata, "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
     _enforce(s, base)
+    ustate = (udata.get("paths") or {}).get("state_dir") if isinstance(udata.get("paths"), dict) else None
+    s.paths.state_dir = ustate if trusted_user and isinstance(ustate, str) and ustate else None   # ADR-0054
     s._otp_mail_trusted = _mail_view(s) == _mail_view(base) and (trusted_user or _mail_view(base) == _mail_view(defaults))
     if not s._otp_mail_trusted:
         log.info("otp_unattended disabled: mail settings come from a project file, the environment or an untrusted "

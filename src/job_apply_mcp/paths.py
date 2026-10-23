@@ -50,14 +50,41 @@ def cache_dir() -> Path:
     return Path.home() / ".cache" / APP
 
 
-def default_config_file() -> Path:
-    """The platform-default user config: the only file that may relax security settings (ADR-0021)."""
-    return config_dir() / "config.toml"
+def _real_home() -> Path:
+    """The account's home from the user database, NOT $HOME (an environment a repo or client can set)."""
+    if not _is_windows():
+        try:
+            import pwd
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError, OSError):
+            pass
+    return Path.home()
+
+
+def fixed_config_dir() -> Path:
+    """Where the TRUSTED config and security-state secrets live. Never follows XDG_* or any other env a project can
+    set (ADR-0054); Windows has no passwd database, so it uses %APPDATA%."""
+    if _is_windows():
+        return Path(os.environ.get("APPDATA") or _real_home() / "AppData" / "Roaming") / APP
+    return _real_home() / ".config" / APP
+
+
+def state_dir() -> Path:
+    """Default home of the security-state stores (consent, grants, approvals, quota/audit): fixed, ignores
+    XDG_DATA_HOME. A trusted user config may relocate it with `paths.state_dir`."""
+    if _is_windows():
+        return Path(os.environ.get("LOCALAPPDATA") or _real_home() / "AppData" / "Local") / APP
+    return _real_home() / ".local" / "share" / APP
+
+
+def trusted_config_file() -> Path:
+    """The only file that may relax security settings (ADR-0021, ADR-0054)."""
+    return fixed_config_dir() / "config.toml"
 
 
 def config_file() -> Path:
     env = os.environ.get("JOB_APPLY_MCP_CONFIG")
-    return Path(env).expanduser() if env else default_config_file()
+    return Path(env).expanduser() if env else config_dir() / "config.toml"
 
 
 def profile_file() -> Path:

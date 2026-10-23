@@ -25,3 +25,20 @@ the `mcp` library's version (1.30.0), not ours.
 Clients that spawn the server with a scrubbed environment (the MCP SDK passes only HOME, PATH and a few others
 unless `env` is given) drop `XDG_*`; the server then correctly falls back to `~/.config`. Pass the variables in
 the client's `env` block.
+
+## Amendment: fixed trust and state locations (control review of #84)
+The trusted config and the security-state stores must not follow an environment that a project can set (a repo's
+`.mcp.json` `env` block can set `XDG_*`).
+1. The TRUSTED user config is `<account home>/.config/job-apply-mcp/config.toml` (POSIX; home from the user
+   database via `pwd`, not `$HOME`) or `%APPDATA%\job-apply-mcp\config.toml` (Windows). A config found through
+   `XDG_CONFIG_HOME` or `JOB_APPLY_MCP_CONFIG` still loads (so a smoke test can isolate), but as UNTRUSTED: it can
+   only make settings stricter. The owner and group/world-writable checks are unchanged.
+2. Consent, grants, approvals, the control audit/quota log, the grant key file and use high-water marks live under
+   `paths.state_dir()` (`<account home>/.local/share/job-apply-mcp`, Windows `%LOCALAPPDATA%`), ignoring
+   `XDG_DATA_HOME`, unless the TRUSTED user config sets `paths.state_dir` (any other source of it is dropped).
+   Ordinary data (evidence, search cache, applications db) and the cache keep following XDG.
+3. Revocation is bound to the keychain: `revoke` records the ids as tombstones next to the signing key (keychain
+   entry `revoked:<prefix><id>`, plus a file in the fixed config dir). A grant or consent with a tombstone fails
+   verification, so restoring an old copy of the data dir cannot revive it.
+4. Hooks: `scripts/install-hooks.sh` warns when the terms path cannot be resolved or no terms file exists, and
+   blocks the commit when a terms file exists but cannot be loaded.

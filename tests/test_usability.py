@@ -247,22 +247,89 @@ def test_server_and_doctor_read_the_xdg_config_not_home(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_svc", None)
 
 
-def test_trusted_user_config_is_the_resolved_xdg_file(monkeypatch, tmp_path):
+def test_trusted_config_is_the_fixed_path_not_xdg(monkeypatch, tmp_path):
     from job_apply_mcp import config
-    xdg = tmp_path / "xdg"
+    fixed = paths.trusted_config_file()
+    _cfg_text(fixed)
+    assert fixed == paths._real_home() / ".config" / "job-apply-mcp" / "config.toml" or os.name == "nt"
+    assert config._user_file_trusted(fixed) == (True, "")
+    xdg = tmp_path / "repo" / ".x"                              # e.g. a repo's .mcp.json env block
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     f = xdg / "job-apply-mcp" / "config.toml"
     _cfg_text(f)
-    assert config._user_file_trusted(f) == (True, "")
-    other = tmp_path / "elsewhere.toml"
-    _cfg_text(other)
-    assert config._user_file_trusted(other)[0] is False
-    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(other))      # an explicit file is never trusted to relax settings
-    assert config._user_file_trusted(paths.config_file())[0] is False
+    assert paths.config_file() == f and paths.trusted_config_file() == fixed
+    assert config._user_file_trusted(f)[0] is False
+    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(f))
+    assert config._user_file_trusted(f)[0] is False
     monkeypatch.delenv("JOB_APPLY_MCP_CONFIG")
     if os.name != "nt":                                         # POSIX mode bits only; Windows skips this check
-        f.chmod(0o666)
-        assert config._user_file_trusted(f)[0] is False         # group/world-writable
+        fixed.chmod(0o666)
+        assert config._user_file_trusted(fixed)[0] is False     # group/world-writable
+
+
+_RELAX = ('dry_run = false\n[apply]\napproval_mode = "agent"\nauto_approve = true\n'
+          '[answers]\nautonomy = "infer"\n')
+
+
+def test_env_set_xdg_config_cannot_relax_settings(monkeypatch, tmp_path):
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    xdg = tmp_path / "repo" / ".x"
+    _cfg_text(xdg / "job-apply-mcp" / "config.toml", _RELAX)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    s = load_settings()
+    assert s.dry_run is True and s.apply.approval_mode != "agent" and not s.apply.auto_approve
+    assert s.answers.autonomy != "infer"
+    _cfg_text(paths.trusted_config_file(), _RELAX)              # the same text at the fixed path IS trusted
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    if os.name != "nt":
+        assert load_settings().dry_run is False
+
+
+def test_state_dir_ignores_xdg_data_home_unless_trusted_config_sets_it(monkeypatch, tmp_path):
+    from job_apply_mcp.config import state_path
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "fresh"))
+    s = Settings()
+    s.paths.state_dir = None
+    assert state_path(s) == paths.state_dir() and tmp_path / "fresh" not in state_path(s).parents
+    assert paths.data_dir() == tmp_path / "fresh" / "job-apply-mcp"       # ordinary data still follows XDG
+    custom = tmp_path / "state"
+    _cfg_text(paths.trusted_config_file(), f'[paths]\nstate_dir = "{custom.as_posix()}"\n')
+    if os.name != "nt":
+        assert state_path(load_settings()) == custom
+    xdg = tmp_path / "x"
+    _cfg_text(xdg / "job-apply-mcp" / "config.toml", f'[paths]\nstate_dir = "{custom.as_posix()}"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))                       # untrusted file cannot move the state
+    assert state_path(load_settings()) == paths.state_dir()
+
+
+def test_fresh_xdg_data_home_does_not_reset_quota_usage(monkeypatch, tmp_path):
+    from job_apply_mcp.control.agent import ControlAgent
+    s = Settings()
+    s.paths.state_dir = None
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d1"))
+    a1 = ControlAgent(s)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d2"))
+    a2 = ControlAgent(s)
+    assert a1.audit_path == a2.audit_path == paths.state_dir() / "control_audit.jsonl"
+
+
+def test_revoked_consent_stays_revoked_after_restoring_an_old_store(tmp_path):
+    import shutil
+
+    from job_apply_mcp.consent.store import ConsentStore
+    from job_apply_mcp.grants.store import GrantError
+    data = tmp_path / "state"
+    st = ConsentStore(data, secret=b"k" * 32, hwm_file=tmp_path / "cfg" / "consent_uses.json")
+    c = st.issue_consent(3600)
+    shutil.copytree(data, tmp_path / "backup")
+    assert st.revoke(c.id) == [c.id]
+    shutil.rmtree(data)
+    shutil.copytree(tmp_path / "backup", data)                  # restore the pre-revoke copy
+    st2 = ConsentStore(data, secret=b"k" * 32, hwm_file=tmp_path / "cfg" / "consent_uses.json")
+    assert st2.active() == []
+    with pytest.raises(GrantError):
+        st2.use("approve_submissions")
 
 
 def test_server_info_version_is_the_package_version():

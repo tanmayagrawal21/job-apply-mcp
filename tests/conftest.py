@@ -98,6 +98,7 @@ def pytest_configure(config):
     for k in list(os.environ):
         if k.startswith("JOB_APPLY__") or k == "JOB_APPLY_MCP_CONFIG":
             del os.environ[k]
+    paths._real_home = lambda: boot      # the trusted-config / state locations come from the account home, not $HOME
     os.environ.update(HOME=str(boot), USERPROFILE=str(boot), XDG_CONFIG_HOME=str(boot / ".config"),
                       XDG_DATA_HOME=str(boot / ".local" / "share"), APPDATA=str(boot / "AppData" / "Roaming"),
                       LOCALAPPDATA=str(boot / "AppData" / "Local"))
@@ -125,6 +126,8 @@ def _isolated_env(tmp_path, monkeypatch):
                  "XDG_DATA_HOME": home / ".local" / "share", "APPDATA": home / "AppData" / "Roaming",
                  "LOCALAPPDATA": home / "AppData" / "Local"}.items():
         monkeypatch.setenv(k, str(v))
+    from job_apply_mcp import paths as _paths
+    monkeypatch.setattr(_paths, "_real_home", lambda: home)
     monkeypatch.chdir(tmp_path)  # a stray ./job-apply-mcp.toml in the cwd must not leak in either
     yield home
 
@@ -142,6 +145,8 @@ def _isolated_data_dir(_isolated_env, tmp_path, monkeypatch):
         default_data = paths.default_data_dir_str()
         if self.paths.data_dir.startswith("~") or self.paths.data_dir == default_data:
             self.paths.data_dir = str(tmp_path / "data")
+        if self.paths.state_dir is None:
+            self.paths.state_dir = str(tmp_path / "data")
         if self.browser.user_data_dir.startswith("~") or self.browser.user_data_dir == default_data + "/browser-profile":
             self.browser.user_data_dir = str(tmp_path / "profile")
 

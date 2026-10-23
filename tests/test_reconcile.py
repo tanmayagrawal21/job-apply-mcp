@@ -160,7 +160,7 @@ def test_pending_in_control_status(tmp_path):
     from job_apply_mcp.control.tools import register
 
     s = Settings()
-    s.paths.data_dir = str(tmp_path)
+    s.paths.data_dir = s.paths.state_dir = str(tmp_path)
     b = ApprovalBook(tmp_path)
     submit(b, "greenhouse:nw:1", "Northwind Robotics", "Backend Engineer")
 

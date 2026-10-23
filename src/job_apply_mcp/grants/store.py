@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import paths
+from ..config import state_path
 
 log = logging.getLogger(__name__)
 KEYRING_SERVICE = "job-apply-mcp"
@@ -62,7 +63,7 @@ def parse_duration(text: str) -> int:
 
 # ------------------------------------------------------------------ secret
 def _secret_file() -> Path:
-    return paths.config_dir() / "grant.key"
+    return paths.fixed_config_dir() / "grant.key"
 
 
 def load_secret(*, use_keyring: bool = True, create: bool = True, key_file: Path | None = None) -> bytes:
@@ -251,6 +252,8 @@ class GrantStore:
             raise GrantError(f"grant {g.id}: malformed use counter (re-issue the grant)")
         if not hmac.compare_digest(g.sig, _sign(key, g.payload())):
             raise GrantError(f"grant {g.id}: signature invalid (tampered)")
+        if self._is_revoked(g.id):
+            raise GrantError(f"grant {g.id}: revoked")
         self._validate(g)
         return g
 
@@ -282,7 +285,7 @@ class GrantStore:
     # ---- high-water mark: a third, independent use counter outside the data dir
     @property
     def _hwm_file(self) -> Path:
-        return self._hwm_path or (paths.config_dir() / self.hwm_name)
+        return self._hwm_path or (paths.fixed_config_dir() / self.hwm_name)
 
     def _hwm_file_read(self) -> dict[str, int]:
         try:
@@ -323,6 +326,49 @@ class GrantStore:
         with os.fdopen(fd, "w") as fh:
             fh.write(json.dumps(d))
         os.replace(tmp, f)
+
+    # ---- revocation tombstones, stored with the signing secret / high-water marks (keychain, else the fixed config
+    # dir) so restoring an old copy of the data dir cannot revive a revoked grant or consent (ADR-0054)
+    @property
+    def _revoked_file(self) -> Path:
+        return self._hwm_file.with_name("revoked_" + self.hwm_name)
+
+    def _is_revoked(self, gid: str) -> bool:
+        try:
+            if gid in json.loads(self._revoked_file.read_text()):
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+        if self._hwm_keyring:
+            try:
+                import keyring  # lazy: optional extra
+                return keyring.get_password(KEYRING_SERVICE, "revoked:" + self.hwm_prefix + gid) == "1"
+            except Exception as e:  # noqa: BLE001 - no keyring / no backend: the file is the fallback
+                log.debug("keyring unavailable for revocation (%s)", type(e).__name__)
+        return False
+
+    def _mark_revoked(self, gids: list[str]) -> None:
+        try:
+            cur = json.loads(self._revoked_file.read_text())
+            cur = cur if isinstance(cur, list) else []
+        except (OSError, ValueError):
+            cur = []
+        f = self._revoked_file
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(sorted({*cur, *gids})))
+        os.replace(tmp, f)
+        if self._hwm_keyring:
+            for gid in gids:
+                try:
+                    import keyring
+                    keyring.set_password(KEYRING_SERVICE, "revoked:" + self.hwm_prefix + gid, "1")
+                except Exception as e:  # noqa: BLE001
+                    log.debug("keyring unavailable for revocation (%s); file only", type(e).__name__)
 
     def _counts(self, g: Grant, audit_n: dict[str, int]) -> tuple[int, dict[str, int]]:
         """(max over the three stores, per-store values)."""
@@ -458,6 +504,7 @@ class GrantStore:
             rows = self._read_all()
             gone = [r["id"] for r in rows if which == "all" or r.get("id") == which]
             if gone:
+                self._mark_revoked(gone)
                 self._write_all([r for r in rows if r.get("id") not in gone])
                 for gid in gone:
                     self.audit("revoked", gid)
@@ -465,7 +512,7 @@ class GrantStore:
 
 
 def store_for(settings) -> GrantStore:
-    return GrantStore(Path(settings.paths.data_dir), use_keyring=settings.grants.use_keyring)
+    return GrantStore(state_path(settings), use_keyring=settings.grants.use_keyring)
 
 
 def require_grant(settings, scope: str, *, detail: str = "") -> Grant:

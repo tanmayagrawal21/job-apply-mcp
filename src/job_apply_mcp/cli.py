@@ -104,10 +104,10 @@ def main(argv: list[str] | None = None) -> None:
                                   model=args.model, command_style=args.client_command, autonomy=args.autonomy))
     elif args.cmd in ("approve", "deny", "pending", "resolve"):
         from .apply.approvals import cli as approvals_cli
-        from .config import load_settings
+        from .config import load_settings, state_path
 
         st = load_settings()
-        raise SystemExit(approvals_cli([args.cmd, *args.rest], st.paths.data_dir, st.apply.approval_ttl_s))
+        raise SystemExit(approvals_cli([args.cmd, *args.rest], state_path(st), st.apply.approval_ttl_s))
     elif args.cmd == "grant":
         from .config import load_settings
         from .grants.cli import cli as grant_cli

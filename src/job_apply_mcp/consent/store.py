@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..config import state_path
 from ..grants.store import Grant, GrantError, GrantStore, _Ok
 
 CONSENT_SCOPES: dict[str, str] = {
@@ -216,4 +217,4 @@ class ConsentStore(GrantStore):
 
 
 def store_for(settings, run_id: str | None = None) -> ConsentStore:
-    return ConsentStore(Path(settings.paths.data_dir), use_keyring=settings.grants.use_keyring, run_id=run_id)
+    return ConsentStore(state_path(settings), use_keyring=settings.grants.use_keyring, run_id=run_id)
