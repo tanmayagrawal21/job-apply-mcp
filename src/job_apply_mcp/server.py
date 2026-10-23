@@ -266,6 +266,9 @@ _register_vault(mcp, lambda: svc().settings)
 from .ingest.tools import register as _register_ingest
 
 _register_ingest(mcp, svc)
+from .intake.tools import register as _register_intake
+
+_register_intake(mcp, svc)
 from .persona.tools import register as _register_persona
 
 _register_persona(mcp, svc)
