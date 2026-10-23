@@ -99,8 +99,12 @@ A QA round (issues #47, #48, #51) found:
   counts only when `home_country` is US, otherwise `[authorization.US].citizen`.
 - **With the gap collector (ADR-0047).** A per-country authorization gap is recorded as
   `authorization.<ISO-2>.<fact>`; that field is not passed to the collector as the unscoped home-country key, so an
-  owner's answer to a Canadian question can never become a US fact. A free-text EEO box is left blank even when the
-  profile declines (stored or persona answers never fill it).
+  owner's answer to a Canadian question can never become a US fact. An authorization/sponsorship field whose country
+  is NOT confirmed (place-less on an unconfirmed job, several countries, a region, a contradiction) is recorded under no
+  key at all: it stays unresolved and the posting is a handoff, so an answer given in that context is never reused.
+- **Free-text EEO fields.** A free-text EEO box is blank by default, whatever the profile says. The only exception is
+  a REQUIRED free-text gender field, filled from `demographics.gender_if_required` (never from `gender`, never when
+  optional, never a decline value). Select fields keep the exact-option / decline rule.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an

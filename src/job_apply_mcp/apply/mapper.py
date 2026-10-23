@@ -719,9 +719,13 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
     named = named_countries(f.label)
     job_place = bool(_JOB_PLACE.search(f.label))
     if len(named) > 1 or (named and named[0] is None) or (named and job_place and named[0] != job_country):
-        return True, None                                    # several places, a region, or a contradiction
+        if gaps is not None:                                 # several places, a region, or a contradiction
+            gaps.append({"country": None, "fact": None, "key": f.key})
+        return True, None
     country = named[0] if named else job_country
     if country is None:                                      # place-less and the job's country is not confirmed
+        if gaps is not None:                                 # ADR-0040: no reusable gap key for this context
+            gaps.append({"country": None, "fact": None, "key": f.key})
         return True, None
     core = auth_core(f.label, country, job_place=job_place and country == job_country)
     if core is None:
@@ -1042,6 +1046,7 @@ class MapResult:
     hints: dict[str, dict[str, Any]] = field(default_factory=dict)  # field key -> known partial facts for the owner
     # ADR-0040: per-country authorization facts a question needed but the profile lacks ({country, fact, key})
     profile_gaps: list[dict[str, Any]] = field(default_factory=list)
+    no_gap_keys: set[str] = field(default_factory=set)     # ADR-0040: unconfirmed-country auth fields, never collected
 
 
 # ---- voluntary self-identification (ADR-0040) -----------------------------------------------------------
@@ -1149,6 +1154,13 @@ def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any
     """The owner's [demographics] value as the exact option; the decline option when the profile declines or the
     value/wording does not match exactly; else None. Never a guessed or nearest option."""
     if not ck:
+        return None
+    if not f.options and f.kind != FieldKind.boolean:
+        # ADR-0040: a free-text EEO box is blank by default. Only a REQUIRED free-text gender field is filled, and only
+        # from demographics.gender_if_required (never from `gender`, never when optional).
+        if ck == "gender" and f.required and f.kind in (FieldKind.text, FieldKind.unknown):
+            g = profile.lookup("gender_if_required")
+            return None if g in (None, "") or _is_decline(g) or not demographic_label_ok(f.label, ck) else str(g)
         return None
     v = profile.lookup("gender_if_required") if ck == "gender" and f.required else None
     if v in (None, ""):
@@ -1398,7 +1410,10 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             keep.append(a)
     res.answers = keep
     answered = {a.key for a in res.answers}
-    res.profile_gaps = list({(g["country"], g["fact"]): g for g in gaps if g["key"] not in answered}.values())
+    res.profile_gaps = list({(g["country"], g["fact"]): g for g in gaps
+                             if g["key"] not in answered and g["country"]}.values())
+    # authorization/sponsorship fields whose country is not confirmed: never a gap under any reusable key
+    res.no_gap_keys = {g["key"] for g in gaps if not g["country"] and g["key"] not in answered}
     res.skipped_voluntary = [f for f in res.unresolved if not f.required
                              and (f.key in eeo_keys or _DEMOGRAPHIC_LABEL.search(f.label) or _VOLUNTARY_LABEL.search(f.label))]
     return res

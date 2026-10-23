@@ -8,7 +8,7 @@ from job_apply_mcp.apply.mapper import job_country, location_in_country, locatio
 from job_apply_mcp.apply.places import ambiguous_codes, country_iso
 from job_apply_mcp.config import Settings
 from job_apply_mcp.core.models import FieldKind
-from job_apply_mcp.profile import Authorization, Contact, Profile
+from job_apply_mcp.profile import Authorization, Contact, Demographics, Profile
 
 YN = ["Yes", "No"]
 
@@ -204,3 +204,46 @@ async def test_country_gaps_are_recorded_with_their_country(tmp_path):
     await e.plan(POSTING.ref)
     assert e.gaps.gap("authorization.CA.requires_sponsorship") is not None
     assert e.gaps.gap("requires_sponsorship") is None          # never the unscoped home-country key
+
+
+async def test_unconfirmed_country_answer_never_reaches_a_us_job(tmp_path):
+    """Control repro (8c75416f): an answer typed for an unconfirmed-country posting must not answer a US job."""
+    from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeStore, settings
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    from job_apply_mcp.core.models import ApplicationForm
+    from job_apply_mcp.persona import PersonaPolicy, ProfileDB
+    db = ProfileDB(tmp_path)
+    pv = ProfileView(Profile(contact=Contact(first_name="Alex", city="Springfield")), Settings())   # no auth facts
+    pv.persona = PersonaPolicy(pv.p.persona, db, pv.resume_projects)
+    labels = ["Will you require sponsorship?", "Are you authorized to work in the country where this job is located?"]
+    form = ApplicationForm(ref=POSTING.ref, fields=[F(f"q{i}", lab, FieldKind.select, options=YN, required=True)
+                                                    for i, lab in enumerate(labels)])
+    posting = POSTING.model_copy(update={"location": "Remote (US) + Remote (UK)", "countries": ["US"]})
+    e = ApplyEngine(settings(), resolve_adapter=lambda ref: FakeAdapter(form=form, posting=posting), profile=pv,
+                    router=None, gates=FakeGates(), store=FakeStore(), driver_factory=lambda n: None)
+    e.persona, e.gaps = pv.persona, db
+    out = await e.plan(POSTING.ref)
+    assert set(out.plan.unresolved) >= {"q0", "q1"} and not out.profile_gaps
+    asked = [q["key"] for q in db.questions(limit=50, include_skipped=True)]
+    assert not [k for k in asked if "sponsor" in k or "authori" in k], asked          # no reusable key at all
+    for k in asked:                                                                    # the owner answers everything
+        db.set_answer(k, "No", origin="user_written")
+    us = map_fields([F("q", "Will you require sponsorship?", FieldKind.select, options=YN)], pv, job_country="US",
+                    persona=pv.persona)
+    assert us.answers == []
+
+
+def test_free_text_gender_only_required_and_only_gender_if_required():
+    def run(required, **demo):
+        p = ProfileView(Profile(contact=Contact(first_name="Alex"), demographics=Demographics(**demo)), Settings())
+        r = map_fields([F("g", "Gender", FieldKind.text, required=required)], p)
+        return [a.value for a in r.answers]
+    assert run(False, gender="Male") == [] and run(True, gender="Male") == []           # never from `gender`
+    assert run(False, gender_if_required="Male") == []                                  # optional: blank
+    assert run(True, gender_if_required="Male") == ["Male"]                             # required: gender_if_required
+    assert run(True, gender_if_required="Decline to self-identify") == []
+    for label in ["Race", "Veteran status", "Disability status", "Pronouns"]:
+        p = ProfileView(Profile(demographics=Demographics(race_ethnicity="Asian", veteran_status="No",
+                                                          disability_status="No", pronouns="she/her")), Settings())
+        assert map_fields([F("x", label, FieldKind.text, required=True)], p).answers == [], label

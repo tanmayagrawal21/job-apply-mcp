@@ -202,6 +202,7 @@ class _Cached:
     gate: GateResult | None = None                                  # for draft_answers (ADR-0041)
     plan_answers: list[Answer] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)            # ADR-0040 hints / gaps kept for draft_answers
 
 
 @dataclass
@@ -378,12 +379,12 @@ class ApplyEngine:
             long_ += short
         long_ += owner_only
         return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
-                              profile_gaps=mapped.profile_gaps)
+                              profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
 
     def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
                   tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,
                   voluntary: dict[str, str] | None = None,
-                  profile_gaps: list[dict[str, Any]] | None = None) -> PlanOut:
+                  profile_gaps: list[dict[str, Any]] | None = None, no_gap_keys: set[str] | None = None) -> PlanOut:
         """Cache the plan, issue the server-held approval, and list unresolved fields as client_tasks.
         Only `answers` are ever approved/submitted; drafts inside client_tasks never are (ADR-0041)."""
         hints = hints or {}
@@ -400,12 +401,14 @@ class ApplyEngine:
         # ADR-0040 x ADR-0047: a per-country authorization gap is recorded with its country
         # ("authorization.CA.requires_sponsorship"), never as the unscoped home-country key
         country_gaps = [g for g in (profile_gaps or []) if g.get("key") in unresolved_keys]
-        scoped = {g["key"] for g in country_gaps}
+        scoped = {g["key"] for g in country_gaps} | set(no_gap_keys or ())   # unconfirmed country: no key at all
         self._record_gaps(ref, ctx, answers, [k for k in unresolved_keys if k not in scoped], country_gaps)
         planned = {a.key: a.value for a in answers}
         self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
                                    time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary,
-                                   gate, list(answers), audit)
+                                   gate, list(answers), audit,
+                                   {"hints": hints, "voluntary": voluntary, "profile_gaps": profile_gaps,
+                                    "no_gap_keys": no_gap_keys})
         _, files = self._split(ctx.form, planned)
         aid = self.approvals.issue(ref, self._url(ctx), ctx.posting.company, ctx.posting.title, planned, files)
         self.approvals.set_state(ref, "planned", company=ctx.posting.company, title=ctx.posting.title,
@@ -674,7 +677,8 @@ class ApplyEngine:
         with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
                 ctx.posting.company, ctx.posting.title, ctx.summary):
             written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
-        out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit)
+        out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit,
+                             **cached.extra)
         out.timings = dict(self.timings.get(ref, {}))
         return out
 
