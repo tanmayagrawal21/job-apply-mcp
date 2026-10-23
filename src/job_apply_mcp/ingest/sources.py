@@ -46,7 +46,8 @@ def _snippet(msg: EmailMessage) -> str:
 def message_from_bytes(raw: bytes) -> Message:
     m = email.message_from_bytes(raw, policy=policy.default)
     return Message(sender=str(m.get("From", "")), subject=str(m.get("Subject", "")),
-                   date=_parse_date(str(m.get("Date", ""))), snippet=_snippet(m))  # type: ignore[arg-type]
+                   date=_parse_date(str(m.get("Date", ""))), snippet=_snippet(m),  # type: ignore[arg-type]
+                   auth_results=tuple(str(h) for h in (m.get_all("Authentication-Results") or [])))
 
 
 class ClientSource:

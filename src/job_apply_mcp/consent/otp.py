@@ -1,5 +1,9 @@
 """otp_unattended (ADR-0048): fetch an emailed verification code with no human in the loop, inside a consent window.
 
+The newest message must be DKIM- or DMARC-verified for that domain by YOUR mail server (`Authentication-Results`),
+else the flow stops (`unknown`); a forged From never supplies a code. The mail settings themselves must come from the
+trusted user config (`Settings._otp_mail_trusted`).
+
 Reads ONLY the newest message from the expected sender domain received within `grants.otp_window_min` minutes
 (and not before the submit click), through the configured read-only mail source (ADR-0016). When that newest
 message carries no code yet (e.g. an "application received" mail), it waits for a newer one, polling every
@@ -72,9 +76,55 @@ class SecretCode:
         raise TypeError("SecretCode cannot be serialized")
 
 
+_COMMENT = re.compile(r"\([^()]*\)")
+_RESINFO = re.compile(r"^\s*([A-Za-z0-9-]+)\s*=\s*([A-Za-z]+)")
+_PROP = re.compile(r"([A-Za-z]+\.[A-Za-z0-9-]+)\s*=\s*\"?([^\s;\"]+)")
+
+
+def _under(host: str, domain: str) -> bool:
+    h, d = host.strip().lower().rstrip("."), domain.strip().lower().lstrip("@.").rstrip(".")
+    return bool(h) and bool(d) and (h == d or h.endswith("." + d))
+
+
+def parse_auth_results(header: str) -> tuple[str, list[tuple[str, str, dict[str, str]]]]:
+    """RFC 8601 `Authentication-Results`: (authserv-id, [(method, result, {prop: value})])."""
+    h = header
+    for _ in range(5):                                  # strip (possibly nested) comments
+        h = _COMMENT.sub(" ", h)
+    parts = h.split(";")
+    ident = parts[0].strip().split()[0].lower() if parts and parts[0].strip() else ""
+    out = []
+    for part in parts[1:]:
+        m = _RESINFO.match(part)
+        if m:
+            out.append((m.group(1).lower(), m.group(2).lower(),
+                        {k.lower(): v.lower() for k, v in _PROP.findall(part)}))
+    return ident, out
+
+
+def authenticated(msg: Any, domain: str, trusted_ids: list[str] | tuple[str, ...] = ()) -> bool:
+    """Did the RECEIVING server verify this mail for `domain`? Needs `dkim=pass` with header.d (or header.i) equal
+    to or under `domain`, or `dmarc=pass` with header.from equal to or under it. Only the topmost
+    Authentication-Results header counts (the one your server added; lower ones may come from the sender), or, when
+    `verification.trusted_authserv_ids` is set, only headers carrying one of those ids. Anything else: False."""
+    headers = list(getattr(msg, "auth_results", ()) or ())
+    ids = {i.strip().lower() for i in trusted_ids if i.strip()}
+    picked = [h for h in headers if parse_auth_results(h)[0] in ids] if ids else headers[:1]
+    for h in picked:
+        for method, result, props in parse_auth_results(h)[1]:
+            if result != "pass":
+                continue
+            if method == "dkim" and _under(props.get("header.d") or props.get("header.i", "").rpartition("@")[2],
+                                           domain):
+                return True
+            if method == "dmarc" and _under(props.get("header.from", ""), domain):
+                return True
+    return False
+
+
 @dataclass
 class FetchResult:
-    status: str                   # found | no_message | error
+    status: str                   # found | no_message | unauthenticated | error
     code: SecretCode | None = field(default=None, repr=False)
     detail: str = ""              # never contains the code
 
@@ -108,6 +158,10 @@ async def fetch_code(settings: Any, *, sender_domain: str, clicked_at: datetime,
         except Exception as e:  # noqa: BLE001 - message dropped on purpose (could quote mail content)
             return FetchResult("error", detail=f"mail source error ({type(e).__name__})")
         if msg is not None:
+            if not authenticated(msg, sender_domain, settings.verification.trusted_authserv_ids):
+                del msg                                 # possibly forged: never read further, never wait it out
+                return FetchResult("unauthenticated", detail=f"newest mail claiming {sender_domain} is not "
+                                                             "DKIM/DMARC-verified by your mail server")
             raw = extract_code(msg.subject, msg.snippet)
             del msg
             if raw is not None:

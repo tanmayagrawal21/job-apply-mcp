@@ -863,6 +863,8 @@ class ApplyEngine:
                                           "detail": f"unknown (never retried): {out.detail or ''}"[:400]})
 
         domain = self._sender_domain(ref, platform)
+        if not getattr(self.s, "_otp_mail_trusted", False):
+            return await give_up("mail settings are not from the trusted user config (sender domains / mail source)")
         if not domain:
             return await give_up("no expected sender domain for this platform (verification.sender_domains)")
         try:

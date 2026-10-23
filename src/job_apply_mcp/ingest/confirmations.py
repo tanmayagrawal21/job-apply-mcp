@@ -27,6 +27,9 @@ class Message:
     subject: str
     date: datetime | None = None
     snippet: str = ""
+    # Authentication-Results headers, top (added last, by the receiving server) first. Only parsed from raw mail
+    # (mbox/IMAP), never from client-supplied dicts, which an agent could forge (ADR-0048).
+    auth_results: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Message:

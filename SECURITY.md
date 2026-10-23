@@ -21,7 +21,13 @@ Supported versions: the latest release and `main`.
 - The server never solves CAPTCHAs, creates accounts, or ticks attestations that match `policy.stop_phrases`. It
   enters a verification code only when the user typed it (ADR-0026), confirmed a granted prefill (ADR-0027), or
   minted a consent window with `otp_unattended` from an interactive terminal (ADR-0048); the code is never logged,
-  stored or returned. A visible CAPTCHA challenge is always a human handoff, under every setting.
+  stored or returned. A visible CAPTCHA challenge is always a human handoff, under every setting. Unattended codes are
+  taken only from mail your server DKIM/DMARC-verified for the expected sender, with mail settings from the trusted
+  user config.
+- Residual risk of grants and consent windows: the TTY check and typed phrase stop an agent acting through MCP, not a
+  local process with shell access (it can allocate a pseudo-terminal, e.g. `script`, or read the file-fallback HMAC
+  key when no OS keychain is available). Do not give agents an unrestricted shell as your OS user if you rely on
+  them; install the `keyring` extra so the secret lives in the OS keychain.
 - HTTP mode binds 127.0.0.1; a non-loopback bind requires `JOB_APPLY_MCP_TOKEN` (compared in constant time).
   Put TLS in front of it (reverse proxy) for any network use. The token is never accepted as a CLI flag.
 - Secrets (API keys, IMAP passwords) are read from the environment or OS keychain, never from config files.

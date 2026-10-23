@@ -214,6 +214,7 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `min_length` | `int` | `4` | format bounds when the page's input declares none |
 | `max_length` | `int` | `12` |  |
 | `typing_delay_ms` | `int` | `60` | real keystroke cadence when entering the code |
+| `trusted_authserv_ids` | `list[str]` | `[]` | otp_unattended: Authentication-Results ids of YOUR mail server(s); empty = only the topmost header counts (ADR-0048) |
 
 ## `[writing]`
 

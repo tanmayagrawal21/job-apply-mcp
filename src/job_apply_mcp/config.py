@@ -339,6 +339,7 @@ class VerificationCfg(BaseModel):
     min_length: int = 4                 # format bounds when the page's input declares none
     max_length: int = 12
     typing_delay_ms: int = 60           # real keystroke cadence when entering the code
+    trusted_authserv_ids: list[str] = Field(default_factory=list)   # otp_unattended: Authentication-Results ids of YOUR mail server(s); empty = only the topmost header counts (ADR-0048)
 
 
 class WritingCfg(BaseModel):
@@ -485,6 +486,9 @@ class DedupeCfg(BaseModel):
 
 
 class Settings(BaseModel):
+    # ADR-0048: False when the mail settings otp_unattended relies on (sender domains, mail source, IMAP server,
+    # trusted authserv ids) came from anything but the trusted user config. Programmatic Settings are trusted.
+    _otp_mail_trusted: bool = PrivateAttr(default=True)
     search: SearchCfg = Field(default_factory=SearchCfg)
     dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
     improve: ImproveCfg = Field(default_factory=ImproveCfg)
@@ -738,6 +742,12 @@ def _enforce(s: Settings, base: Settings) -> None:
                     q[k] = _legacy_base(base, k)
 
 
+def _mail_view(s: Settings) -> tuple:
+    """Everything otp_unattended trusts to pick the code mail (ADR-0048)."""
+    return (dict(s.verification.sender_domains), list(s.verification.trusted_authserv_ids), s.ingest.source,
+            s.ingest.path, s.ingest.imap.model_dump())
+
+
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
     """Only the platform-default user config, owned by this user and not group/world-writable, may relax
     security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
@@ -780,6 +790,10 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     data = _deep_merge(data, _restrict(edata, "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
     _enforce(s, base)
+    s._otp_mail_trusted = _mail_view(s) == _mail_view(base) and (trusted_user or _mail_view(base) == _mail_view(defaults))
+    if not s._otp_mail_trusted:
+        log.info("otp_unattended disabled: mail settings come from a project file, the environment or an untrusted "
+                 "user config (ADR-0048)")
     if trusted_user:     # log which settings the trusted user file relaxed relative to the built-in defaults
         hits, qhits = _relaxations(udata, defaults)
         for sect, key, raw in hits:

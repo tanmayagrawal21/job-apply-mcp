@@ -68,6 +68,28 @@ unattended action covered right now?"
 - **LLM isolation.** Tool output for the agent (`submit_application`, `apply_batch`, `consent_status`) carries the
   status and the sender domain only; a test runs a full unattended submission and checks the serialized tool output.
 
+## Review amendments (round 2, control agent)
+- **Sender authentication.** A `From` header alone never supplies a code. The newest message from the expected
+  sender must carry `Authentication-Results` from YOUR receiving server showing `dkim=pass` with `header.d` (or
+  `header.i`) equal to or under the expected domain, or `dmarc=pass` with `header.from` equal to or under it. Only
+  the topmost header counts (lower ones may be planted by the sender), or, when `verification.trusted_authserv_ids`
+  is set, only headers with those ids. An unverified newest message stops the flow at once (`unknown`, nothing
+  typed, no waiting for a later message). Authentication data is parsed only from raw mail (mbox/IMAP), never from
+  client-supplied dicts.
+- **Mail settings are user-config only for this flow.** `Settings._otp_mail_trusted` is computed at load:
+  `verification.sender_domains`, `verification.trusted_authserv_ids`, `ingest.source`, `ingest.path` and
+  `ingest.imap` must equal the user-config baseline, and if that baseline differs from the defaults the user file
+  must be trusted (ADR-0021). Otherwise unattended codes are refused (`unknown`, no mail read). Project files and
+  env still work for confirmation ingest; they just cannot steer unattended codes.
+- **`mail` scope (alias).** `mail` is a recognised scope name and an alias of `otp_unattended`, so the vault's
+  sign-up email verification (#67, `consent.active(settings, "mail")`) uses the same unattended mail path, under the
+  same rules: newest message only, DKIM/DMARC-verified sender, trusted mail settings, code never logged. A full
+  (default) consent includes it; `--scopes otp_unattended` grants it too, and a consent without that scope
+  refuses both names. An alias, not a separate scope, so one consent decision covers every emailed code.
+- **Residual risk (documented in SECURITY.md).** The TTY check and typed phrase stop an agent acting through MCP,
+  not a local process with shell access that can allocate a pseudo-terminal, nor one that can read the file-fallback
+  HMAC key. Same accepted risk as grants (ADR-0027/0037).
+
 ## Consequences
 - An unattended run needs one terminal command per period; review happens afterwards (`list_applications`, the
   approvals audit `consent:<id>` actor, `consent_audit.jsonl`).

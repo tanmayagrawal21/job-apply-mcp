@@ -31,6 +31,7 @@ from job_apply_mcp.ingest.sources import ImapSource
 
 SECRET = b"c" * 32
 DOMAIN = "greenhouse.io"
+AR = (f"mx.example.com; dkim=pass (2048-bit key) header.d={DOMAIN} header.s=s1; spf=pass smtp.mailfrom={DOMAIN}",)
 
 
 class TTY:
@@ -332,9 +333,9 @@ def _mail(code, now=None):
             Message("Jobs <alerts@other-board.example.com>", "Security code", now + timedelta(seconds=5),
                     "code: 33334444"),                                          # wrong sender, newest overall
             Message(f"Hiring <no-reply@{DOMAIN}>", "Security code", now - timedelta(seconds=20),
-                    "Your code is 55556666"),                                   # right sender, older
+                    "Your code is 55556666", auth_results=AR),                   # right sender, older
             Message(f"Hiring <no-reply@us.{DOMAIN}>", "Security code", now,
-                    f"Copy and paste this code into the security code field: {code}")]   # newest from sender
+                    f"Copy and paste this code into the security code field: {code}", auth_results=AR)]   # newest
 
 
 async def test_no_window_human_mode_still_waits_for_a_human(tmp_path):
@@ -443,7 +444,7 @@ class FakeImap:
 
 def _eml(sender, minutes_ago, body):
     d = (datetime.now(UTC) - timedelta(minutes=minutes_ago)).strftime("%a, %d %b %Y %H:%M:%S +0000")
-    return f"From: {sender}\r\nSubject: Security code\r\nDate: {d}\r\n\r\n{body}\r\n".encode()
+    return f"From: {sender}\r\nSubject: Security code\r\nDate: {d}\r\nAuthentication-Results: {AR[0]}\r\n\r\n{body}\r\n".encode()
 
 
 def test_imap_reads_only_the_newest_message_from_the_sender():
@@ -468,12 +469,12 @@ def test_newest_message_too_old_is_not_replaced_by_an_older_one():
 async def test_waits_for_a_newer_message_when_the_newest_has_no_code(cfg):
     cfg.grants.otp_unattended_wait_s, cfg.grants.otp_poll_s = 60, 5
     now = datetime.now(UTC)
-    mail = Mail([Message(f"x@{DOMAIN}", "We received your application", now, "Thanks for applying")])
+    mail = Mail([Message(f"x@{DOMAIN}", "We received your application", now, "Thanks for applying", AR)])
     ticks = {"t": 0.0}
 
     async def sleep(s):
         ticks["t"] += s
-        mail.msgs.append(Message(f"x@{DOMAIN}", "Security code", now + timedelta(seconds=1), "code 90817263"))
+        mail.msgs.append(Message(f"x@{DOMAIN}", "Security code", now + timedelta(seconds=1), "code 90817263", AR))
 
     res = await cotp.fetch_code(cfg, sender_domain=DOMAIN, clicked_at=now, source=mail, sleep=sleep,
                                 monotonic=lambda: ticks["t"])
@@ -482,7 +483,7 @@ async def test_waits_for_a_newer_message_when_the_newest_has_no_code(cfg):
 
 async def test_mail_before_the_click_is_ignored(cfg):
     now = datetime.now(UTC)
-    mail = Mail([Message(f"x@{DOMAIN}", "Security code", now - timedelta(minutes=3), "code 90817263")])
+    mail = Mail([Message(f"x@{DOMAIN}", "Security code", now - timedelta(minutes=3), "code 90817263", AR)])
     cfg.grants.otp_unattended_wait_s = 0
     res = await cotp.fetch_code(cfg, sender_domain=DOMAIN, clicked_at=now, source=mail)
     assert res.status == "no_message" and res.code is None
@@ -646,3 +647,124 @@ async def test_code_never_reaches_tool_output_for_the_llm(tmp_path, monkeypatch)
 def test_extract_code_fallback_is_unambiguous_or_nothing():
     assert cotp.extract_code("Mensaje", "Gebruik 739182 om verder te gaan") == "739182"
     assert cotp.extract_code("Mensaje", "Referentie 739182, dossier 551203") is None
+
+
+# ------------------------------------------------------------------ review round 2: sender authentication, config trust
+
+def _forged(code, auth=()):
+    now = datetime.now(UTC)
+    return [*_mail("Zx81Qa7P", now - timedelta(seconds=10)),
+            Message(f"Hiring <no-reply@{DOMAIN}>", "Security code", now + timedelta(seconds=2),
+                    f"Your security code: {code}", auth_results=tuple(auth))]
+
+
+@pytest.mark.parametrize("auth", [
+    (),                                                                                  # no Authentication-Results
+    (f"mx.example.com; dkim=fail header.d={DOMAIN}; spf=fail; dmarc=fail header.from={DOMAIN}",),
+    ("mx.example.com; dkim=pass header.d=evil.example.net; dmarc=none",),                 # signed by someone else
+    (f"mx.example.com; dkim=pass header.d={DOMAIN}.evil.example.net",),                   # lookalike signer
+    ("mx.example.com; spf=pass smtp.mailfrom=evil.example.net", AR[0]),                  # forged A-R below the top
+])
+async def test_forged_from_never_supplies_a_code(tmp_path, monkeypatch, auth):
+    s = esettings(tmp_path)
+    consent.store_for(s).issue_consent(600)
+    monkeypatch.setattr("job_apply_mcp.ingest.sources.make_source", lambda *a, **k: Mail(_forged("Fq4Rg8Ht", auth)))
+    drv = AutoCodeDriver("Fq4Rg8Ht")
+    e, book = engine(tmp_path, s, drv)
+    r = await _submit(e)
+    assert r.status == "roadblock" and "not DKIM/DMARC-verified" in r.detail
+    assert drv.entered == [] and book.state(POSTING.ref)["state"] == "unknown"     # forged code never typed, and
+    assert (await _submit(e)).status == "needs_human" and drv.submits == 1           # the real one is not waited for
+
+
+@pytest.mark.parametrize(("hdr", "ok"), [
+    (f"mx.example.com; dkim=pass header.d=mail.{DOMAIN}", True),
+    (f"mx.example.com; dkim=pass header.i=@{DOMAIN}", True),
+    (f"mx.example.com; dkim=fail header.d={DOMAIN}; dmarc=pass (p=reject) header.from={DOMAIN}", True),
+    (f"mx.example.com; dkim=pass (comment; with semicolon) header.d={DOMAIN}", True),
+    (f"mx.example.com; dmarc=pass header.from=not{DOMAIN}", False),
+    (f"mx.example.com; dkim=neutral header.d={DOMAIN}", False),
+    ("mx.example.com; none", False),
+])
+def test_authentication_results_parsing(hdr, ok):
+    m = Message(f"a@{DOMAIN}", "s", None, "", auth_results=(hdr,))
+    assert cotp.authenticated(m, DOMAIN) is ok
+
+
+def test_trusted_authserv_ids_pick_the_receiving_servers_header():
+    forged_top = "attacker.example.net; dkim=pass header.d=" + DOMAIN
+    m = Message(f"a@{DOMAIN}", "s", None, "", auth_results=(forged_top, "mx.example.com; dkim=fail header.d=x"))
+    assert cotp.authenticated(m, DOMAIN) is True                     # without ids: topmost header only
+    assert cotp.authenticated(m, DOMAIN, ["mx.example.com"]) is False
+    good = Message(f"a@{DOMAIN}", "s", None, "", auth_results=("other; none", f"mx.example.com; dkim=pass header.d={DOMAIN}"))
+    assert cotp.authenticated(good, DOMAIN, ["MX.example.com"]) is True
+
+
+def test_client_supplied_messages_never_carry_authentication():
+    m = Message.from_dict({"sender": f"a@{DOMAIN}", "subject": "code", "snippet": "123456",
+                           "auth_results": [AR[0]], "Authentication-Results": AR[0]})
+    assert m.auth_results == () and not cotp.authenticated(m, DOMAIN)
+
+
+def test_raw_mail_parses_authentication_results():
+    from job_apply_mcp.ingest.sources import message_from_bytes
+    m = message_from_bytes(_eml(f"a@{DOMAIN}", 1, "code 77778888"))
+    assert m.auth_results == AR and cotp.authenticated(m, DOMAIN)
+
+
+def _write_user_config(text):
+    from job_apply_mcp import paths
+    f = paths.config_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+    f.chmod(0o600)
+    return f
+
+
+@pytest.mark.parametrize(("env", "val"), [
+    ("JOB_APPLY__VERIFICATION__SENDER_DOMAINS__GREENHOUSE", "gmail.com"),
+    ("JOB_APPLY__INGEST__SOURCE", "mbox"),
+    ("JOB_APPLY__INGEST__PATH", "/tmp/forged-mail"),
+    ("JOB_APPLY__INGEST__IMAP__HOST", "imap.evil.example.net"),
+])
+def test_mail_settings_from_env_disable_unattended_codes(monkeypatch, env, val):
+    assert load_settings()._otp_mail_trusted is True
+    monkeypatch.setenv(env, val)
+    assert load_settings()._otp_mail_trusted is False
+
+
+@pytest.mark.parametrize("toml", ['[verification.sender_domains]\ngreenhouse = "gmail.com"\n',
+                                  '[verification]\ntrusted_authserv_ids = ["attacker.example.net"]\n',
+                                  '[ingest]\nsource = "mbox"\npath = "/tmp/forged-mail"\n'])
+def test_mail_settings_from_project_file_disable_unattended_codes(tmp_path, toml):
+    (tmp_path / "job-apply-mcp.toml").write_text(toml)
+    assert load_settings(tmp_path)._otp_mail_trusted is False
+
+
+def test_mail_settings_from_trusted_user_config_are_honoured(tmp_path):
+    _write_user_config('[ingest]\nsource = "imap"\n[ingest.imap]\nhost = "imap.example.com"\n'
+                       '[verification]\ntrusted_authserv_ids = ["mx.example.com"]\n')
+    assert load_settings(tmp_path)._otp_mail_trusted is True
+    (tmp_path / "job-apply-mcp.toml").write_text('[ingest.imap]\nhost = "imap.evil.example.net"\n')
+    assert load_settings(tmp_path)._otp_mail_trusted is False
+
+
+async def test_untrusted_mail_settings_mean_no_mail_read(tmp_path, monkeypatch):
+    s = esettings(tmp_path)
+    s._otp_mail_trusted = False
+    consent.store_for(s).issue_consent(600)
+    mail = Mail(_mail("Zx81Qa7P"))
+    monkeypatch.setattr("job_apply_mcp.ingest.sources.make_source", lambda *a, **k: mail)
+    drv = AutoCodeDriver("Zx81Qa7P")
+    e, book = engine(tmp_path, s, drv)
+    r = await _submit(e)
+    assert r.status == "roadblock" and "trusted user config" in r.detail
+    assert mail.fetches == 0 and drv.entered == [] and book.state(POSTING.ref)["state"] == "unknown"
+
+
+def test_mail_scope_alias_for_sibling_modules(cfg):
+    assert consent.active(cfg, "mail") is None
+    consent.store_for(cfg).issue_consent(600, scopes=["otp_unattended"])
+    assert consent.active(cfg, "mail") is not None and consent.use(cfg, "mail", "ref=x") is not None
+    with pytest.raises(ValueError):
+        consent.active(cfg, "mailbox")

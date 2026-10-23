@@ -10,7 +10,8 @@ The interface for other modules is deliberately small:
     with consent.run_context(run_id): ...    optional: a --per-run consent covers exactly this run
     consent.end_run(settings)                optional: close this run's --per-run consent early
 
-Scopes: approve_submissions, captcha_attempt, otp_unattended, credentials (reserved). Nothing here mints a consent;
+Scopes: approve_submissions, captcha_attempt, otp_unattended (alias `mail`, used by sign-up email verification),
+credentials (reserved). Nothing here mints a consent;
 only `job-apply-mcp consent` in an interactive terminal does.
 """
 from __future__ import annotations
@@ -24,8 +25,17 @@ __all__ = ["CONSENT_SCOPES", "DEFAULT_SCOPES", "Consent", "ConsentStore", "activ
            "run_context", "status", "store_for", "use"]
 
 
+# Accepted spellings from sibling modules; each maps to exactly one real scope.
+SCOPE_ALIASES = {"mail": "otp_unattended", "otp": "otp_unattended"}
+
+
+def _scope(scope: str) -> str:
+    return SCOPE_ALIASES.get(scope, scope)
+
+
 def active(settings: Any, scope: str) -> Consent | None:
     """Read-only. The consent covering `scope` for this run, or None. Raises ValueError for an unknown scope."""
+    scope = _scope(scope)
     if scope not in CONSENT_SCOPES:
         raise ValueError(f"unknown consent scope {scope!r}; known: {sorted(CONSENT_SCOPES)}")
     try:
@@ -37,6 +47,7 @@ def active(settings: Any, scope: str) -> Consent | None:
 def use(settings: Any, scope: str, detail: str = "") -> Consent | None:
     """Record one unattended action under `scope`, or None when no consent covers it (caller keeps today's
     human path). NEVER pass a verification code or other secret in `detail`."""
+    scope = _scope(scope)
     if scope not in CONSENT_SCOPES:
         raise ValueError(f"unknown consent scope {scope!r}; known: {sorted(CONSENT_SCOPES)}")
     try:
