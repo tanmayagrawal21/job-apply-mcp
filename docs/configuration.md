@@ -120,6 +120,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `tiers` | `dict[str, LLMTier]` | `{"small": {"provider": "ollama", "model": "qwen3:4b", "max_tokens": 256, "temperature":...` |  |
 | `task_tiers` | `dict[str, LLMTier]` | `{"narrative": {"provider": "ollama", "model": "gemma4:12b-it-qat", "max_tokens": 1200, ...` |  |
 | `fallbacks` | `dict[str, list[LLMTier]]` | `{"small": [{"provider": "ollama", "model": "qwen2.5:7b", "max_tokens": 256, "temperatur...` |  |
+| `local_only_classes` | `list[str]` | `["essay", "essay_review"]` |  |
 | `allow_cloud` | `bool` | `true` | if False, cloud providers (incl. client) are skipped; falls to local ones |
 | `timeout_s` | `float` | `120.0` | per-call wall clock |
 | `retries` | `int` | `2` | transient-error retries per candidate |
@@ -131,7 +132,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `warmup_tiers` | `list[str]` | `["small"]` | tiers/task tiers to preload |
 | `system_prefix` | `dict[str, str]` | `{"field": "You fill job application forms. Answer concisely and factually. No preamble....` |  |
 | `heavy_parallel` | `int` | `1` | concurrent calls to `heavy` local models (one big model resident on 16 GB) |
-| `heavy_classes` | `list[str]` | `["narrative", "review"]` |  |
+| `heavy_classes` | `list[str]` | `["narrative", "review", "essay", "essay_review"]` |  |
 | `providers` | `dict[str, dict[str, Any]]` | `{"ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"}, "openai_compat"...` |  |
 
 ## `[policy]`

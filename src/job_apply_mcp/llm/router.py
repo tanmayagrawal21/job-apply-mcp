@@ -156,10 +156,15 @@ class LLMRouter:
         except Exception:  # noqa: BLE001
             return True
 
+    def local_only(self, task_class: str | None) -> bool:
+        """Task classes that never leave the machine (llm.local_only_classes, ADR-0057)."""
+        return bool(task_class) and task_class in self.cfg.local_only_classes
+
     async def _candidates(self, tier: str) -> list[LLMTier]:
         out = []
+        local = self.local_only(tier)
         for c in [self._tier_cfg(tier), *self.cfg.fallbacks.get(tier, [])]:
-            if not self.cfg.allow_cloud and self._is_cloud(c.provider):
+            if (local or not self.cfg.allow_cloud) and (c.provider == "client" or self._is_cloud(c.provider)):
                 continue
             if not await self._available(c.provider):
                 continue
@@ -280,6 +285,9 @@ class LLMRouter:
             return LLMResult(ok=True, text=str(known), data=known, tier="rules", provider="rules",
                              model="-", task_class="rules")
         self._kick_warmup()
+        if self.local_only(task.task_class) and task.task_class not in self.cfg.task_tiers:
+            return LLMResult(ok=False, error=f"local-only class '{task.task_class}' has no task tier",
+                             task_class=task.task_class or "field")   # fail closed: never a cloud tier (ADR-0057)
         d = await self.decide(task)
         if force_tier:
             d["tier"] = force_tier
@@ -289,7 +297,8 @@ class LLMRouter:
         if task.task_class != d["task_class"]:   # the class decides heavy-semaphore membership in _call_cand
             task = task.model_copy(update={"task_class": d["task_class"]})
         base = {"task_class": d["task_class"], "score": d["score"], "reasons": d["reasons"]}
-        order = self._order(d["tier"])
+        local = self.local_only(d["task_class"])
+        order = [d["tier"]] if local else self._order(d["tier"])   # local-only classes never escalate (ADR-0057)
         schema = task.json_schema
         esc, last_err = 0, ""
         for i, tier in enumerate(order):
@@ -322,7 +331,7 @@ class LLMRouter:
             if i + 1 < len(order):
                 esc += 1
                 self.escalation_count += 1
-        if self.cfg.client_on_failure and self.cfg.allow_cloud:
+        if self.cfg.client_on_failure and self.cfg.allow_cloud and not local:
             # every local option failed or timed out: let the calling agent write it
             ct = ClientTask(field_key=task.key, instruction=task.prompt, system=task.system,
                             max_tokens=task.max_tokens or 512, json_schema=task.json_schema)
