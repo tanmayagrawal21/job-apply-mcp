@@ -3,8 +3,8 @@
   "name": "applywise",
   "display_name": "ApplyWise",
   "version": "0.1.0",
-  "description": "Job search and form filling that stops for a human before every irreversible step.",
-  "long_description": "ApplyWise searches public job boards and fills application forms. It is a dry run until the user changes their own config, every real submit needs human approval by default, and CAPTCHAs, verification codes, account creation and flagged attestations always go to the user. Run `applywise init` and `applywise doctor` in a terminal first.",
+  "description": "Job search and form filling; dry run by default, real submits need your approval or consent.",
+  "long_description": "ApplyWise searches public job boards and fills application forms. It is a dry run until the user changes their own config. Real submits, ATS logins (from the OS keychain, never shown to the model) and emailed verification codes need the user's approval, or a consent window the user opens in a terminal; visible CAPTCHAs and flagged attestations always go to the user. Run `applywise init` and `applywise doctor` in a terminal first.",
   "author": {
     "name": "tanmayagrawal21"
   },

@@ -44,10 +44,13 @@ the server can do, and must not run unreviewed code.
      mcpb manifest and pin); `uv sync --locked`, ruff, pytest, `uv build`, smoke-test both scripts from the wheel.
    - `pypi` (environment `pypi`, `id-token: write` only): `pypa/gh-action-pypi-publish` with Trusted Publishing.
      No API token exists anywhere.
-   - `mcp-registry` (`id-token: write`, `contents: read`): a pinned `mcp-publisher` release, sha256-verified; waits
-     until PyPI serves the version; `mcp-publisher login github-oidc` then `publish`.
-   - `github-release` (`contents: write`): packs `mcpb/` with a pinned `@anthropic-ai/mcpb` and creates the GitHub
-     Release for the tag with the `.mcpb` bundle and the sdist and wheel.
+   - `mcp-registry` (environment `pypi`, `id-token: write`, `contents: read`): a pinned `mcp-publisher` release,
+     sha256-verified; waits until PyPI serves the version; `mcp-publisher login github-oidc` then `publish`.
+   - `mcpb` (`contents: read`): `npm ci --ignore-scripts` from the committed `.github/release-tools/package-lock.json`
+     (pins `@anthropic-ai/mcpb` and every transitive package), validates and packs `mcpb/`, uploads the `.mcpb`.
+   - `github-release` (`contents: write`): only downloads the artifacts and runs `gh release create` with the
+     `.mcpb`, sdist and wheel. It checks out nothing and runs no third-party code, so the one job that can write
+     to the repository cannot be reached by an npm or PyPI dependency.
 9. **Committed allowlist for the public identity (reconciled with ADR-0051).** The scanner has two separate
    mechanisms. The committed `.privacy-allow` (regexes, read from the repo root in every mode, diff included)
    is the long-standing exemption for fictional fixtures. ADR-0051's `--allow` file holds salted fingerprints of

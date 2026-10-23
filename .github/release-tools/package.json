@@ -1,0 +1,8 @@
+{
+  "name": "applywise-release-tools",
+  "private": true,
+  "description": "Pinned build tools for .github/workflows/release.yml (installed with npm ci --ignore-scripts).",
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2"
+  }
+}

@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.tanmayagrawal21/applywise",
   "title": "ApplyWise",
-  "description": "Job search and form filling that stops for a human before every irreversible step.",
+  "description": "Job search and form filling; dry run by default, real submits need your approval or consent.",
   "repository": {
     "url": "https://github.com/tanmayagrawal21/job-apply-mcp",
     "source": "github"

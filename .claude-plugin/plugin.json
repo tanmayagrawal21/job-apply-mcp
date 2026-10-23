@@ -1,7 +1,7 @@
 {
   "name": "applywise",
   "displayName": "ApplyWise",
-  "description": "Find jobs and fill applications through the job-apply MCP server. Dry run by default; a human approves every real submit, solves every CAPTCHA and types every verification code.",
+  "description": "Find jobs and fill applications through the job-apply MCP server. Dry run by default. Real submits, logins and emailed codes need your approval, or a consent window you open yourself; visible CAPTCHAs always come back to you.",
   "version": "0.1.0",
   "author": {
     "name": "tanmayagrawal21"

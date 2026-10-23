@@ -37,10 +37,13 @@ Never use a branch name (`@main`) or an unversioned `uvx applywise`.
    - **build**: fails unless the tag equals every version above; `uv sync --locked`, ruff, pytest, `uv build`,
      smoke-tests `applywise version` and `job-apply-mcp version` from the wheel.
    - **pypi**: publishes the sdist and wheel with Trusted Publishing (OIDC, environment `pypi`). No token.
-   - **mcp-registry**: waits until PyPI serves `applywise==X.Y.Z` (the registry checks the `mcp-name:` line in
+   - **mcp-registry** (environment `pypi`): waits until PyPI serves `applywise==X.Y.Z` (the registry checks the `mcp-name:` line in
      the PyPI description), then `mcp-publisher login github-oidc` and `mcp-publisher publish` for `server.json`.
-   - **github-release**: packs `mcpb/` into `applywise-X.Y.Z.mcpb` and creates the GitHub Release with it plus
-     the sdist and wheel.
+   - **mcpb** (read-only): `npm ci --ignore-scripts` from `.github/release-tools/package-lock.json`, then packs
+     `mcpb/` into `applywise-X.Y.Z.mcpb` and uploads it as an artifact.
+   - **github-release** (the only job that can write): downloads the artifacts and creates the GitHub Release
+     with the `.mcpb`, sdist and wheel. To bump mcpb, edit `.github/release-tools/package.json` and run
+     `npm install --package-lock-only --ignore-scripts` there.
 6. Follow-up PR: switch `.mcp.json` to `"args": ["applywise@<version>"]` and the two `init`/`doctor` commands in
    `skills/applywise/SKILL.md` to `uvx applywise@<version> ...` (the test checks they match).
 
@@ -63,7 +66,8 @@ tag; skip any already done.
   `release.yml`, environment `pypi`. No API token is created or stored. (Once the project exists, the same
   entry lives under the project's *Settings → Publishing*.)
 - **(b) GitHub environment.** In the repository, *Settings → Environments → New environment* named `pypi`.
-  Recommended: required reviewer = you, and deployment tags limited to `v*`.
+  Recommended: required reviewer = you, and deployment tags limited to `v*`. Both the PyPI and the MCP Registry
+  jobs use it.
 - **(c) MCP Registry.** Nothing to set up: GitHub OIDC from this repository proves the `io.github.<owner>`
   namespace. Manual fallback: `mcp-publisher login github && mcp-publisher publish` from the repo root.
 - **(d) mcp.so.** Submit the repository URL at https://mcp.so/submit.
