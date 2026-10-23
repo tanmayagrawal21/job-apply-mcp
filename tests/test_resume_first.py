@@ -222,7 +222,7 @@ async def test_weak_draft_fails_gate_strong_passes_with_rubric():
           "summary": POSTING_SUMMARY, "facts": FACTS, "corpus": corpus}
     weak = await write_text(FakeRouter(prose=WEAK), cfg, **kw)
     assert weak.status == "needs_human" and any(v.kind == "quality" for v in weak.violations) and weak.scorecard
-    good_review = {"scores": {"argument": 5, "voice": 4, "precision": 5, "specificity": 4}, "at_least_as_strong": True,
+    good_review = {"scores": {"argument": 5, "voice": 4, "precision": 5, "specificity": 4}, "at_least_as_strong": True, "attestation": False,
                    "why": "ok", "edits": []}
     r = FakeRouter(prose=STRONG, review=good_review)
     ok = await write_text(r, cfg, **kw)

@@ -28,6 +28,7 @@ CASES = [
     ("grants", "use_keyring", "false", "", lambda s: s.grants.use_keyring, True),
     ("browser", "captcha_handoff", "false", "", lambda s: s.browser.captcha_handoff, True),
     ("browser", "captcha_policy", "attempt", "", lambda s: s.browser.captcha_policy, "handoff"),
+    ("writing", "review_client_prose", "false", "", lambda s: s.writing.review_client_prose, True),   # ADR-0044
 ]
 IDS = [f"{c[0]}.{c[1]}" if c[0] else c[1] for c in CASES]
 
@@ -46,7 +47,7 @@ def test_string_value_in_project_file_cannot_relax(tmp_path, monkeypatch, caplog
 
 # pydantic also accepts "off"/"on"/"0"/"1" for bools; the env layer must be judged the same way
 ENV_RAW = {"dry_run": "off", "auto_approve": "on", "apply_enabled": "1", "dev_mode": "no", "use_keyring": "0",
-           "captcha_handoff": "f"}
+           "captcha_handoff": "f", "review_client_prose": "off"}
 
 
 @pytest.mark.parametrize(("sect", "key", "raw", "user", "get", "safe"), CASES, ids=IDS)
