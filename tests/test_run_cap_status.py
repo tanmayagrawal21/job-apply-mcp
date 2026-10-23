@@ -232,3 +232,17 @@ async def test_control_status_reports_last_run_mode(tmp_path):
     rep = await r.run(links=GH[:1], sources=["links"], dry_run=True)
     info = await last_run_info(r.s.paths.data_dir)
     assert info["dry_run"] is True and info["run_id"] == rep["run_id"]
+
+
+async def test_unresolved_label_secret_straddling_the_cut_is_fully_redacted(tmp_path):
+    from job_apply_mcp.core import secrets
+    r, _ad, _ = make(tmp_path)
+    secret = "zq-fict-secret-value-9981"
+    label = "A" * 50 + secret + " tail"            # the secret spans position 60
+    secrets._remember(secret)
+    try:
+        why = r._unresolved_why(["q0"], type("C", (), {"form": ApplicationForm(
+            ref="r", submit_via=["api"], fields=[F("q0", label)])})())
+    finally:
+        secrets.forget(secret)
+    assert "zq-fict" not in why and "secret-value" not in why and "9981" not in why

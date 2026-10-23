@@ -438,8 +438,8 @@ class IntakeRunner:
         labels = {f.key: f.label for f in getattr(form, "fields", [])}
         shown = []
         for k in keys[:7]:
-            lab = " ".join(str(labels.get(k) or k).split())
-            shown.append(redact(lab if len(lab) <= 60 else lab[:59] + "…"))
+            lab = redact(" ".join(str(labels.get(k) or k).split()))   # redact the whole label, then cut
+            shown.append(lab if len(lab) <= 60 else lab[:59] + "…")
         more = ", …" if len(keys) > 7 else ""
         return f"{len(keys)} unresolved ({len(shown)} shown): {', '.join(shown)}{more}"
 
