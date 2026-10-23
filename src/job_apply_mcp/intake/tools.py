@@ -28,7 +28,8 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
         >= 1; default intake.max_applications or run_size feedback, capped at intake.max_applications_cap) caps the
         eligible postings handled, the same in dry and live mode; skipped and ineligible ones do not count. Every URL
         goes through adapter detection, plan, gates, dedupe and submit. Prose is deferred: jobs needing unapproved
-        prose are skipped, not blocking. With the client mail source pass `messages` [{id, from, to, subject, date,
+        prose are skipped, not blocking, unless the trusted config enables the essay autodraft (ADR-0057: local
+        writer + local strict reviewer; approved essays are filled and labelled `assumed`, rejected ones need the owner). With the client mail source pass `messages` [{id, from, to, subject, date,
         body}]. Pending feedback is applied first (see plan_context). Returns the run report: one status per posting,
         each with `why`: submitted, confirmed, dry_run_ok (a live run would submit it), needs_human (the owner must
         act: unresolved fields, review gate, awaiting approval), quota_blocked (a live quota refused it), skipped

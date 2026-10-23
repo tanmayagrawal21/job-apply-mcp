@@ -120,6 +120,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `tiers` | `dict[str, LLMTier]` | `{"small": {"provider": "ollama", "model": "qwen3:4b", "max_tokens": 256, "temperature":...` |  |
 | `task_tiers` | `dict[str, LLMTier]` | `{"narrative": {"provider": "ollama", "model": "gemma4:12b-it-qat", "max_tokens": 1200, ...` |  |
 | `fallbacks` | `dict[str, list[LLMTier]]` | `{"small": [{"provider": "ollama", "model": "qwen2.5:7b", "max_tokens": 256, "temperatur...` |  |
+| `local_only_classes` | `list[str]` | `["essay", "essay_review"]` |  |
 | `allow_cloud` | `bool` | `true` | if False, cloud providers (incl. client) are skipped; falls to local ones |
 | `timeout_s` | `float` | `120.0` | per-call wall clock |
 | `retries` | `int` | `2` | transient-error retries per candidate |
@@ -131,7 +132,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `warmup_tiers` | `list[str]` | `["small"]` | tiers/task tiers to preload |
 | `system_prefix` | `dict[str, str]` | `{"field": "You fill job application forms. Answer concisely and factually. No preamble....` |  |
 | `heavy_parallel` | `int` | `1` | concurrent calls to `heavy` local models (one big model resident on 16 GB) |
-| `heavy_classes` | `list[str]` | `["narrative", "review"]` |  |
+| `heavy_classes` | `list[str]` | `["narrative", "review", "essay", "essay_review"]` |  |
 | `providers` | `dict[str, dict[str, Any]]` | `{"ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"}, "openai_compat"...` |  |
 
 ## `[policy]`
@@ -263,6 +264,8 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `reviewer` | `str` | `"client"` | "client" = review is a client_task; "router" = task_class="review" |
 | `timeout_s` | `float` | `90.0` |  |
 | `mode` | `Literal['inline', 'deferred']` | `"inline"` |  |
+| `local_essays` | `bool` | `false` | ADR-0057: local essay autodraft (with reviewer="router"); trusted user config only |
+| `client_essay_words` | `int` | `200` | word limit given to the client for an essay with no max length (ADR-0057) |
 | `review_client_prose` | `bool` | `true` | agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044) |
 | `rules` | `list[str]` | `["Formal register; no contractions.", "Every factual claim must map to a provided profi...` |  |
 | `banned_phrases` | `list[str]` | `["excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "w...` |  |

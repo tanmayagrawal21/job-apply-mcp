@@ -4,7 +4,9 @@ Order of a run:
   1. replay stored feedback onto policy / profile answers; list what was new since the last run
   2. collect candidates in priority order: explicit links > emailed links > discovery
   3. adapter detection (an unknown host becomes an `unsupported_site` row; it never costs a plan slot)
-  4. plan every candidate concurrently with prose deferred (writing.mode="deferred" for this task only)
+  4. plan every candidate concurrently with prose deferred (writing.mode="deferred" for this task only); with the
+     essay autodraft (ADR-0057) the open essays of prose-only postings are then drafted and strictly reviewed locally,
+     one posting at a time in priority order, while the run still has room
   5. take the first `max_applications` eligible postings (ready to submit, or needing the owner), the same way in
      dry and live mode (ADR-0049); skipped and ineligible ones never count. Submit the ready ones concurrently
      across hosts, at most 1 per host, under intake.submit_parallel; the engine's gates, dedupe, approvals, control
@@ -34,6 +36,12 @@ from .store import CATEGORIES, LEGACY_STATUS, IntakeStore
 SOURCES = ("links", "mail", "discovery")
 _RUN_LOCKS: dict[str, asyncio.Lock] = {}   # one run at a time per data dir (process-wide)
 _SLD = {"co", "com", "ac", "org", "net", "gov", "edu", "or", "ne", "go"}
+
+
+def _assumed_value(a: Any) -> Any:
+    """Run-report view of an assumed answer: autodrafted essays are shortened (full text in the evidence folder)."""
+    from ..apply import essays
+    return essays.short(a.value) if essays.is_essay(a.source) else a.value
 
 
 def site_key(host: str) -> str:
@@ -71,6 +79,7 @@ class Cand:
     approval_id: str | None = None
     deferred: bool = False  # not handled this run (over the cap): its mail message stays unprocessed
     assumed: list[dict[str, Any]] | None = None   # ADR-0052: answers the agent assumed for this posting
+    prose: list[dict[str, Any]] | None = None     # ADR-0057: unresolved essays for the MCP client to draft
 
     def row(self) -> dict[str, Any]:
         r = {"ref": self.target, "url": self.target if self.target.startswith("http") else None,
@@ -288,13 +297,17 @@ class IntakeRunner:
                        for p in pending_pa],
                    "awaiting_confirmation": getattr(self, "_awaiting", []),
                    # ADR-0052: every assumed answer, labelled, per posting
-                   "assumed": {c.target: c.assumed for c in cands if c.target and c.assumed}}
+                   "assumed": {c.target: c.assumed for c in cands if c.target and c.assumed},
+                   # ADR-0057: unresolved essays the MCP client can draft and hand back through submit_application
+                   "client_tasks": {c.target: {"approval_id": c.approval_id, "essays": c.prose}
+                                    for c in cands if c.target and c.prose}}
             rep = self._build(run_id, rows, cfg.report_rows)
             await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live",
                                           "autonomy": self.s.answers.autonomy})
         out = {**rep, "mode": "dry_run" if dry else "live", "autonomy": self.s.answers.autonomy,
                "max_applications": n or None, "assumed": ctx["assumed"] or None,
-               "plan_context": {k: v for k, v in ctx.items() if v and k != "assumed"}}
+               "client_tasks": ctx["client_tasks"] or None,
+               "plan_context": {k: v for k, v in ctx.items() if v and k not in ("assumed", "client_tasks")}}
         if preview is not None:
             out["live_preview"] = preview
         return {k: v for k, v in out.items() if v is not None}
@@ -362,45 +375,108 @@ class IntakeRunner:
             WRITE_MODE.reset(tok)
         eligible: list[Cand] = []   # in priority order; status "" = ready to submit
         postings: set[str] = set()
+        prose_only: list[tuple[Cand, Any]] = []
         for c, out in zip(pool, outs, strict=True):
-            if isinstance(out, BaseException):
-                c.status, c.why = "failed", f"plan: {type(out).__name__}: {out}"
-                continue
-            cached = self._cached(c.target)
-            if cached is not None:
-                c.co, c.title = cached.posting.company or c.co, cached.posting.title or c.title
-            g = out.plan.gate
-            c.approval_id = out.approval_id
-            c.assumed = [{"key": a.key, "value": a.value, "rule": a.source, **({"why": a.rationale} if a.rationale else {})}
-                         for a in out.plan.answers if a.assumed] or None
-            if g.decision != Decision.submit:
-                c.status = "skipped" if g.decision == Decision.skip else "needs_human"
-                c.why = "; ".join(g.reasons) or g.decision.value
-                if c.status == "needs_human":
-                    eligible.append(c)
-                continue
-            if out.plan.unresolved:
-                human = [t["key"] for t in out.client_tasks if t.get("needs_human")]
-                prose = [t["key"] for t in out.client_tasks if t.get("deferred") or t.get("draft") is not None
-                         or t.get("timed_out")]
-                if prose and not human and set(out.plan.unresolved) <= set(prose):
-                    c.status = "skipped"
-                    c.why = f"required prose not approved yet: {prose[:4]} (draft_answers, then submit)"
-                else:
-                    c.status, c.why = "needs_human", self._unresolved_why(out.plan.unresolved, cached)
-                    eligible.append(c)
-                continue
-            pid = cached.posting.ref if cached is not None else _key(c.target)
-            if pid in postings:
-                c.status, c.why = "skipped", "duplicate: same posting earlier in this run"
-                continue
-            postings.add(pid)
-            eligible.append(c)
+            if self._classify(c, out, postings, eligible) == "prose":
+                prose_only.append((c, out))
+        if prose_only and getattr(self.s, "essay_autodraft", False):
+            await self._autodraft(prose_only, pool, postings, eligible, n)
+        seen = {id(e) for e in eligible}
+        for c, out in prose_only:
+            if not c.status and id(c) not in seen:
+                c.status = "skipped"
+                c.why = (f"required prose not approved yet: {self._prose_keys(out)[:4]} (client_tasks: draft each, then "
+                         "submit_application with the answers; or draft_answers)")
         # The cap counts every eligible posting (ready, or needing the owner) in priority order, in dry and live mode
         # alike (ADR-0049). Skipped, failed and unsupported postings never take a slot.
+        order = {id(c): i for i, c in enumerate(pool)}
+        eligible.sort(key=lambda c: order[id(c)])
         for c in eligible[n:]:
             c.status, c.why, c.deferred = "skipped", f"max_applications={n} reached", True
         await self._submit_all([c for c in eligible[:n] if not c.status], dry)
+
+    @staticmethod
+    def _prose_keys(out: Any) -> list[str]:
+        return [t["key"] for t in out.client_tasks if t.get("deferred") or t.get("draft") is not None
+                or t.get("timed_out")]
+
+    def _classify(self, c: Cand, out: Any, postings: set[str], eligible: list[Cand]) -> str:
+        """Set the candidate's status from its plan. Returns "prose" when only deferred prose is open (the caller
+        drafts it, or skips the posting), else ""."""
+        if isinstance(out, BaseException):
+            c.status, c.why = "failed", f"plan: {type(out).__name__}: {out}"
+            return ""
+        cached = self._cached(c.target)
+        if cached is not None:
+            c.co, c.title = cached.posting.company or c.co, cached.posting.title or c.title
+        g = out.plan.gate
+        c.approval_id = out.approval_id
+        c.assumed = [{"key": a.key, "value": _assumed_value(a), "rule": a.source,
+                      **({"why": a.rationale} if a.rationale else {})}
+                     for a in out.plan.answers if a.assumed] or None
+        c.prose = self._client_essays(c, out, cached) or None
+        if g.decision != Decision.submit:
+            c.prose = None
+            c.status = "skipped" if g.decision == Decision.skip else "needs_human"
+            c.why = "; ".join(g.reasons) or g.decision.value
+            if c.status == "needs_human":
+                eligible.append(c)
+            return ""
+        if out.plan.unresolved:
+            human = [t["key"] for t in out.client_tasks if t.get("needs_human")]
+            prose = self._prose_keys(out)
+            if prose and not human and set(out.plan.unresolved) <= set(prose):
+                return "prose"
+            c.status, c.why = "needs_human", self._unresolved_why(out.plan.unresolved, cached)
+            eligible.append(c)
+            return ""
+        pid = cached.posting.ref if cached is not None else _key(c.target)
+        if pid in postings:
+            c.status, c.why = "skipped", "duplicate: same posting earlier in this run"
+            return ""
+        postings.add(pid)
+        eligible.append(c)
+        return ""
+
+    def _client_essays(self, c: Cand, out: Any, cached: Any) -> list[dict[str, Any]]:
+        """ADR-0057: every unresolved essay as a structured client task: prompt, grounding facts, word limit and how to
+        hand it back (submit_application answers, reviewed server-side per ADR-0044). Rejected local drafts are never
+        included."""
+        from ..apply.writing import client_essay_prompt
+        rows: list[dict[str, Any]] = []
+        fields = {f.key: f for f in getattr(getattr(cached, "form", None), "fields", [])}
+        prof = getattr(self.engine, "profile", None)
+        for t in out.client_tasks:
+            if not t.get("prose") or t["key"] not in out.plan.unresolved:
+                continue
+            f = fields.get(t["key"])
+            label = t.get("label") or (f.label if f else t["key"])
+            facts = list(prof.facts(label, 14)) if prof is not None else list(t.get("context", {}).get("facts", []))
+            summary = getattr(cached, "summary", "") or t.get("context", {}).get("posting", "")
+            prompt, words = client_essay_prompt(label=label, company=c.co, title=c.title, summary=summary,
+                                                facts=facts, cfg=self.s.writing, max_len=t.get("max_len") or None)
+            rows.append({"key": t["key"], "label": label, "required": bool(f.required) if f else True,
+                         "max_words": words, "max_len": t.get("max_len") or None, "prompt": prompt, "facts": facts})
+        return rows
+
+    async def _autodraft(self, prose_only: list[tuple[Cand, Any]], pool: list[Cand], postings: set[str],
+                         eligible: list[Cand], n: int) -> None:
+        """ADR-0057: draft the open essays (local writer + local strict reviewer, engine.draft) of prose-only postings
+        in priority order, one at a time so each gets its full writing.timeout_s, and only while the run still has
+        room under max_applications. A rejected or timed-out essay leaves its posting needing the owner."""
+        rank = {id(c): i for i, c in enumerate(pool)}
+        for c, _ in prose_only:
+            ahead = sum(1 for e in eligible if rank[id(e)] < rank[id(c)])
+            if ahead >= n:          # a posting this far down the order could never take a slot
+                break
+            try:
+                out = await self.engine.draft(c.target)
+            except Exception as e:  # noqa: BLE001 - one posting's drafting must not fail the run
+                c.status, c.why = "failed", f"draft: {type(e).__name__}: {e}"
+                continue
+            if self._classify(c, out, postings, eligible) == "prose":
+                c.status, c.why = "needs_human", "essay autodraft left prose open"
+                eligible.append(c)
 
     async def _submit_all(self, todo: list[Cand], dry: bool) -> None:
         by_host: OrderedDict[str, list[Cand]] = OrderedDict()
