@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import time
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ class Services:
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
         self._llm = None
+        self._plan_pages: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()   # last plan/draft per ref
         self._skills: list[str] | None = None
         self._desc: dict[str, Posting | None] = {}
         self._late: set[asyncio.Task] = set()   # timed-out board fetches left to finish into the cache (ADR-0043)
@@ -406,11 +408,31 @@ class Services:
             rows.append(r)
         return {"ref": f.ref, "via": f.submit_via, "fields": rows}
 
-    async def plan(self, ref_or_url: str) -> dict[str, Any]:
-        return (await self.engine.plan(ref_or_url)).compact()
+    async def plan(self, ref_or_url: str, cursor: int = 0) -> dict[str, Any]:
+        return await self._paged_plan("plan", ref_or_url, cursor)
 
-    async def draft(self, ref_or_url: str) -> dict[str, Any]:
-        return (await self.engine.draft(ref_or_url)).compact()
+    async def draft(self, ref_or_url: str, cursor: int = 0) -> dict[str, Any]:
+        return await self._paged_plan("draft", ref_or_url, cursor)
+
+    async def _paged_plan(self, kind: str, ref: str, cursor: int) -> dict[str, Any]:
+        """plan/draft output in pages (ADR-0049). cursor=0 runs the plan; cursor>0 pages the last result for `ref`
+        from memory (no re-plan, no new approval_id). Every page stays within response_budget_chars."""
+        from .core.output import page_sections
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            raise ValueError(f"cursor must be a whole number >= 0 (got {cursor!r})")
+        pages = self._plan_pages
+        if cursor:
+            full = pages.get((kind, ref))
+            if full is None:
+                raise ValueError(f"no {kind} result in memory for this ref; call it with cursor=0 first")
+        else:
+            out = await (self.engine.plan(ref) if kind == "plan" else self.engine.draft(ref))
+            full = out.compact()
+            pages[(kind, ref)] = full
+            pages.move_to_end((kind, ref))
+            while len(pages) > 32:
+                pages.popitem(last=False)
+        return page_sections(full, cursor, self.settings.response_budget_chars)
 
     async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None,
                      approval_id: str | None = None, approver: Any = None) -> dict[str, Any]:

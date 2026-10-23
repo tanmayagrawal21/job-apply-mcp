@@ -214,7 +214,7 @@ async def test_explicit_links_and_unsupported_site(tmp_path):
     r, ad, _ = make(tmp_path)
     rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1", "https://careers.example.com/jobs/9",
                              "https://boards.greenhouse.io/acme/jobs/1?utm_source=dup"], sources=["links"])
-    assert rep["counts"] == {"dry_run": 1, "unsupported_site": 1}
+    assert rep["counts"] == {"dry_run_ok": 1, "unsupported_site": 1}
     assert rep["unsupported_site"][0]["ref"] == "https://careers.example.com/jobs/9"
     assert "careers.example.com" in rep["unsupported_site"][0]["why"]
     assert ad.submits == ["https://boards.greenhouse.io/acme/jobs/1"]
@@ -227,16 +227,16 @@ async def test_links_file(tmp_path):
     f.write_text("# saved\nhttps://boards.greenhouse.io/acme/jobs/1\n\nhttps://jobs.lever.co/globex/abc\n")
     r, ad, _ = make(tmp_path)
     rep = await r.run(links_file=str(f), sources=["links"])
-    assert rep["counts"] == {"dry_run": 2} and len(ad.submits) == 2
+    assert rep["counts"] == {"dry_run_ok": 2} and len(ad.submits) == 2
 
 
 async def test_max_applications_respected(tmp_path):
     r, ad, _ = make(tmp_path)
     links = [f"https://boards.greenhouse.io/co{i}/jobs/{i}" for i in range(5)]
     rep = await r.run(links=links, sources=["links"], max_applications=2)
-    assert rep["counts"] == {"dry_run": 2, "skipped": 3} and len(ad.submits) == 2
+    assert rep["counts"] == {"dry_run_ok": 2, "skipped": 3} and len(ad.submits) == 2
     assert all("max_applications=2" in x["why"] for x in rep["skipped"])
-    assert [x["ref"] for x in rep["dry_run"]] == links[:2]         # priority order within the source
+    assert [x["ref"] for x in rep["dry_run_ok"]] == links[:2]         # priority order within the source
 
 
 async def test_priority_order_links_then_mail_then_discovery(tmp_path):
@@ -248,20 +248,20 @@ async def test_priority_order_links_then_mail_then_discovery(tmp_path):
 
     r, _ad, _ = make(tmp_path, search=search, intake__plan_factor=1.0)
     rep = await r.run(links=["https://boards.greenhouse.io/explicit/jobs/1"], max_applications=2)
-    got = [(x["src"], x["ref"]) for x in rep["dry_run"]]
+    got = [(x["src"], x["ref"]) for x in rep["dry_run_ok"]]
     assert got[0] == ("links", "https://boards.greenhouse.io/explicit/jobs/1") and got[1][0] == "mail"
     assert calls == []                                    # the pool was full before discovery
     assert all(x["src"] == "mail" for x in rep["skipped"])
     rep2 = await r.run(sources=["discovery"], max_applications=3)
-    assert calls[0]["limit"] == 3 and rep2["dry_run"][0]["ref"] == "greenhouse:disco:1"
+    assert calls[0]["limit"] == 3 and rep2["dry_run_ok"][0]["ref"] == "greenhouse:disco:1"
 
 
 async def test_mail_ids_recorded_and_deferred_mail_kept(tmp_path):
-    r, _ad, _ = make(tmp_path)
+    r, _ad, _ = make(tmp_path, live=True)   # only a live run consumes mail (ADR-0049)
     r.s.intake.plan_factor = 1.0
     rep = await r.run(sources=["mail"], max_applications=1)
     # message 1: greenhouse + lever + unsupported; only one planned, the rest deferred -> message stays unprocessed
-    assert rep["counts"]["dry_run"] == 1 and rep["counts"]["unsupported_site"] == 1
+    assert rep["counts"]["submitted"] == 1 and rep["counts"]["unsupported_site"] == 1
     assert await r.store.processed(["<links-001@fixture.test>", "<links-002@fixture.test>"]) == set()
     rep = await r.run(sources=["mail"], max_applications=10)
     assert await r.store.processed(["<links-001@fixture.test>", "<links-002@fixture.test>"]) == {
@@ -296,7 +296,7 @@ async def test_feedback_applied_in_next_run(tmp_path):
     assert ctx["applied_feedback"][0] == "deny company ^Acme$" and len(ctx["applied_feedback"]) == 4
     assert [a["id"] for a in ctx["awaiting_confirmation"]] == [ans["id"]]
     assert rep2["skipped"][0]["ref"] == links[0] and "excluded employer" in rep2["skipped"][0]["why"]
-    assert rep2["counts"]["dry_run"] == 2                       # run_size 10 - 8
+    assert rep2["counts"]["dry_run_ok"] == 2                       # run_size 10 - 8
     assert "favorite editor" not in eng.profile.p.answers      # a client answer is not owner authority
     assert r.s.policy.salary_floor == 90000 and "intern" in r.s.policy.exclude_title_patterns
     assert (await r.confirm_feedback(ans["id"], "human:cli"))["confirmed_by"] == "human:cli"
@@ -311,7 +311,7 @@ async def test_feedback_applied_in_next_run(tmp_path):
 
 
 async def test_submit_parallel_across_hosts_one_per_host(tmp_path):
-    ad = MultiAdapter(delay=0.1)
+    ad = MultiAdapter(delay=0.5)   # large next to planning overhead on slow CI runners (Windows 3.11 hit 0.81 s at 0.1)
     r, ad, _ = make(tmp_path, adapter=ad, live=True)
     links = [f"https://boards.greenhouse.io/g{i}/jobs/{i}" for i in range(3)] + \
             [f"https://jobs.lever.co/l{i}/x{i}" for i in range(3)]
@@ -320,7 +320,7 @@ async def test_submit_parallel_across_hosts_one_per_host(tmp_path):
     took = time.monotonic() - t0
     assert rep["counts"] == {"submitted": 6}
     assert max(ad.peak_host.values()) == 1 and ad.peak == 2
-    assert took < 6 * 0.1                                   # serial would be 0.6 s
+    assert took < 6 * 0.5                                   # serial would be 3.0 s; 3 per host in parallel ~1.5 s
 
 
 async def test_live_human_mode_hands_off_for_approval(tmp_path):
@@ -328,8 +328,8 @@ async def test_live_human_mode_hands_off_for_approval(tmp_path):
     r.s.apply.approval_mode = "human"
     r.s.apply.auto_approve = False
     rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
-    assert rep["counts"] == {"handed_off": 1} and "approve" in rep["handed_off"][0]["why"]
-    assert rep["handed_off"][0]["approval_id"] and ad.submits == []
+    assert rep["counts"] == {"needs_human": 1} and "approve" in rep["needs_human"][0]["why"]
+    assert rep["needs_human"][0]["approval_id"] and ad.submits == []
 
 
 async def test_deferred_prose_skipped_without_blocking(tmp_path):
@@ -338,7 +338,7 @@ async def test_deferred_prose_skipped_without_blocking(tmp_path):
     r, _ad, _ = make(tmp_path, adapter=MultiAdapter(prose_for=[prose]), router=router)
     assert r.s.writing.mode == "inline"                     # the run defers on its own
     rep = await r.run(links=[prose, "https://boards.greenhouse.io/plain/jobs/2"], sources=["links"])
-    assert rep["counts"] == {"dry_run": 1, "skipped": 1}
+    assert rep["counts"] == {"dry_run_ok": 1, "skipped": 1}
     assert "prose not approved" in rep["skipped"][0]["why"]
     assert not [c for c, _ in router.calls if c in ("narrative", "review")]
 

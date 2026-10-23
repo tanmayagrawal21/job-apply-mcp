@@ -52,6 +52,27 @@ Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]
 | Transports | stdio (default) and streamable HTTP with bearer token |
 | Operations | `init`, `doctor`, Dockerfile, CI on Linux/macOS/Windows |
 
+### Run statuses
+
+Every posting in a `run_applications` / `run_report` result has exactly one status, with a `why` where useful
+(ADR-0049):
+
+| Status | Meaning |
+|---|---|
+| `submitted` | Live submit sent; a confirmation may follow |
+| `confirmed` | Reconciliation confirmed the submission |
+| `dry_run_ok` | Dry run complete: a live run would submit it (see `live_preview` for quotas) |
+| `needs_human` | You must act; `why` says what (unresolved fields, review gate, awaiting approval, verification code) |
+| `quota_blocked` | A daily, per-platform or per-run quota refused the live submit; nothing was sent |
+| `skipped` | Not attempted; `why` says why (policy, duplicate, prose not approved yet, `max_applications` reached) |
+| `unsupported_site` | No enabled adapter handles the host |
+| `unknown` | Outcome unclear (for example a roadblock after the click); verify by hand |
+| `failed` | An error |
+
+`max_applications` (a whole number >= 1) caps the eligible postings a run handles (ready to submit, or needing you),
+the same in dry and live mode; skipped and unsupported postings do not count. A dry run also returns
+`live_preview` with what the current live quotas would allow.
+
 ## Safety model
 
 1. **Dry-run by default.** `dry_run = true` unless you change it; `init` always writes it.
