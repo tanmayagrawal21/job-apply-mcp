@@ -206,6 +206,23 @@ class PlanOut(BaseModel):
 WRITE_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("jam_write_mode", default=None)
 
 
+# ADR-0055 (#87): short factual fields (school, degree, employer, title, city, name) take a short single-line fact, not
+# prose: the client-prose review gate (ADR-0044) is for multi-sentence prose. The deterministic text guard still runs.
+_SHORT_FACT_KEYS = frozenset({"first_name", "last_name", "full_name", "preferred_name", "school", "degree", "discipline",
+                              "recent_school", "recent_degree", "degree_type", "last_internship", "recent_company",
+                              "recent_title", "current_company", "current_title", "location", "residence_city_state",
+                              "country", "zip"})
+_SENTENCE_BREAK = re.compile(r"[.!?;:]\s+\S|[\r\n]")
+
+
+def _short_fact(f: FormField, v: Any) -> bool:
+    """A recognised short-fact field whose value is one short line (at most 100 characters and 12 words, one sentence)."""
+    if not isinstance(v, str) or canonical_key(f.label) not in _SHORT_FACT_KEYS:
+        return False
+    t = v.strip()
+    return 0 < len(t) <= 100 and len(t.split()) <= 12 and not _SENTENCE_BREAK.search(t)
+
+
 def _write_mode(settings: Settings) -> str:
     return WRITE_MODE.get() or settings.writing.mode
 
@@ -382,7 +399,8 @@ class ApplyEngine:
                                 stop_phrases=self.s.policy.stop_phrases,
                                 company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona,
                                 job_country=job_country(ctx.posting.location, ctx.posting.countries,
-                                                        ctx.posting.locations))
+                                                        ctx.posting.locations),
+                                job_locations=[ctx.posting.location, *ctx.posting.locations])
         answers = sal_answers + list(mapped.answers)
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
         voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
@@ -1059,7 +1077,7 @@ class ApplyEngine:
             if bad:                                              # never reaches the reviewer or the form
                 failed.append(self._task(f, ctx, {"needs_review": True, "draft": str(v)[:2000], "violations": [bad]}))
                 continue
-            if f.kind not in _FREE_TEXT_KINDS or self._deterministic(f, v):
+            if f.kind not in _FREE_TEXT_KINDS or self._deterministic(f, v) or _short_fact(f, v):
                 continue
             if not isinstance(v, str):                           # lists, dicts, ...: never coerced into free text
                 failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
@@ -1170,6 +1188,7 @@ class ApplyEngine:
         except PermissionError as e:
             return SubmitResult(ref=ref, status="error", detail=str(e))
         supplied = dict(answers or {})
+        plan_unresolved: list[str] = []
         try:
             if not dry:
                 await self.expire_pending()
@@ -1194,6 +1213,7 @@ class ApplyEngine:
                 base = cached.answers
             elif dry or self.s.apply.auto_approve_active:
                 plan = await self._plan_ctx(ref, ctx)
+                plan_unresolved = list(plan.plan.unresolved)
                 if plan.plan.gate.decision != Decision.submit:
                     return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
                                         else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
@@ -1210,9 +1230,15 @@ class ApplyEngine:
             hits = self._stop_hits(ctx.form)
             if hits:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
+            # ADR-0055 (#86): the unresolved list comes from the same mapping call as the answers (the cached or fresh
+            # plan), in the plan's order and in full, so plan_application and submit_application never disagree
+            planned = (cached.unresolved if cached else plan_unresolved)
+            open_ = [k for k in planned if eff.get(k) in (None, "")]
             missing = [f.key for f in ctx.form.fields if f.required and f.key not in eff and not geo_kind(f)]
             if missing:
-                return SubmitResult(ref=ref, status="needs_human", detail=f"unresolved required: {missing[:8]}")
+                listed = list(dict.fromkeys([k for k in open_ if k in missing] + missing))
+                return SubmitResult(ref=ref, status="needs_human", detail=f"unresolved required: {listed}",
+                                    unresolved=list(dict.fromkeys(open_ + missing)))
             blocked = await self._control("submit", ctx, dry, eff)
             if blocked:
                 return SubmitResult(ref=ref, status="needs_human", detail=blocked)

@@ -106,6 +106,7 @@ class Authorization(BaseModel):
     requires_sponsorship_now: bool | None = None   # ADR-0053: "do you require sponsorship NOW?" only
     citizen: bool | None = None            # citizenship of the home country
     citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
+    us_person: bool | None = None          # ADR-0055: U.S. person (ITAR/EAR); unset falls back to an explicit policy.us_person
     countries: dict[str, CountryAuthorization] = Field(default_factory=dict)
 
     @model_validator(mode="before")
