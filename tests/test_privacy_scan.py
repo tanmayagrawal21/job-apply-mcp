@@ -103,7 +103,11 @@ def test_allow_file_accepts_and_never_prints(tmp_path, capsys):
     assert ps.main(base) == 1  # no allow file: unchanged behaviour
     capsys.readouterr()
     allow = tmp_path / "allow.txt"
-    allow.write_text("# comment\nLICENSE\t1\n@urls\n")
+    allow.write_text("# comment\n@salt s3cr3t-salt\n@urls\n")
+    assert ps.main([*base, "--allow", str(allow), "--fingerprint", "1"]) == 0
+    fp = capsys.readouterr().out.strip()
+    assert fp == ps.fingerprint("s3cr3t-salt", "quokka fernbrook") and "quokka" not in fp
+    allow.write_text(f"# comment\n@salt s3cr3t-salt\nLICENSE\t{fp}\n@urls\n")
     assert ps.main([*base, "--allow", str(allow)]) == 0
     cap = capsys.readouterr()
     out = cap.out + cap.err
@@ -127,13 +131,51 @@ def test_allow_file_partial_still_fails(tmp_path, capsys):
     assert "quokka" not in (cap.out + cap.err).lower()
 
 
-def test_allow_rules_scope():
-    rules = ps.AcceptRules([("docs/*.md", "2")], urls=False)
+def test_allow_rules_scope_and_reorder():
+    fp = ps.fingerprint("pepper", "wombatico")
+    rules = ps.AcceptRules([("docs/*.md", fp)], salt="pepper")
+    rules.bind(["otherterm", "wombatico"])
     assert rules.accepts("docs/a.md", "private term #2", (0, 3), "abc")
     assert not rules.accepts("docs/a.md", "private term #1", (0, 3), "abc")
+    rules.bind(["wombatico", "otherterm"])  # terms file reordered: rule follows the term, not the index
+    assert rules.accepts("docs/a.md", "private term #1", (0, 3), "abc")
+    assert not rules.accepts("docs/a.md", "private term #2", (0, 3), "abc")
     assert not rules.accepts("src/a.md", "private term #2", (0, 3), "abc")
     assert not rules.accepts("docs/a.md", "email address", (0, 3), "abc")
 
 
 def test_mask_merges_overlaps():
     assert ps.mask_spans("abcdefghij", [(2, 5), (4, 8)]) == "ab***ij"
+
+
+def test_urls_accepts_only_owner_segment():
+    rules = ps.AcceptRules([], urls=True)
+    rules.bind(["zephyrine"])
+
+    def accepted(line):
+        hits = ps.scan_line(line, ["zephyrine"])
+        return [rules.accepts("README.md", k, sp[0], line) for k, sp in hits if k.startswith("private term")]
+
+    assert accepted("see https://github.com/zephyrine/job-apply-mcp") == [True]
+    assert accepted("https://github.com/Zephyrine") == [True]
+    assert accepted("https://github.com/acme/x/issues?q=Zephyrine+Quill+lives+at+12+Elm") == [False]
+    assert accepted("https://github.com/acme/zephyrine-tools") == [False]
+    assert accepted("https://github.com/zephyrine21/x") == [True]  # term inside the owner handle
+    assert accepted("zephyrine at https://example.com/zephyrine") == [False, False]
+
+
+def test_diff_and_staged_ignore_allow_file(tmp_path, capsys):
+    repo = _repo(tmp_path, {"README.md": "base\n"})
+    terms = tmp_path / "terms.txt"
+    terms.write_text("quokkaf\n")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("*\t*\n@urls\n")
+    (repo / "README.md").write_text("base\nsee https://github.com/quokkaf/demo\n")
+    _git(repo, "add", "-A")
+    args = ["--root", str(repo), "--terms", str(terms), "--allow", str(allow)]
+    assert ps.main([*args, "--staged"]) == 1
+    _git(repo, "commit", "-qm", "add url")
+    assert ps.main([*args, "--diff", "HEAD~1"]) == 1
+    assert ps.main(args) == 0  # whole tree: accepted
+    out = capsys.readouterr()
+    assert out.out.count("README.md:2: [private term #1]") == 2 and "quokkaf" not in (out.out + out.err)

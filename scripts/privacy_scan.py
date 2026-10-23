@@ -6,14 +6,17 @@ Private terms (--terms FILE, one per line, case-insensitive) are never printed; 
 "private term #k" and a masked excerpt.
 
 --allow FILE (default ~/.config/job-apply-mcp/privacy_allow.txt when it exists; kept outside the repo)
-accepts known, owner-approved findings. Each line is `<path-glob>\t<term-index-or-*>` or the token
-`@urls` (a private term inside an https://github.com/... URL). Accepted findings are counted, never
-printed. Exit 0 when every finding is accepted, 1 otherwise.
+accepts known, owner-approved findings in whole-tree scans only (--diff/--staged always report added lines).
+Lines: `@salt <random>`, `<path-glob>\t<fingerprint-or-*>` (fingerprint = --fingerprint K, a salted SHA-256
+prefix of term #K, so rules survive reordering and hold no value), or `@urls` (a private term inside the owner
+segment of https://github.com/<owner>[/...], nowhere else in the URL). Accepted findings are counted, never printed.
+Exit 0 when every finding is accepted, 1 otherwise.
 """
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import math
 import re
 import subprocess
@@ -23,7 +26,8 @@ from pathlib import Path
 
 ALLOW_FILE = ".privacy-allow"
 DEFAULT_ACCEPT_FILE = Path("~/.config/job-apply-mcp/privacy_allow.txt")
-GITHUB_URL_RE = re.compile(r"https://github\.com/[^\s)\]>\"'`]*", re.IGNORECASE)
+GITHUB_OWNER_RE = re.compile(r"https://github\.com/([A-Za-z0-9-]{1,39})(?=[/\s)\]>\"'`.,]|$)", re.IGNORECASE)
+FP_RE = re.compile(r"[0-9a-f]{12}")
 SAFE_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "localhost", "users.noreply.github.com",
                       "noreply.github.com", "anthropic.com"}
 SAFE_EMAIL_SUFFIXES = (".example", ".test", ".invalid", ".localhost", ".example.com", ".example.org")
@@ -86,16 +90,28 @@ def load_allow(root: Path) -> list[re.Pattern]:
 @dataclass
 class AcceptRules:
     """Owner-approved findings, loaded from a file outside the repo. Holds no term values."""
-    pairs: list[tuple[str, str]]  # (path glob, term index as str or "*")
+    pairs: list[tuple[str, str]]  # (path glob, term fingerprint or "*")
     urls: bool = False
+    salt: str = ""
+    fps: tuple[str, ...] = ()  # fingerprint of term #k at index k-1, set by bind()
+
+    def bind(self, terms: list[str]) -> None:
+        self.fps = tuple(fingerprint(self.salt, t) for t in terms) if self.salt else ()
 
     def accepts(self, path: str, kind: str, span: tuple[int, int], line: str) -> bool:
         m = re.fullmatch(r"private term #(\d+)", kind)
         if not m:
             return False
-        if self.urls and any(u.start() <= span[0] and span[1] <= u.end() for u in GITHUB_URL_RE.finditer(line)):
+        if self.urls and any(u.start(1) <= span[0] and span[1] <= u.end(1) for u in GITHUB_OWNER_RE.finditer(line)):
             return True
-        return any(fnmatch.fnmatchcase(path, g) and t in ("*", m.group(1)) for g, t in self.pairs)
+        k = int(m.group(1))
+        fp = self.fps[k - 1] if 0 < k <= len(self.fps) else None
+        return any(fnmatch.fnmatchcase(path, g) and (t == "*" or t == fp) for g, t in self.pairs)
+
+
+def fingerprint(salt: str, term: str) -> str:
+    """Short salted SHA-256 prefix of a term: stable across reordering, not reversible without the salt."""
+    return hashlib.sha256(f"{salt}\0{term.strip().lower()}".encode()).hexdigest()[:12]
 
 
 def load_accept(path: str | None) -> AcceptRules | None:
@@ -112,9 +128,12 @@ def load_accept(path: str | None) -> AcceptRules | None:
         if raw == "@urls":
             rules.urls = True
             continue
+        if raw.startswith("@salt "):
+            rules.salt = raw[6:].strip()
+            continue
         parts = raw.split("\t")
-        if len(parts) != 2 or not (parts[1].strip() == "*" or parts[1].strip().isdigit()):
-            print(f"note: allow file line {no} ignored (expected <path-glob><TAB><term-index-or-*>)", file=sys.stderr)
+        if len(parts) != 2 or not (parts[1].strip() == "*" or FP_RE.fullmatch(parts[1].strip())):
+            print(f"note: allow file line {no} ignored (expected <path-glob><TAB><fingerprint-or-*>)", file=sys.stderr)
             continue
         rules.pairs.append((parts[0].strip(), parts[1].strip()))
     return rules
@@ -262,11 +281,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--terms", metavar="FILE", help="private terms file (never printed)")
     ap.add_argument("--allow", metavar="FILE",
                     help=f"accepted-findings file outside the repo (default {DEFAULT_ACCEPT_FILE} if present)")
+    ap.add_argument("--fingerprint", type=int, metavar="K",
+                    help="print the allow-file fingerprint of private term #K (needs --terms and an @salt line)")
     ap.add_argument("--root", default=".", help="repo root (default: cwd)")
     a = ap.parse_args(argv)
 
     root = Path(git(Path(a.root), "rev-parse", "--show-toplevel").strip())
     allow, terms, accept = load_allow(root), load_terms(a.terms), load_accept(a.allow)
+    if accept is not None:
+        accept.bind(terms)
+    if a.fingerprint is not None:
+        if accept is None or not accept.salt or not 0 < a.fingerprint <= len(terms):
+            print("error: --fingerprint needs --terms, an allow file with an @salt line, and a valid K", file=sys.stderr)
+            return 2
+        print(accept.fps[a.fingerprint - 1])
+        return 0
     if a.terms and not Path(a.terms).expanduser().exists():
         print(f"note: terms file {a.terms} not found; skipping private terms", file=sys.stderr)
     findings: list[Finding] = []
@@ -280,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             diff = git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", base)
             added = git(root, "diff", "--name-only", "--diff-filter=A", base).split()
         for path, lines in parse_diff(diff).items():
-            findings += scan_text(path, lines, terms, allow, accept)
+            findings += scan_text(path, lines, terms, allow)  # added lines: never auto-accepted
         for path in added:
             findings += check_file_type(path, allow)
     else:
