@@ -311,7 +311,7 @@ async def test_feedback_applied_in_next_run(tmp_path):
 
 
 async def test_submit_parallel_across_hosts_one_per_host(tmp_path):
-    ad = MultiAdapter(delay=0.1)
+    ad = MultiAdapter(delay=0.5)   # large next to planning overhead on slow CI runners (Windows 3.11 hit 0.81 s at 0.1)
     r, ad, _ = make(tmp_path, adapter=ad, live=True)
     links = [f"https://boards.greenhouse.io/g{i}/jobs/{i}" for i in range(3)] + \
             [f"https://jobs.lever.co/l{i}/x{i}" for i in range(3)]
@@ -320,7 +320,7 @@ async def test_submit_parallel_across_hosts_one_per_host(tmp_path):
     took = time.monotonic() - t0
     assert rep["counts"] == {"submitted": 6}
     assert max(ad.peak_host.values()) == 1 and ad.peak == 2
-    assert took < 6 * 0.1                                   # serial would be 0.6 s
+    assert took < 6 * 0.5                                   # serial would be 3.0 s; 3 per host in parallel ~1.5 s
 
 
 async def test_live_human_mode_hands_off_for_approval(tmp_path):
