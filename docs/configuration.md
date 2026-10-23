@@ -363,6 +363,17 @@ run_applications (ADR-0045): explicit links, emailed links and discovery through
 | `report_rows` | `int` | `20` | rows per category in compact reports |
 | `salary_max_multiple` | `float` | `3.0` | feedback never raises an ask above this x the largest configured salary value (0 = off) |
 
+## `[accounts]`
+
+ATS logins and accounts from the OS-keychain vault (ADR-0046). Every use also needs an open consent window (`consent.active(settings, "credentials")`). Secrets are never in config: only `job-apply-mcp vault add` writes them, into the keychain.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_login_attempts` | `int` | `2` | per host per run; a lockout or wrong password stops the host |
+| `auto_create` | `bool` | `false` | USER CONFIG FILE ONLY: create an ATS account when no vault entry exists |
+| `signup_email` | `str` | `""` | username for new accounts; "" = the email answer of the application form |
+| `password_length` | `int` | `24` |  |
+
 ## `[search.sessions]`
 
 Search sessions (ADR-0024): the first search_jobs call builds the full result set once; pages read from it.

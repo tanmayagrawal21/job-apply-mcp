@@ -1,4 +1,5 @@
-"""Command line: ``job-apply-mcp [serve] | init | doctor | version | run | report | feedback`` (ADR-0020, ADR-0045).
+"""Command line: ``job-apply-mcp [serve] | init | doctor | version | grant | vault | run | report | feedback``
+(ADR-0020, ADR-0045).
 
 With no subcommand the server starts on stdio, exactly like 0.1, so existing MCP client configs keep working.
 """
@@ -10,8 +11,8 @@ from pathlib import Path
 
 from . import __version__
 
-COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "run", "report",
-            "feedback"}
+COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "vault",
+            "run", "report", "feedback"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser(name, help=h).add_argument("rest", nargs="*")
     sub.add_parser("grant", help="HUMAN ONLY (needs a TTY): time-limited grants for agents (--list, --revoke)"
                    ).add_argument("rest", nargs=argparse.REMAINDER)
+    sub.add_parser("vault", help="HUMAN ONLY (needs a TTY): ATS logins in the OS keychain (add, list, rm)"
+                   ).add_argument("rest", nargs=argparse.REMAINDER)
     return p
 
 
@@ -97,6 +100,11 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(grant_cli(args.rest, load_settings()))
     elif args.cmd in ("run", "report", "feedback"):
         raise SystemExit(_intake_cli(args))
+    elif args.cmd == "vault":
+        from .accounts.cli import cli as vault_cli
+        from .config import load_settings
+
+        raise SystemExit(vault_cli(args.rest, load_settings()))
     elif args.cmd == "doctor":
         from .doctor import run_doctor
 

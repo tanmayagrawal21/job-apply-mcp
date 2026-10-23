@@ -435,7 +435,11 @@ class Services:
         return await self.engine.resolve_submission(ref, outcome, note, actor, evidence)
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        return {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
+        out: dict[str, Any] = {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
+        from .accounts.runtime import RUN_REPORT  # ADR-0046: login flags for this run (never secrets)
+        if flags := RUN_REPORT.compact():
+            out["account_flags"] = flags
+        return out
 
     async def list_applications(self, status: str, limit: int, cursor: int) -> dict[str, Any]:
         page = await self.store.list(status="" if status in ("", "all") else status, limit=limit, cursor=cursor)
