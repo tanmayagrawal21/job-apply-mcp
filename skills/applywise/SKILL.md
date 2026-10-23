@@ -35,8 +35,8 @@ On first use, call `health`. If it reports missing config or profile, ask the us
 terminal (same pin as the plugin's `.mcp.json`):
 
 ```bash
-uvx --from git+https://github.com/tanmayagrawal21/job-apply-mcp@ecdde2d1d4ceddffedd01605586f592f8e6669d5 job-apply-mcp init
-uvx --from git+https://github.com/tanmayagrawal21/job-apply-mcp@ecdde2d1d4ceddffedd01605586f592f8e6669d5 job-apply-mcp doctor
+uvx --from git+https://github.com/tanmayagrawal21/job-apply-mcp@fb2f51e738fe44f64879281880bb365a4b7133ec job-apply-mcp init
+uvx --from git+https://github.com/tanmayagrawal21/job-apply-mcp@fb2f51e738fe44f64879281880bb365a4b7133ec job-apply-mcp doctor
 ```
 
 `init` writes `config.toml`, `profile.toml` and `controls.toml` and prints their paths. The user fills in the
@@ -98,15 +98,23 @@ size, salary, answers; sensitive answers go through `answer_profile_question`).
 
 Even with consent or agent mode, visible CAPTCHAs, flagged attestations and unresolved fields still stop.
 
-## 6. Fields the server never answers for the user
+## 6. Owner-only fields and the autonomy level
 
 - **Contact and messaging permissions** (SMS, WhatsApp, calls, email, marketing, job alerts, talent community)
-  are owner-only: never Yes, never an automatic No. Only the user's own `optin:<channel>` answer applies, and only
-  to a single, plain permission question; anything else stays unresolved. Do not fill these yourself.
-- Attestations, EEO/demographics beyond the profile, legal and export-control questions follow the profile or
-  stay unresolved.
-- **Coming:** an `answers.autonomy` setting will let the user choose how much the server may answer on its own
-  (for example safe default declines). Until it ships, the rules above apply.
+  are owner-only: never Yes. Only the user's own `optin:<channel>` answer applies, and only to a single, plain
+  permission question. Do not fill these yourself.
+- **`answers.autonomy`** (user config only; a project file or env var can only make it stricter) decides what
+  the server may assume when the user is away:
+  - `strict` (default): every unresolved field waits for the user.
+  - `safe_default`: declines a plain contact or marketing permission ask, uses the configured "how did you hear"
+    default, and picks "decline to self-identify" on EEO fields.
+  - `infer`: also answers required skill or experience questions about a tool or technology from the resume (Yes
+    only when it clearly says so). Willingness, availability, location and terms questions are never inferred.
+- Every assumed answer is labelled `assumed` (plan, evidence, run report); after `promote_after` repeats the user
+  is asked once and their answer is reused. Show the user the `assumed` list when reviewing a run.
+- **Hard limits are never assumed at any level:** authorization, visa and identity, background and screening,
+  attestations, legal agreements and employment terms, salary without a policy, start date and location facts,
+  and compound questions. They stay with the profile or the user.
 
 ## 7. CAPTCHAs and handoff
 

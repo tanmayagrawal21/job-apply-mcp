@@ -5,7 +5,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/tanmayagrawal21/job-apply-mcp@ecdde2d1d4ceddffedd01605586f592f8e6669d5",
+        "git+https://github.com/tanmayagrawal21/job-apply-mcp@fb2f51e738fe44f64879281880bb365a4b7133ec",
         "job-apply-mcp"
       ]
     }

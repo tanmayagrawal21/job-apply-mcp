@@ -133,10 +133,10 @@ rolling 24 h), per-platform (10) and per-run (10) limits; a user config can lowe
    You review the results afterwards (`list_applications`). `consent --revoke` ends it; `consent_status` (MCP) is
    read-only and no tool can create one.
 9. **Owner-only questions (ADR-0050).** Contact, messaging and marketing permissions (SMS, WhatsApp, calls, email,
-   job alerts, talent community) are never answered Yes and never declined automatically; only your own
-   `optin:<channel>` answer applies, and only to a single, plain permission question. Authorization and
-   sponsorship come only from structured per-country facts. Coming: an `answers.autonomy` setting to choose how
-   much the server may answer on its own (for example safe default declines).
+   job alerts, talent community) are never answered Yes; only your own `optin:<channel>` answer applies, and only
+   to a single, plain permission question. Otherwise they stay with you, or are declined (labelled `assumed`) at
+   `answers.autonomy = "safe_default"` or `"infer"` (item 5). Authorization and sponsorship come only from
+   structured per-country facts.
 
 ## Transports
 

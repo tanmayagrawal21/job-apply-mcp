@@ -20,7 +20,8 @@ the server can do, and must not run unreviewed code.
    rejected by a test. Bump procedure: `docs/release.md`.
 3. **Generic skill only.** The skill teaches the safe flow (init/doctor, search → plan → dry run → review →
    approve, runs from links, self-emailed links and discovery with `max_applications`, run statuses, the
-   profile builder, per-country authorization, owner-only contact permissions, human vs agent approval, the
+   profile builder, per-country authorization, owner-only contact permissions, `answers.autonomy` levels and
+   labelled assumptions, human vs agent approval, the
    consent window and unattended codes, vault logins the model never sees, CAPTCHA handoff, grants, daily
    limits, never run the human-only CLI commands). It contains no
    personal data and no machine paths. The maintainer's private review/privacy/control/QA agents are not shipped.
