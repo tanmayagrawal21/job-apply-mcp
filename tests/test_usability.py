@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 
 import httpx
@@ -258,9 +259,10 @@ def test_trusted_user_config_is_the_resolved_xdg_file(monkeypatch, tmp_path):
     assert config._user_file_trusted(other)[0] is False
     monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(other))      # an explicit file is never trusted to relax settings
     assert config._user_file_trusted(paths.config_file())[0] is False
-    f.chmod(0o666)
     monkeypatch.delenv("JOB_APPLY_MCP_CONFIG")
-    assert config._user_file_trusted(f)[0] is False             # group/world-writable
+    if os.name != "nt":                                         # POSIX mode bits only; Windows skips this check
+        f.chmod(0o666)
+        assert config._user_file_trusted(f)[0] is False         # group/world-writable
 
 
 def test_server_info_version_is_the_package_version():
