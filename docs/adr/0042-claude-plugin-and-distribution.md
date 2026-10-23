@@ -1,6 +1,6 @@
 # ADR-0042: Claude Code plugin "ApplyWise" and public distribution
 
-Status: proposed (draft PR; release waits for the open fixes and a clean QA round) · Date: 2026-10-22
+Status: accepted (owner authorized publishing once merged) · Date: 2026-10-22, amended 2026-10-23
 
 ## Context
 The owner wants the server installable as a Claude Code plugin named ApplyWise (id `applywise`) and listed in
@@ -19,8 +19,10 @@ the server can do, and must not run unreviewed code.
    now, and `uvx applywise@<version>` once PyPI has the release. A branch or unversioned spec is
    rejected by a test. Bump procedure: `docs/release.md`.
 3. **Generic skill only.** The skill teaches the safe flow (init/doctor, search → plan → dry run → review →
-   approve, human vs agent approval, CAPTCHA handoff, `captcha_policy=attempt` as user-config-only opt-in,
-   grants, daily limits, never passwords or CAPTCHAs, never run the human-only CLI commands). It contains no
+   approve, runs from links, self-emailed links and discovery with `max_applications`, run statuses, the
+   profile builder, per-country authorization, owner-only contact permissions, human vs agent approval, the
+   consent window and unattended codes, vault logins the model never sees, CAPTCHA handoff, grants, daily
+   limits, never run the human-only CLI commands). It contains no
    personal data and no machine paths. The maintainer's private review/privacy/control/QA agents are not shipped.
 4. **Safe defaults are tested.** With no user config: `dry_run=true`, `approval_mode=human`, `auto_approve=false`,
    `captcha_policy=handoff`, `writing.reviewer=client`, and daily/platform/run caps 25/10/10 (all non-zero), both
@@ -36,14 +38,26 @@ the server can do, and must not run unreviewed code.
 7. **MCPB bundle for Smithery.** MCPB manifest 0.4 has a `uv` server type that runs a Python entry point from a
    `pyproject.toml` without bundling dependencies, so `mcpb/` holds `manifest.json` (type `uv`), a pyproject that
    depends on `applywise==X.Y.Z`, and a three-line `src/server.py`. It can only be packed after the PyPI release.
-8. **Release workflow (not added in this PR).** Intended `.github/workflows/release.yml`: on tag `v*`; top-level
-   `permissions: {}`; job `build` (`contents: read`: check the tag equals every pinned version, `uv sync --locked`,
-   ruff, pytest, `uv build`, smoke-test both scripts, upload `dist/`); job `pypi` (environment `pypi`,
-   `id-token: write` only, `pypa/gh-action-pypi-publish`, trusted publishing, no tokens); job `mcp-registry`
-   (`id-token: write`, `contents: read`; download a pinned `mcp-publisher` release and verify its sha256, wait for
-   PyPI to serve the version, `mcp-publisher login github-oidc`, `publish`). All actions pinned by commit SHA.
-   Writing a workflow that publishes publicly was blocked by the agent's permission policy pending the owner's
-   explicit approval, so it is described here and in the PR for the owner to add or approve.
+8. **Release workflow** `.github/workflows/release.yml`, on tag `v*`, top-level `permissions: {}`, every action
+   pinned by commit SHA:
+   - `build` (`contents: read`): the tag must equal every pinned version (pyproject, plugin.json, server.json x2,
+     mcpb manifest and pin); `uv sync --locked`, ruff, pytest, `uv build`, smoke-test both scripts from the wheel.
+   - `pypi` (environment `pypi`, `id-token: write` only): `pypa/gh-action-pypi-publish` with Trusted Publishing.
+     No API token exists anywhere.
+   - `mcp-registry` (`id-token: write`, `contents: read`): a pinned `mcp-publisher` release, sha256-verified; waits
+     until PyPI serves the version; `mcp-publisher login github-oidc` then `publish`.
+   - `github-release` (`contents: write`): packs `mcpb/` with a pinned `@anthropic-ai/mcpb` and creates the GitHub
+     Release for the tag with the `.mcpb` bundle and the sdist and wheel.
+9. **Committed allowlist for the public identity (reconciled with ADR-0051).** The scanner has two separate
+   mechanisms. The committed `.privacy-allow` (regexes, read from the repo root in every mode, diff included)
+   is the long-standing exemption for fictional fixtures. ADR-0051's `--allow` file holds salted fingerprints of
+   private terms, so it must stay outside every repo and only applies to whole-tree scans; its in-repo refusal
+   is about that file, not `.privacy-allow`. CI's diff scan runs without a terms file, and a bare handle matches
+   no built-in detector (email, phone, address, home path, secret), so CI never flags the manifests. The owner's
+   local scans with private terms do, and `@urls` covers only `https://github.com/<owner>` URLs, not
+   `"name": "<owner>"`, the registry name `io.github.<owner>/applywise` or `marketplace add <owner>/...`. So
+   `.privacy-allow` keeps one regex per required line, anchored at both ends, holding only public identity strings
+   (the handle and the repo URL); no private term, fingerprint or salt is ever added there.
 
 ## Consequences
 - A root `.mcp.json` is also a project-scope MCP config: contributors who open this repo in Claude Code are asked
@@ -54,13 +68,15 @@ the server can do, and must not run unreviewed code.
 - The distribution rename changes `uv.lock`'s project entry only.
 - The owner's GitHub handle is on the private-terms list, but manifests, the registry name and the install command
   require it. `.privacy-allow` gets one fully anchored regex per required line (exact whole-line match), so no
-  other text on those lines, and no other file, is exempted. Prose docs and tests use `<owner>` or derive it from
-  `pyproject.toml`.
+  other text on those lines, and no other file, is exempted (item 9). Prose docs and tests use `<owner>` or derive
+  it from `pyproject.toml`.
+- Publishing needs one-time owner setup (PyPI trusted publisher, `pypi` environment); see `docs/release.md`.
 
 ## Verify
 `uv run pytest -q tests/test_plugin_packaging.py`; `claude plugin validate --strict .`;
 `claude --plugin-dir .` then `/mcp` shows `plugin:applywise:applywise` and `/applywise:applywise` loads the skill.
 
 ## Revert
-Delete `.claude-plugin/`, `.mcp.json`, `skills/applywise/`, `server.json`, `mcpb/`, `docs/release.md`, the test
+Delete `.claude-plugin/`, `.mcp.json`, `skills/applywise/`, `server.json`, `mcpb/`, `docs/release.md`,
+`.github/workflows/release.yml`, the identity lines in `.privacy-allow`, the test
 and this ADR; restore `name = "job-apply-mcp"` in `pyproject.toml`, `__init__.py` and the README section; `uv lock`.

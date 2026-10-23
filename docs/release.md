@@ -1,4 +1,4 @@
-# Cutting a release
+# Releasing ApplyWise
 
 ApplyWise ships through four channels from this one repository (ADR-0042):
 
@@ -25,48 +25,50 @@ is always pinned:
 
 Never use a branch name (`@main`) or an unversioned `uvx applywise`.
 
-## Bumping the pin (every release)
+## Cutting a release
 
-1. Pick the version `X.Y.Z` and set it in all of: `pyproject.toml`, `.claude-plugin/plugin.json`,
-   `server.json` (`version` and `packages[0].version`), `mcpb/manifest.json`, and `applywise==X.Y.Z` in
-   `mcpb/pyproject.toml`. Run `uv lock`.
-2. Add a `CHANGELOG.md` entry.
-3. Check: `uv run ruff check . && uv run pytest -q` and `claude plugin validate --strict .`
-4. Merge to `main` through a normal PR, then tag that merge commit: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-5. After the package is on PyPI, open a follow-up PR that sets `.mcp.json` to `"args": ["applywise@<version>"]` and
-   updates the two `init`/`doctor` commands in `skills/applywise/SKILL.md` to `uvx applywise@<version> ...` (the
-   test checks they match). Until PyPI is live, pin `.mcp.json` to the tag (`@vX.Y.Z`) or the tagged commit's SHA.
-6. Users get it with `claude plugin update applywise@applywise`. Because `plugin.json` sets `version`, users do
-   not receive changes until the version is bumped.
+1. Pick `X.Y.Z` and set it in all of: `pyproject.toml`, `.claude-plugin/plugin.json`, `server.json` (`version`
+   and `packages[0].version`), `mcpb/manifest.json`, and `applywise==X.Y.Z` in `mcpb/pyproject.toml`. Run
+   `uv lock`. Add a `CHANGELOG.md` entry.
+2. Check: `uv run ruff check . && uv run pytest -q` and `claude plugin validate --strict .`
+3. Merge to `main` through a normal PR (reviewer, privacy agent, fresh CI).
+4. Tag the merge commit and push the tag: `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
+5. `.github/workflows/release.yml` runs on the tag:
+   - **build**: fails unless the tag equals every version above; `uv sync --locked`, ruff, pytest, `uv build`,
+     smoke-tests `applywise version` and `job-apply-mcp version` from the wheel.
+   - **pypi**: publishes the sdist and wheel with Trusted Publishing (OIDC, environment `pypi`). No token.
+   - **mcp-registry**: waits until PyPI serves `applywise==X.Y.Z` (the registry checks the `mcp-name:` line in
+     the PyPI description), then `mcp-publisher login github-oidc` and `mcp-publisher publish` for `server.json`.
+   - **github-release**: packs `mcpb/` into `applywise-X.Y.Z.mcpb` and creates the GitHub Release with it plus
+     the sdist and wheel.
+6. Follow-up PR: switch `.mcp.json` to `"args": ["applywise@<version>"]` and the two `init`/`doctor` commands in
+   `skills/applywise/SKILL.md` to `uvx applywise@<version> ...` (the test checks they match).
 
-## Release workflow (pending)
+A failed job can be re-run from the Actions tab. PyPI never accepts the same version twice, so a broken release
+is fixed with a new patch version, not by moving the tag.
 
-The tag-triggered workflow `.github/workflows/release.yml` (build with uv, run tests, publish to PyPI with
-trusted publishing, then publish `server.json` to the MCP Registry with `mcp-publisher login github-oidc`) is
-**not in this repository yet**: adding a workflow that publishes publicly needs the owner's explicit sign-off.
-Its intended shape is in ADR-0042. Until it lands, steps (c) and the registry publish below are manual.
+## Bumping the pin
 
-## Owner actions
+Until PyPI has the release, `.mcp.json` and the skill pin a full commit SHA on `main` (or the release tag).
+After it, they pin `applywise@<version>`. Users get a new version with `claude plugin update applywise@applywise`;
+because `plugin.json` sets `version`, nothing reaches them until it is bumped.
 
-These need the repository owner's own accounts and cannot be done by an agent.
+## One-time owner steps
+
+These need the repository owner's own accounts and cannot be done by an agent. Do (a) and (b) before the first
+tag; skip any already done.
 
 - **(a) PyPI trusted publisher.** Create a PyPI account (enable 2FA). Under *Your account → Publishing → Add a
   pending publisher*, add: project `applywise`, owner = the GitHub account that owns this repository, repository `job-apply-mcp`, workflow
-  `release.yml`, environment `pypi`. No API token is created or stored.
+  `release.yml`, environment `pypi`. No API token is created or stored. (Once the project exists, the same
+  entry lives under the project's *Settings → Publishing*.)
 - **(b) GitHub environment.** In the repository, *Settings → Environments → New environment* named `pypi`.
   Recommended: required reviewer = you, and deployment tags limited to `v*`.
-- **(c) Tag.** After the release PR merges: `git tag v0.x.y && git push origin v0.x.y`. The release workflow (once
-  added) publishes to PyPI, then to the MCP Registry. Manual fallback for the registry:
-  `mcp-publisher login github && mcp-publisher publish` from the repo root.
+- **(c) MCP Registry.** Nothing to set up: GitHub OIDC from this repository proves the `io.github.<owner>`
+  namespace. Manual fallback: `mcp-publisher login github && mcp-publisher publish` from the repo root.
 - **(d) mcp.so.** Submit the repository URL at https://mcp.so/submit.
 - **(e) Glama.** Claim the listing for the repository on glama.ai (Glama indexes public MCP repositories; claiming
   lets you edit it).
-- **(f) Smithery.** Build the bundle once `applywise==X.Y.Z` is on PyPI:
-  `npx @anthropic-ai/mcpb pack mcpb applywise.mcpb`, then publish it with
-  `smithery mcp publish ./applywise.mcpb -n <owner>/applywise` (or upload it at smithery.ai/new).
+- **(f) Smithery.** Download `applywise-X.Y.Z.mcpb` from the GitHub Release and publish it with
+  `smithery mcp publish ./applywise-X.Y.Z.mcpb -n <owner>/applywise` (or upload it at smithery.ai/new).
 - **(g) PulseMCP.** Nothing to do: it picks up the listing from the official MCP Registry automatically.
-
-## Before the first release
-
-The owner wants the first release only after the open fixes (#53 and the QA mapper/latency PRs) land and a QA
-round is clean. Keep the plugin PR in draft until then.
