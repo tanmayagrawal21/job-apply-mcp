@@ -112,6 +112,18 @@ def _resume_consistency_check(rp: Path, prof) -> Check:
     return Check("resume_facts", OK, f"{len(facts)} resume facts; consistent with profile")
 
 
+def _state_check(s: Settings) -> Check:
+    from .config import state_path
+    from .migrate import StateMigrationError
+    try:
+        d = state_path(s)
+    except StateMigrationError as e:
+        return Check("state_dir", FAIL, f"{e}; submissions are REFUSED until this is fixed",
+                     "Close other job-apply-mcp processes, make the old data dir readable, or merge it by hand; "
+                     "nothing was moved or deleted (ADR-0054).")
+    return Check("state_dir", OK, f"{d} (approvals, consents, grants, quota log)")
+
+
 def _data_dir_check(s: Settings) -> Check:
     d = Path(s.paths.data_dir).expanduser()
     try:
@@ -245,6 +257,7 @@ def run_checks(network: bool = True) -> list[Check]:
     if s is not None:
         checks += _profile_checks(s)
         checks.append(_data_dir_check(s))
+        checks.append(_state_check(s))
         checks.append(_daily_limit_check(s))
         checks += _model_checks(s, network)
         checks += _browser_checks(s)

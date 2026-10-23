@@ -61,7 +61,7 @@ def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
         settings = get_settings()
         st = get_agent(settings).status()
         try:
-            lr = await last_run_info(settings.paths.data_dir)
+            lr = await last_run_info(state_path(settings))
             if lr:
                 st["last_run"] = lr    # st["dry_run"] is the global setting; this is the run's effective mode
         except Exception as e:  # noqa: BLE001

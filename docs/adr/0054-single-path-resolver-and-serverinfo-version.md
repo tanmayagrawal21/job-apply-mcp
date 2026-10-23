@@ -42,3 +42,17 @@ The trusted config and the security-state stores must not follow an environment 
    verification, so restoring an old copy of the data dir cannot revive it.
 4. Hooks: `scripts/install-hooks.sh` warns when the terms path cannot be resolved or no terms file exists, and
    blocks the commit when a terms file exists but cannot be loaded.
+
+## Amendment: migration and the dedupe store
+- `applications.db` (dedupe store and intake tables) joins the fixed state dir: a project file or env that sets
+  `paths.data_dir` can no longer hide already-submitted postings.
+- `job_apply_mcp.migrate.ensure_state` runs the first time the state dir is resolved. It discovers old locations
+  read-only and never trusts them: the effective `paths.data_dir`, `paths.data_dir` named in any config file (fixed,
+  XDG, `JOB_APPLY_MCP_CONFIG`, project), the XDG-honouring data dir, the default dir, and the old XDG config dir
+  (for `grant.key` and high-water files). Missing state is copied, never moved or deleted; existing state is UNIONED.
+  Most restrictive wins: `confirmed > submitted > unknown > submitting > ... > planned` per ref; `used`/`denied`
+  approvals beat `pending`/`approved`; a posting that really went out wins in `applications`; the quota log is
+  merged by line (replay is by event id); consents/grants take the earliest expiry and highest use count (re-signed
+  with the install key); revoked ids are never revived.
+- Any failure raises `StateMigrationError`: the stores refuse to open (no submit) and `doctor` reports `state_dir`
+  FAIL with the reason. A marker file records merged sources so reruns are cheap.

@@ -257,7 +257,12 @@ class PathsCfg(BaseModel):
 
 def state_path(s: Settings) -> Path:
     """Where consent, grants, approvals and the control audit/quota log live (ADR-0054)."""
-    return Path(s.paths.state_dir).expanduser() if s.paths.state_dir else paths.state_dir()
+    d = Path(s.paths.state_dir).expanduser() if s.paths.state_dir else paths.state_dir()
+    from .migrate import (
+        ensure_state,  # merge any pre-existing state from the old locations; raises when it cannot
+    )
+    ensure_state(s, d)
+    return d
 
 
 class ImproveCfg(BaseModel):
