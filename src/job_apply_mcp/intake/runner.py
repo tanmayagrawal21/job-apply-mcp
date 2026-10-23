@@ -1,0 +1,380 @@
+"""run_applications (ADR-0045): explicit links, emailed links and discovery through one pipeline.
+
+Order of a run:
+  1. replay stored feedback onto policy / profile answers; list what was new since the last run
+  2. collect candidates in priority order: explicit links > emailed links > discovery
+  3. adapter detection (an unknown host becomes an `unsupported_site` row; it never costs a plan slot)
+  4. plan every candidate concurrently with prose deferred (writing.mode="deferred" for this task only)
+  5. submit the first `max_applications` ready ones: concurrently across hosts, at most 1 per host, under
+     intake.submit_parallel; the engine's gates, dedupe, approvals, control layer and dry_run all still apply
+  6. write the run report (items + summary) and mark fully handled mail messages as processed
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import math
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from ..core.concurrency import bounded_gather
+from ..core.models import Decision
+from .feedback import FeedbackError, apply_overlays, describe, normalize
+from .links import JobUrlFilter, clean_url, make_link_source, resolve_filter
+from .store import CATEGORIES, IntakeStore
+
+SOURCES = ("links", "mail", "discovery")
+_SUBMIT_MAP = {"submitted": "submitted", "dry_run": "dry_run", "duplicate": "skipped", "needs_human": "handed_off",
+               "handoff": "handed_off", "incomplete": "handed_off", "awaiting_code": "handed_off",
+               "roadblock": "unknown", "error": "failed"}
+
+
+@dataclass
+class Cand:
+    target: str             # URL or platform ref, exactly as passed to the engine
+    source: str             # links | mail | discovery
+    msg: str | None = None  # mail message key
+    status: str = ""
+    why: str = ""
+    co: str = ""
+    title: str = ""
+    approval_id: str | None = None
+    deferred: bool = False  # not handled this run (over the cap): its mail message stays unprocessed
+
+    def row(self) -> dict[str, Any]:
+        r = {"ref": self.target, "url": self.target if self.target.startswith("http") else None,
+             "source": self.source, "status": self.status, "why": self.why[:240] or None, "co": self.co or None,
+             "title": self.title or None, "approval_id": self.approval_id}
+        return r
+
+
+def _key(target: str) -> str:
+    if target.startswith(("http://", "https://")):
+        from ..store.sqlite import canonical_url
+        return canonical_url(target) or target
+    return target
+
+
+def read_links_file(path: str | Path) -> list[str]:
+    out = []
+    for line in Path(path).expanduser().read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            out.append(s.split()[0])
+    return out
+
+
+class IntakeRunner:
+    def __init__(self, settings: Any, *, engine: Any, store: IntakeStore, resolve: Callable[[str], Any],
+                 search: Callable[..., Awaitable[dict[str, Any]]] | None = None, self_address: str = "",
+                 mail_connect: Any = None):
+        self.s, self.engine, self.store, self._resolve = settings, engine, store, resolve
+        self._search, self._me, self._connect = search, self_address, mail_connect
+
+    @classmethod
+    def from_services(cls, svc: Any) -> IntakeRunner:
+        st = getattr(svc, "_intake_store", None)
+        if st is None:
+            st = svc._intake_store = IntakeStore(svc.settings.paths.data_dir)
+        me = ""
+        with contextlib.suppress(Exception):   # no readable profile: intake.mail.self_address or the IMAP user
+            from ..profile import load_profile
+            me = load_profile(svc.settings.paths.profile).contact.email or ""
+        return cls(svc.settings, engine=svc.engine, store=st, resolve=svc.resolve, search=svc.search, self_address=me)
+
+    # ------------------------------------------------------------------------------------------ helpers
+    def _supported(self, target: str) -> bool:
+        try:
+            self._resolve(target)
+            return True
+        except Exception:  # noqa: BLE001 - AdapterError / ComponentMissing: no adapter handles it
+            return False
+
+    def _cached(self, target: str) -> Any:
+        f = getattr(self.engine, "_cached", None)
+        return f(target) if f else None
+
+    def _host(self, c: Cand) -> str:
+        cached = self._cached(c.target)
+        url = (cached.posting.apply_url or cached.posting.url) if cached is not None else c.target
+        if url.startswith(("http://", "https://")):
+            return (urlsplit(url).hostname or url).lower()
+        return ":".join(c.target.split(":")[:2])
+
+    async def _apply_feedback(self, run_id: str) -> tuple[int | None, list[str], list[str], list[str]]:
+        rows = await self.store.feedback()
+        structured = [r for r in rows if r["kind"] != "note"]
+        run_size, problems = apply_overlays(self.s, getattr(self.engine, "profile", None), structured)
+        pending = [r for r in rows if r["applied_run"] is None]
+        applied = [describe(r["kind"], r["payload"]) for r in pending if r["kind"] != "note"]
+        notes = [r["payload"]["text"] for r in pending if r["kind"] == "note"]
+        await self.store.mark_feedback_applied([r["id"] for r in pending], run_id)
+        return run_size, applied, notes, problems
+
+    async def _mail(self, mail: dict[str, Any] | None, messages: list[dict[str, Any]] | None,
+                    notes: list[str]) -> list[tuple[str, list[str]]]:
+        mc = self.s.intake.mail
+        try:
+            src = make_link_source(self.s, messages, connect=self._connect)
+        except ValueError as e:
+            notes.append(f"mail: {e}")
+            return []
+        if src is None:
+            notes.append("mail: the mail source is 'client'; pass `messages` [{id, from, to, subject, date, body}]")
+            return []
+        flt, err = resolve_filter(mc, self.s.ingest.imap, self_address=self._me, overrides=mail)
+        if err:
+            notes.append(f"mail: {err}")
+            return []
+        try:
+            msgs = await asyncio.to_thread(lambda: list(src.fetch(flt, mc.max_messages)))
+        except (OSError, ValueError, PermissionError, RuntimeError) as e:
+            notes.append(f"mail: {str(e)[:160]}")
+            return []
+        done = await self.store.processed([m.key for m in msgs])
+        is_job = JobUrlFilter(mc, self._supported)
+        return [(m.key, [u for u in m.urls if is_job(u)][: mc.max_links_per_message])
+                for m in msgs if m.key not in done]
+
+    # ------------------------------------------------------------------------------------------ run
+    async def run(self, *, links: list[str] | None = None, links_file: str | None = None,
+                  sources: list[str] | None = None, max_applications: int | None = None,
+                  dry_run: bool | None = None, mail: dict[str, Any] | None = None,
+                  messages: list[dict[str, Any]] | None = None,
+                  discovery: dict[str, Any] | None = None) -> dict[str, Any]:
+        cfg = self.s.intake
+        try:
+            dry = self.engine._resolve_dry(dry_run)
+        except PermissionError as e:
+            return {"error": str(e)}
+        srcs = list(sources or cfg.sources)
+        bad = [x for x in srcs if x not in SOURCES]
+        if bad:
+            return {"error": f"unknown sources {bad}; use {list(SOURCES)}"}
+        explicit = list(links or [])
+        if links_file:
+            try:
+                explicit += read_links_file(links_file)
+            except OSError as e:
+                return {"error": f"links file: {e}"}
+        run_id = await self.store.start_run({"sources": srcs, "max_applications": max_applications, "dry_run": dry,
+                                             "links": len(explicit), "mail": mail or {}, "discovery": discovery or {}})
+        cands: list[Cand] = []
+        notes: list[str] = []
+        applied: list[str] = []
+        fb_notes: list[str] = []
+        try:
+            run_size, applied, fb_notes, problems = await self._apply_feedback(run_id)
+            notes += problems
+            n = max(1, min(cfg.max_applications_cap, max_applications or run_size or cfg.max_applications))
+            pool_size = math.ceil(n * cfg.plan_factor)
+            cands = await self._collect(explicit, srcs, mail, messages, discovery, pool_size, notes)
+            await self._plan_and_submit(cands, n, dry)
+        finally:
+            done = self._processed_messages(cands)
+            if done:
+                await self.store.mark_processed(run_id, done)
+            rows = [c.row() for c in cands if c.target]
+            await self.store.add_items(run_id, rows)
+            ctx = {"applied_feedback": applied, "feedback_notes": fb_notes, "notes": notes}
+            rep = self._build(run_id, rows, cfg.report_rows)
+            await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live"})
+        return {**rep, "mode": "dry_run" if dry else "live", "plan_context": {k: v for k, v in ctx.items() if v}}
+
+    async def _collect(self, explicit: list[str], srcs: list[str], mail: dict[str, Any] | None,
+                       messages: list[dict[str, Any]] | None, discovery: dict[str, Any] | None, pool_size: int,
+                       notes: list[str]) -> list[Cand]:
+        out: list[Cand] = []
+        seen: set[str] = set()
+        ready = 0
+
+        def add(target: str, source: str, msg: str | None = None, co: str = "", title: str = "") -> None:
+            nonlocal ready
+            k = _key(target)
+            if k in seen:
+                return
+            seen.add(k)
+            c = Cand(target, source, msg, co=co, title=title)
+            if not self._supported(target):
+                c.status = "unsupported_site"
+                host = urlsplit(target).hostname or target[:60]
+                c.why = f"no enabled platform adapter handles {host}"
+            elif ready >= pool_size:
+                c.status, c.deferred = "skipped", True
+                c.why = "max_applications reached before planning" + ("; kept for the next run" if msg else "")
+            else:
+                ready += 1
+            out.append(c)
+
+        for raw in explicit:          # 1. explicit links (always used when given)
+            u = clean_url(raw) if raw.lower().startswith(("http://", "https://")) else raw.strip()
+            if u:
+                add(u, "links")
+        if "mail" in srcs and self.s.intake.mail.enabled:   # 2. emailed links
+            for key, urls in await self._mail(mail, messages, notes):
+                if not urls:
+                    out.append(Cand("", "mail", key, status="_empty"))   # processed, never reported
+                for u in urls:
+                    add(u, "mail", key)
+        if "discovery" in srcs and self._search is not None and ready < pool_size:   # 3. discovery
+            d = {**self.s.intake.discovery.model_dump(), **{k: v for k, v in (discovery or {}).items() if v is not None}}
+            try:
+                res = await self._search(query=d["query"], boards=d["boards"] or None,
+                                         platforms=d["platforms"] or None, location=d["location"],
+                                         since_days=d["since_days"], limit=pool_size - ready, apply_policy=True)
+            except Exception as e:  # noqa: BLE001 - a failed search must not fail the run
+                notes.append(f"discovery: {type(e).__name__}: {str(e)[:120]}")
+                res = {}
+            if res.get("hint"):
+                notes.append(f"discovery: {res['hint']}")
+            for r in res.get("rows", []):
+                if ready >= pool_size:
+                    break
+                add(r["ref"], "discovery", co=r.get("co", ""), title=r.get("title", ""))
+        return out
+
+    async def _plan_and_submit(self, cands: list[Cand], n: int, dry: bool) -> None:
+        from ..apply.engine import WRITE_MODE
+
+        pool = [c for c in cands if not c.status]
+        tok = WRITE_MODE.set(self.s.intake.writing_mode)
+        try:   # all at once; the engine's planner semaphore and the host limiter do the bounding
+            outs = await bounded_gather((self.engine.plan(c.target) for c in pool), max(1, len(pool)))
+        finally:
+            WRITE_MODE.reset(tok)
+        ready: list[Cand] = []
+        postings: set[str] = set()
+        for c, out in zip(pool, outs, strict=True):
+            if isinstance(out, BaseException):
+                c.status, c.why = "failed", f"plan: {type(out).__name__}: {out}"
+                continue
+            cached = self._cached(c.target)
+            if cached is not None:
+                c.co, c.title = cached.posting.company or c.co, cached.posting.title or c.title
+            g = out.plan.gate
+            c.approval_id = out.approval_id
+            if g.decision != Decision.submit:
+                c.status = "skipped" if g.decision == Decision.skip else "handed_off"
+                c.why = "; ".join(g.reasons) or g.decision.value
+                continue
+            if out.plan.unresolved:
+                human = [t["key"] for t in out.client_tasks if t.get("needs_human")]
+                prose = [t["key"] for t in out.client_tasks if t.get("deferred") or t.get("draft") is not None
+                         or t.get("timed_out")]
+                if prose and not human and set(out.plan.unresolved) <= set(prose):
+                    c.status = "skipped"
+                    c.why = f"required prose not approved yet: {prose[:4]} (draft_answers, then submit)"
+                else:
+                    c.status, c.why = "handed_off", f"unresolved required fields: {out.plan.unresolved[:6]}"
+                continue
+            pid = cached.posting.ref if cached is not None else _key(c.target)
+            if pid in postings:
+                c.status, c.why = "skipped", "duplicate: same posting earlier in this run"
+                continue
+            postings.add(pid)
+            ready.append(c)
+        for c in ready[n:]:
+            c.status, c.why, c.deferred = "skipped", f"max_applications={n} reached", True
+        await self._submit_all(ready[:n], dry)
+
+    async def _submit_all(self, todo: list[Cand], dry: bool) -> None:
+        by_host: OrderedDict[str, list[Cand]] = OrderedDict()
+        for c in todo:
+            by_host.setdefault(self._host(c), []).append(c)
+        sem = asyncio.Semaphore(self.s.intake.submit_parallel)
+        manual = not dry and not self.s.apply.auto_approve_active
+
+        async def one(c: Cand) -> None:
+            if manual:   # same rule as apply_batch: a live submit needs its approval first (ADR-0021)
+                c.status = "handed_off"
+                c.why = f"awaiting_approval: run `job-apply-mcp approve {c.approval_id}`, then submit"
+                return
+            try:
+                r = await self.engine.submit(c.target, {}, c.approval_id, dry)
+            except Exception as e:  # noqa: BLE001
+                c.status, c.why = "failed", f"{type(e).__name__}: {e}"
+                return
+            c.status = _SUBMIT_MAP.get(r.status, "unknown")
+            c.why = f"{r.status}: {r.detail}" if r.detail and c.status != "submitted" else (r.detail or "")
+            st = None
+            with contextlib.suppress(Exception):
+                st = self.engine.approvals.state(c.target)
+            if st and st.get("state") == "unknown":
+                c.status = "unknown"
+
+        async def host_worker(items: list[Cand]) -> None:   # one host's jobs run one after another
+            for c in items:
+                async with sem:
+                    await one(c)
+
+        await asyncio.gather(*(host_worker(v) for v in by_host.values()))
+
+    @staticmethod
+    def _processed_messages(cands: list[Cand]) -> dict[str, int]:
+        per: dict[str, list[Cand]] = {}
+        for c in cands:
+            if c.msg:
+                per.setdefault(c.msg, []).append(c)
+        return {k: sum(1 for c in v if c.target) for k, v in per.items()
+                if all(c.status and not c.deferred for c in v)}
+
+    # ------------------------------------------------------------------------------------------ report
+    @staticmethod
+    def _build(run_id: str, rows: list[dict[str, Any]], limit: int, category: str = "") -> dict[str, Any]:
+        rows = [r for r in rows if r["status"] in CATEGORIES]
+        cats: dict[str, list[dict[str, Any]]] = {k: [] for k in CATEGORIES}
+        for r in rows:
+            cats[r["status"]].append({k: v for k, v in (("ref", r["ref"]), ("src", r["source"]), ("co", r.get("co")),
+                                                        ("title", r.get("title")), ("why", r.get("why")),
+                                                        ("approval_id", r.get("approval_id")
+                                                         if r["status"] == "handed_off" else None)) if v})
+        out: dict[str, Any] = {"run_id": run_id, "counts": {k: len(v) for k, v in cats.items() if v}}
+        for k, v in cats.items():
+            if not v or (category and k != category):
+                continue
+            out[k] = v[:limit]
+            if len(v) > limit:
+                out[f"{k}_more"] = len(v) - limit
+        return out
+
+    async def report(self, run_id: str = "", category: str = "", limit: int | None = None) -> dict[str, Any]:
+        run = await self.store.get_run(run_id)
+        if run is None:
+            return {"error": f"unknown run {run_id!r}" if run_id else "no runs yet"}
+        items = await self.store.items(run["run_id"])
+        book = None
+        with contextlib.suppress(Exception):
+            book = self.engine.approvals
+        for it in items:   # reconciliation may have confirmed a submission since the run ended (ADR-0025)
+            if book is not None and it["status"] in ("submitted", "unknown", "handed_off"):
+                st = book.state(it["ref"])
+                if st and st.get("state") == "confirmed":
+                    it["status"] = "confirmed"
+                    await self.store.set_item_status(it["id"], "confirmed")
+        rep = self._build(run["run_id"], items, limit or self.s.intake.report_rows, category)
+        summ = run["summary"]
+        ctx = {k: summ.get(k) for k in ("applied_feedback", "feedback_notes", "notes") if summ.get(k)}
+        return {**rep, "started": run["started_at"], "finished": run["finished_at"], "mode": summ.get("mode"),
+                **({"plan_context": ctx} if ctx else {})}
+
+    async def give_feedback(self, run_id: str, ref: str | None, feedback: str | dict[str, Any]) -> dict[str, Any]:
+        run = await self.store.get_run(run_id) if run_id else None
+        if run_id and run is None:
+            return {"error": f"unknown run {run_id!r}"}
+        item = await self.store.find_item(run_id, ref) if (run_id and ref) else None
+        if ref and run_id and item is None:
+            return {"error": f"ref {ref[:80]!r} is not part of run {run_id}"}
+        sizes = [r["payload"]["value"] for r in await self.store.feedback() if r["kind"] == "run_size"]
+        cur = sizes[-1] if sizes else self.s.intake.max_applications
+        try:
+            kind, payload = normalize(feedback, item={"company": item["company"], "title": item["title"]} if item else None,
+                                      run_size=cur,
+                                      cap=self.s.intake.max_applications_cap)
+        except FeedbackError as e:
+            return {"error": str(e)}
+        fid = await self.store.add_feedback(run_id or None, ref, kind, payload)
+        return {"id": fid, "kind": kind, "will_apply": describe(kind, payload), "when": "at the start of the next run"}
