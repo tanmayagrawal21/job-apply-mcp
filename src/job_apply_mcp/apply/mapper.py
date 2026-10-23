@@ -706,7 +706,7 @@ _FLAT_KEY = {"work_authorized": "work_authorized", "requires_sponsorship": "requ
 def country_fact(profile: ProfileLike, country: str, fact: str) -> bool | None:
     """The profile's per-country fact; the flat [authorization] keys count for the home country only."""
     v = _truth(profile.lookup(f"auth:{country}:{fact}"))
-    home = str(profile.lookup("home_country") or "US").upper()
+    home = str(profile.lookup("home_country") or "").upper() or None
     if v is None and country == home and not (fact == "citizen" and home != "US"):
         v = _truth(profile.lookup("structured:" + _FLAT_KEY[fact]))   # ADR-0050: never a flat [answers] pattern
     return v
@@ -743,7 +743,7 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
             gaps.append({"country": None, "fact": None, "key": f.key})
         return True, None
     core = auth_core(f.label, country, job_place=job_place and country == job_country)
-    home = str(profile.lookup("home_country") or "US").upper()
+    home = str(profile.lookup("home_country") or "").upper() or None
     if core is None and not named and country == job_country == home and company:
         core = _home_job_core(f.label, country, company)
     if core is None:
@@ -1412,7 +1412,7 @@ def flat_auth_allowed(f: FormField, profile: ProfileLike, job_country: str | Non
     if len(named) > 1 or (named and named[0] is None):
         return False
     country = named[0] if named else job_country
-    home = str(profile.lookup("home_country") or "US").upper()
+    home = str(profile.lookup("home_country") or "").upper() or None
     return country is not None and country == home
 
 

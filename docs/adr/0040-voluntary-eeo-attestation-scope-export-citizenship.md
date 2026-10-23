@@ -69,7 +69,7 @@ A QA round (issues #47, #48, #51) found:
   Vancouver, Kingston) need an explicit US marker. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
 - **Country-general authorization (Amendment 2).** The tool is not US-centred.
   - *Profile.* `[authorization.<ISO-2>]` tables hold `work_authorized`, `requires_sponsorship` and `citizen` per
-    country. The flat `[authorization]` keys are an alias for `home_country` (default "US"), so old profiles behave
+    country. The flat `[authorization]` keys are an alias for `home_country` (default "US"; ADR-0050 removes the default: derived from `[contact].country`, else none), so old profiles behave
     as before.
   - *Job country.* `job_country(location, countries, locations) -> ISO-2 | None` is one strict conjunctive rule for any
     country: (a) the structured adapter countries are exactly one ISO-2 code, with every location entry parsed (Lever

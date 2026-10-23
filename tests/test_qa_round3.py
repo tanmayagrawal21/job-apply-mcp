@@ -208,7 +208,8 @@ def test_public_sector_company_names_never_answer_prior_employee():
 def full(demo=None, ack=True, answers=None):
     return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city="Springfield"),
                                demographics=Demographics(**(demo or DEMO | {"race_ethnicity": "Asian"})),
-                               authorization=Authorization(work_authorized=True, requires_sponsorship=False, citizen=True),
+                               authorization=Authorization(home_country="US", work_authorized=True, requires_sponsorship=False,
+                                                           citizen=True),
                                preferences=Preferences(acknowledge_privacy_notices=ack),
                                answers=answers or {}), Settings())
 

@@ -92,17 +92,17 @@ class CountryAuthorization(BaseModel):
 class Authorization(BaseModel):
     """Work-authorization facts, per country (ADR-0040):
 
-        [authorization]            # flat keys: an alias for the home country (default US, the old behaviour)
-        home_country = "US"
+        [authorization]            # flat keys: an alias for the home country
+        home_country = "US"        # ISO-2; unset -> derived from [contact].country; neither -> no home country
         work_authorized = true
         [authorization.CA]         # any ISO-2 code
         work_authorized = false
         requires_sponsorship = true
     """
-    home_country: str = "US"
+    home_country: str = ""                 # ADR-0050: no US default; see Profile.home_country
     work_authorized: bool | None = None
     requires_sponsorship: bool | None = None
-    citizen: bool | None = None            # citizenship of the home country (US citizenship by default)
+    citizen: bool | None = None            # citizenship of the home country
     citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
     countries: dict[str, CountryAuthorization] = Field(default_factory=dict)
 
@@ -118,15 +118,16 @@ class Authorization(BaseModel):
             if re.fullmatch(r"[A-Za-z]{2}", k) and isinstance(out[k], dict):
                 countries[k.upper()] = out.pop(k)
         out["countries"] = {k.upper(): v for k, v in countries.items()}
-        if "home_country" in out:
-            out["home_country"] = str(out["home_country"] or "US").strip().upper() or "US"
+        if "home_country" in out:            # ADR-0050: a confirmed ISO-2 or nothing, never a guessed default
+            from ..apply.places import country_iso
+            out["home_country"] = country_iso(out["home_country"]) or ""
         return out
 
     def facts_for(self, country: str) -> CountryAuthorization:
         """Per-country facts; for the home country, missing per-country values fall back to the flat keys."""
         c = (country or "").upper()
         mine = self.countries.get(c, CountryAuthorization())
-        if c != self.home_country.upper():
+        if not self.home_country or c != self.home_country.upper():
             return mine
         return CountryAuthorization(
             work_authorized=mine.work_authorized if mine.work_authorized is not None else self.work_authorized,
@@ -153,6 +154,16 @@ class Profile(BaseModel):
     # Groups of interchangeable phrases for [answers] pattern matching (ADR-0011 Amendment 2). Extends the defaults.
     answer_synonyms: list[list[str]] = Field(default_factory=list)
     answer_synonyms_mode: str = "extend"   # "extend" adds to the defaults; "replace" uses only answer_synonyms ([] = off)
+
+    @model_validator(mode="after")
+    def _derive_home_country(self) -> Profile:
+        """ADR-0050: an unset [authorization].home_country comes from [contact].country (name or ISO code) when that
+        is a confirmed ISO-2; otherwise there is no home country and the flat [authorization] keys apply nowhere."""
+        if not self.authorization.home_country:
+            from ..apply.places import country_iso
+            if iso := country_iso(self.contact.country):
+                self.authorization = self.authorization.model_copy(update={"home_country": iso})
+        return self
 
     def education_rows(self) -> list[dict[str, str]]:
         """Generic education list for ATS education blocks, most recent first (ADR-0029). Years are 4-digit strings."""

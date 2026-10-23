@@ -1,6 +1,6 @@
 # ADR-0050: Messaging opt-ins fail closed; flat answers never answer foreign authorization
 
-Status: accepted · Date: 2026-10-22 · Amends ADR-0030, ADR-0038, ADR-0040 · Issue #70
+Status: accepted · Date: 2026-10-22 · Amends ADR-0030, ADR-0038, ADR-0040 (home-country default) · Issue #70
 
 ## Context
 QA (#70) found two wrong answers on Greenhouse postings:
@@ -35,13 +35,22 @@ QA (#70) found two wrong answers on Greenhouse postings:
    country is the home country, the posting company's name and "for the location(s) you selected (in your previous
    response)" are removed before the strict vocabulary check. So "Will you require <company> to sponsor you for a
    work permit now or in the future for the location(s) you selected ...?" is answered from the home-country
-   `requires_sponsorship` fact. For a US-home profile that is `[authorization] home_country = "US"` (the default) with
-   `requires_sponsorship = true|false`, or `[authorization.US] requires_sponsorship = true|false`.
-6. Defence in depth: "WhatsApp" joins the engine's consent-label and the browser's consent-option words, so a client
+   `requires_sponsorship` fact. For a US-home profile that is `[authorization] requires_sponsorship = true|false` with
+   home country US (set explicitly or derived, see 6), or `[authorization.US] requires_sponsorship = true|false`.
+6. **No US default for the home country.** `[authorization].home_country` (an ISO-2 code or a country name) wins. If it
+   is unset, the home country is derived from `[contact].country` via the place tables (`country_iso`: "Canada",
+   "CA", "United States", "USA" ...). If neither gives a confirmed ISO-2, there is **no** home country: the flat
+   `[authorization]` keys (`work_authorized`, `requires_sponsorship`, `citizen`) describe no country, and
+   authorization/sponsorship questions stay unresolved and are listed as `profile_gaps` for the job's confirmed
+   country (unconfirmed-country jobs stay `no_gap_keys`, as in ADR-0040). `[authorization.<CC>]` tables still answer
+   for their own country. This replaces ADR-0040's `home_country` default of "US"; `mapper` no longer assumes "US"
+   anywhere a home country is read.
+7. Defence in depth: "WhatsApp" joins the engine's consent-label and the browser's consent-option words, so a client
    or a DOM-only group never ticks it.
 
 ## Consequences
 A profile that stated authorization or sponsorship only as `[answers]` patterns now gets these questions left to the
-owner. The fix is to set the structured `[authorization]` keys. Questions that name another country, or a job whose
+owner. The fix is to set the structured `[authorization]` keys. A profile with flat `[authorization]` keys and neither
+`home_country` nor a recognised `[contact].country` now gets those questions as profile gaps. Questions that name another country, or a job whose
 country is not confirmed, stay unresolved. A missing answer is recoverable; a false Yes to an opt-in or to a
 sponsorship question is not.

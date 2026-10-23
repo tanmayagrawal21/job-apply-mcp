@@ -40,7 +40,8 @@ summary = "Built dashboards and automated weekly reporting."
 Python = 3
 
 [authorization]
-# home_country = "US"           # ISO-2; the flat keys below describe this country (default US)
+# home_country = "US"           # ISO-2 or name; the flat keys below describe this country. Unset: derived from
+                               # [contact].country; if that is not a known country, the flat keys apply nowhere
 work_authorized = true
 requires_sponsorship = false
 citizen = true

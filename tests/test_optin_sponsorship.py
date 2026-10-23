@@ -15,9 +15,10 @@ FLAT = {"opt": "Yes", "now or in the future": "Yes", "require sponsorship": "Yes
         "text message": "No", "recruiting": "Yes", "receive": "Yes", "whatsapp": "Yes"}
 
 
-def view(answers=None, **auth):
+def view(answers=None, country="United States", **auth):
     a = {"work_authorized": True, "requires_sponsorship": True} | auth
-    return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city="Springfield"),
+    return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city="Springfield",
+                                               country=country),
                                authorization=Authorization.model_validate(a), answers=dict(FLAT) | (answers or {})),
                        Settings())
 
@@ -26,6 +27,7 @@ def run(label, kind=FieldKind.select, options=YN, required=True, p=None, job="US
     f = F("q", label, kind, required=required, options=list(options) if options else None)
     r = map_fields([f], p or view(), company=company, job_country=job)
     got = {a.key: (a.value, a.source) for a in r.answers}.get("q")
+    run.gaps = r.profile_gaps
     return got, [x.key for x in r.unresolved], [x.key for x in r.omitted]
 
 
@@ -157,3 +159,35 @@ def test_home_job_relaxation_never_covers_another_named_country():
     p = view(requires_sponsorship=False)
     assert run("Will you require Acme Robotics to sponsor you for a work permit in Canada?", p=p, job="US")[:2] == \
         (None, ["q"])
+
+
+# ---------------------------------------------------------------- home country: no US default (ADR-0050)
+@pytest.mark.parametrize("country", ["Canada", "CA", "canada"])
+def test_contact_country_sets_the_home_country(country):
+    p = view(country=country, requires_sponsorship=False)
+    assert p.lookup("home_country") == "CA"
+    assert run("Will you now or in the future require sponsorship?", p=p, job="CA")[0] == \
+        ("No", "rule:requires_sponsorship")
+    assert run("Will you now or in the future require sponsorship?", p=p, job="US")[:2] == (None, ["q"])
+    assert run.gaps == [{"country": "US", "fact": "requires_sponsorship", "key": "q"}]
+
+
+def test_explicit_home_country_wins_over_contact_country():
+    p = view(country="Canada", home_country="United States", requires_sponsorship=False)
+    assert p.lookup("home_country") == "US"
+    assert run(STRIPE_STYLE, p=p, job="US")[0] == ("No", "rule:requires_sponsorship")
+
+
+@pytest.mark.parametrize("country", ["", "Springfield", "Atlantis"])
+def test_no_confirmed_country_means_no_home_and_unresolved(country):
+    p = view(country=country, requires_sponsorship=False, work_authorized=True)
+    assert p.lookup("home_country") is None
+    for job in ("US", "CA"):
+        assert run("Will you now or in the future require sponsorship?", p=p, job=job)[:2] == (None, ["q"])
+        assert run.gaps == [{"country": job, "fact": "requires_sponsorship", "key": "q"}]
+        assert run("Are you authorized to work in this country?", p=p, job=job)[:2] == (None, ["q"])
+    assert p.lookup("requires_sponsorship") is None and p.lookup("work_authorized") is None
+    # a per-country table still answers for its own country
+    q = view(country=country, requires_sponsorship=None, US={"requires_sponsorship": False})
+    assert run("Will you now or in the future require sponsorship?", p=q, job="US")[0] == \
+        ("No", "rule:requires_sponsorship")
