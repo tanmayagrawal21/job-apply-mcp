@@ -232,6 +232,17 @@ class GrantsCfg(BaseModel):
     use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available; only the user config file may disable it
 
 
+class AccountsCfg(BaseModel):
+    """ATS logins and accounts from the OS-keychain vault (ADR-0046). Every use also needs an open consent window
+    (`consent.active(settings, "credentials")`). Secrets are never in config: only `job-apply-mcp vault add` writes
+    them, into the keychain."""
+
+    max_login_attempts: int = Field(2, ge=1, le=2)  # per host per run; a lockout or wrong password stops the host
+    auto_create: bool = False           # USER CONFIG FILE ONLY: create an ATS account when no vault entry exists
+    signup_email: str = ""              # username for new accounts; "" = the email answer of the application form
+    password_length: int = Field(24, ge=20, le=64)
+
+
 class PathsCfg(BaseModel):
     data_dir: str = Field(default_factory=paths.default_data_dir_str)
     profile: str = Field(default_factory=lambda: paths.default_config_dir_str() + "/profile.toml")
@@ -499,6 +510,7 @@ class Settings(BaseModel):
     tune: TuneCfg = Field(default_factory=TuneCfg)
     ingest: IngestCfg = Field(default_factory=IngestCfg)
     grants: GrantsCfg = Field(default_factory=GrantsCfg)
+    accounts: AccountsCfg = Field(default_factory=AccountsCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this
@@ -571,6 +583,8 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
     ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
+    ("accounts", "auto_create"): _bool_on,                                                        # ADR-0046
+    ("accounts", "max_login_attempts"): _raises,
 }
 
 # Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy

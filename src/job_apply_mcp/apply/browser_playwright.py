@@ -24,9 +24,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .. import consent
 from ..config import Settings
 from ..core import registry
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
+from ..core.secrets import redact
 from .geo import location_queries, pick_location
 from .mapper import (
     _DEMOGRAPHIC_LABEL,
@@ -81,6 +83,24 @@ def detect_ats(url: str, ref: str = "") -> str | None:
         return "lever"
     if host.endswith("ashbyhq.com") or ref.startswith("ashby:"):
         return "ashby"
+    return None
+
+
+# Applicant-tracking systems whose apply flow needs a candidate account (ADR-0046).
+_ACCOUNT_ATS = ("myworkdayjobs.com", "myworkdaysite.com", "icims.com", "successfactors.com", "successfactors.eu",
+                "taleo.net")
+
+
+def account_ats(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in _ACCOUNT_ATS)
+
+
+def _email_answer(form: ApplicationForm, answers: dict[str, Any]) -> str | None:
+    for f in form.fields:
+        v = answers.get(f.key)
+        if isinstance(v, str) and "@" in v and (canonical_key(f.label) == "email" or "email" in f.key.lower()):
+            return v.strip()
     return None
 
 
@@ -666,8 +686,10 @@ class PlaywrightDriver(VerificationMixin):
         ref = form.ref
         ats_name = detect_ats(apply_url, ref)
         if ats_name is None:
-            return SubmitResult(ref=ref, status="needs_human", via="browser",
-                                detail="unsupported_site: no deterministic filler for this host")
+            detail = "unsupported_site: no deterministic filler for this host"
+            if account_ats(apply_url):           # sign in (vault, consent-gated) so a human continues logged in
+                detail += "; " + await self.ensure_login(apply_url, _email_answer(form, answers), dry_run=dry_run)
+            return SubmitResult(ref=ref, status="needs_human", via="browser", detail=detail)
         ats = ATS[ats_name]
         ctx = await self._context()
         page = await ctx.new_page()
@@ -697,7 +719,24 @@ class PlaywrightDriver(VerificationMixin):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail="form did not render")
         await self._await_hydration(page)
         scope = await self._form_text(page)
-        if (blk := detect_blocker(scope)) in ("captcha", "verification", "login"):
+        blk = detect_blocker(scope)
+        creds = consent.active(self.s, "credentials")       # ADR-0046: without consent, behavior is unchanged
+        if creds and (blk == "login" or (blk is None and await self._password_visible(page))):
+            out = await self._login_wall(page, url, _email_answer(form, answers), dry_run)
+            if out.status not in ("logged_in", "created"):
+                return SubmitResult(ref=ref, status="roadblock", via="browser", detail=out.detail())
+            await page.goto(url, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_selector("form input, form textarea, form select, input[type=file]",
+                                             state="attached", timeout=self.b.timeout_s * 1000)
+            except Exception:
+                return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                    detail=f"{out.detail()}; form did not render after sign-in")
+            scope = await self._form_text(page)
+            blk = detect_blocker(scope)
+            if blk is None and await self._password_visible(page):
+                blk = "login"
+        if blk in ("captcha", "verification", "login"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} before filling")
         if (hit := stop_phrase_hit(scope, self.s.policy.stop_phrases)):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"attestation: '{hit}'")
@@ -793,6 +832,45 @@ class PlaywrightDriver(VerificationMixin):
         return await self._submit(page, ats, ref, attempt=attempt)
 
     # -- evidence / network ---------------------------------------------------------------------
+    # -- login walls (ADR-0046) ------------------------------------------------------------------
+    @staticmethod
+    async def _password_visible(page) -> bool:
+        try:
+            loc = page.locator("input[type=password]")
+            return any([await loc.nth(i).is_visible() for i in range(min(await loc.count(), 5))])
+        except Exception:
+            return False
+
+    async def _login_wall(self, page, url: str, email: str | None, dry_run: bool):
+        """Vault login / account creation for this page's exact host. Secrets go keychain -> Locator.fill only;
+        the returned outcome (and so the SubmitResult detail) never contains one."""
+        from ..accounts.browser_ops import PlaywrightLoginOps
+        from ..accounts.runtime import manager_for
+
+        async def captcha() -> bool:
+            st = await self._captcha_state(page)
+            return bool(st["visible"] or st["unsafe"])
+
+        start = page.url or url
+        return await manager_for(self.s).handle_wall(PlaywrightLoginOps(page, captcha, expected_host=start), start,
+                                                     email=email, dry_run=dry_run)
+
+    async def ensure_login(self, url: str, email: str | None = None, *, dry_run: bool = True) -> str:
+        """Open `url`; if it shows a login wall, handle it. Returns a short, secret-free status line."""
+        ctx = await self._context()
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1500)
+            if not await self._password_visible(page) and detect_blocker(await page.locator("body").inner_text()) != "login":
+                return "no login wall"
+            return (await self._login_wall(page, url, email, dry_run)).detail()
+        except Exception as e:
+            return f"login check failed ({type(e).__name__})"
+        finally:
+            if not self.b.keep_pages_open:
+                await page.close()
+
     def _attach_recorder(self, page, ats: AtsProfile) -> None:
         recs: list[dict[str, Any]] = []
         tasks: list[asyncio.Task] = []
@@ -949,7 +1027,7 @@ class PlaywrightDriver(VerificationMixin):
                     "captcha_widgets": await self._captcha_widgets(page),
                     "submit_buttons": await self._button_summary(page),
                     "text": trim(text, self.b.evidence_text_chars), **(extra or {})}
-            (d / f"{tag}.json").write_text(json.dumps(meta, indent=1))
+            (d / f"{tag}.json").write_text(redact(json.dumps(meta, indent=1)))   # ADR-0046 defense in depth
             home = str(Path.home())
             shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
             return f" evidence={shown}"

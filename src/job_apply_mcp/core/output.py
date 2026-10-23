@@ -15,6 +15,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from .secrets import redact  # ADR-0046: no credential this process holds can reach MCP output
+
 # Per-tool optional verbose fields, dropped first-to-last (any depth) when still over budget.
 DROP_PRIORITY: dict[str, tuple[str, ...]] = {
     "get_job": ("description", "raw", "html"),
@@ -267,10 +269,10 @@ def guarded(fn: Callable[..., Any], budget: Callable[[], int]) -> Callable[..., 
                     res = json.loads(res)
                 except ValueError:
                     res = {"text": res}
-            return out(res, budget(), name)
+            return redact(out(res, budget(), name))
         except Exception as e:
-            log.exception("tool %s failed", name)   # full traceback -> stderr/log only
-            return error_from_exc(e)
+            log.exception("tool %s failed", name)   # full traceback -> stderr/log only (log records are redacted)
+            return redact(error_from_exc(e))
         finally:
             _start.reset(tok2)
             _tool_name.reset(tok)
