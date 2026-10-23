@@ -26,14 +26,19 @@ QA (#70) found two wrong answers on Greenhouse postings:
      "tools", "platform" and similar are cut out of the label. Whatever remains is checked again, so "Do you have
      WhatsApp experience, and may we message you there?" stays owner-only. An authorization, EEO or own-rule
      question keeps its rule unless another clause still asks permission to contact (then the owner decides).
-   - **Narrow (answered).** Only a permission wording (`_PERMISSION_ASK`: opt in, consent, subscribe, sign me up,
-     agree to receive / be contacted, permission, "(may|can) we|recruiters (contact|text|call|email|message|reach)
-     you", "ok to (text|call|email|contact) you", "would you like (to receive)") together with a **named messaging
-     or marketing channel** (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`, `viber`, `imessage`,
-     `marketing`) is answered by `rule:messaging_optin`. It is Yes only when the owner stored Yes for every named
-     channel under the exact `[answers]` key `optin:<channel>` (the keys above plus `phone`, `email`, `push`).
-     Otherwise it is No when required and left empty when optional. The bare phone/call, email, push and generic
-     contact channels are never auto-answered.
+   - **Narrow (answered).** Only a permission wording that names a delivery (`_PERMISSION_ASK`): "opt in to",
+     "subscribe to", "sign me up for", "consent/agree to receive" or "to be contacted/texted/...", "permission to
+     text/call/... you", "(may|can) we|recruiters (contact|text|call|email|message|reach) you", "ok to (text|call|
+     email|contact) you", "would you like to receive/get/hear", "join our talent community/mailing list". It must come
+     with a **named messaging channel** (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`, `viber`,
+     `imessage`) or a **marketing communication** (`marketing`: marketing emails/messages/communications/offers,
+     newsletters, promotional emails, mailing list, talent community, job alerts, "about future roles"). A bare
+     "would you like", "consent" or "permission", and bare "marketing" or "promotion" (a job topic: "Would you like
+     to join our marketing team?"), never count; such labels stay owner-only. Only these narrow asks are answered,
+     by `rule:messaging_optin`. The answer is Yes only when the owner stored Yes for every named channel under the
+     exact `[answers]` key `optin:<channel>` (the keys above plus `phone`, `email`, `push`). Otherwise it is No when
+     required and left empty when optional. The bare phone/call, email, push and generic contact channels are never
+     auto-answered.
    - **No flat answer, ever.** A choice field whose label names any channel never takes a flat `[answers]`, persona
      or alias-phrase answer. Only `optin:<channel>` can opt the user in.
    - Opt-out wording, unclear options, or bundling with a notice, terms, attestation or recording consent stay
