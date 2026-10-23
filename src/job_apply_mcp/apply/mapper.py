@@ -980,10 +980,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         if not company or not about_this_company(f.label, company, company_aliases):   # ADR-0038: government/competitor/other employers
             return True, profile.lookup(n)                            # only the user's own explicit answer
         return True, "Yes" if profile.lookup("employer:" + normalize(company)) else "No"
-    if ck == "marketing_optin":
-        if _CONSENT.search(f.label):          # consent/privacy acknowledgements need the owner's decision
-            return True, None
-        return True, "No"
+    if ck == "marketing_optin":               # ADR-0050: owner-only, never an automatic No (or Yes)
+        return True, None
     if ck == "languages_known":
         if _SPOKEN.search(f.label):
             return True, None
@@ -1331,9 +1329,10 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: s
 
 
 # ---- messaging / marketing opt-ins (ADR-0050) -------------------------------------------------------
-# Fail closed: a WhatsApp, SMS/text, phone-messaging or marketing opt-in is never Yes unless the owner stored Yes for
-# that exact channel ([answers] key "optin:<channel>"). Otherwise a required field gets the No option, and an optional
-# one is left empty (omitted: never a task, never a model). No flat [answers] pattern, persona or LLM ever sees it.
+# Fail closed, descoped: every contact / messaging / marketing permission field is OWNER-ONLY. It is never Yes and
+# never an automatic No; client answers are refused, no model, flat [answers] or persona answer ever applies, and it
+# stays unresolved. The one exception is the owner's own stored [answers] "optin:<channel>" value for every named
+# channel. Automatic declines belong to a future safe-default mode, not to this rule.
 _OPTIN_CHANNELS: list[tuple[str, re.Pattern[str]]] = [
     ("whatsapp", re.compile(r"\bwhats ?app\w*\b")),
     ("sms", re.compile(r"\bsms\b|\bmms\b|\b(?:mobile|cell(?:ular)?|phone) messag\w*|\btext(?:s|ed|ing)?\b(?! (?:box|field|area|input|below|above|editor)\b)")),
@@ -1449,9 +1448,10 @@ def _no_option(options: Sequence[str]) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
-# ADR-0050 (review round 3): only a NARROW permission question with a named messaging/marketing channel is ever
-# answered. The broad classifier (contact_permission_channels) only marks a field owner-only: "Are you comfortable
-# making cold calls?" or "Do you have a valid email address?" is never answered by this rule.
+# ADR-0050: a stored optin:<channel> value is used only for a NARROW permission question (delivery verb, named
+# messaging channel or marketing communication, and a contact as the thing delivered). The broad classifier
+# (contact_permission_channels) only marks a field owner-only: "Are you comfortable making cold calls?" is never
+# answered, not even from a stored optin:phone.
 _PERMISSION_ASK = re.compile(
     # control round 4: every alternative names a delivery (receive / be contacted / text you ...); a bare
     # "would you like", "consent" or "permission" never counts
@@ -1468,24 +1468,66 @@ _AUTO_CHANNELS = frozenset({"whatsapp", "sms", "signal", "telegram", "wechat", "
                             "marketing"})
 
 
-def permission_ask(f: FormField, chans: Sequence[str]) -> bool:
-    """A narrow opt-in: permission wording AND at least one named messaging or marketing channel."""
-    return (bool(chans) and bool(_AUTO_CHANNELS & set(chans))
-            and bool(_PERMISSION_ASK.search(_strip_exceptions(normalize(f.label)))))
+# ---- the single-clause permission template (control round 6; shared with the autonomy-level PR) -----------------
+# A stored optin:<channel> is applied ONLY when the whole label is one permission clause. A second clause ("Have you
+# been arrested, and may we text you?", "May we text you? Are you a US citizen?") or any legal, attestation, EEO or
+# third-party term anywhere rejects it, and the field stays unresolved.
+_SECOND_CLAUSE = re.compile(r"\band\b|\bor\b|;|,|\?\s*\S|\.\s+\S|!\s*\S", re.IGNORECASE)
+_SINGLE_ASK_BLOCK = re.compile(
+    r"arrest|criminal|convict|felon|citizen|authori[sz]|sponsor|visa|\b18\b|\bage\b|certif|attest|\btrue\b|accura|"
+    r"background|drug|gender|\brace\b|ethnic|veteran|disab|referen|referee|manager|employer|third|emergency|\bkin\b|"
+    r"terms|arbitrat|privacy|record(?:ed|ing)?\b|relocat|salary|clearance|export", re.IGNORECASE)
+_ASK_LEAD = r"(?:(?:do you|would you like to|i would like to|i d like to|i|yes)\s)?"
+_ASK_VERB = (r"(?:opt in (?:to|for)(?: receive| receiving)?|subscribe to|sign (?:me )?up (?:for|to)|"
+             r"(?:consent|agree) to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged))|"
+             r"would you like to (?:receive|get)|"
+             r"(?:may|can|could) we (?:send|contact|text|call|email|message|reach|whats ?app) (?:you|your)|"
+             r"(?:is it )?ok(?:ay)? to (?:text|call|email|contact|message|whats ?app) (?:you|your))")
+_ASK_TAIL = (r"(?:\s(?:about (?:this|my|your) application|about (?:new|future) (?:roles|jobs|opportunities)|"
+             r"from (?:us|[a-z0-9 ]{1,40})))?")
+_ASK_OBJECT_WORDS = frozenset(["a", "the", "our", "your", "my", "via", "by", "on", "over", "through", "mobile", "phone",
+                               "cell", "number", "messages", "message", "updates", "update", "alerts", "alert",
+                               "notifications", "notification", "texts", "text", "emails", "email", "e", "mail",
+                               "communications", "newsletter", "newsletters", "marketing", "promotional", "offers",
+                               "recruiting", "recruiter", "job", "sms", "mms", "whatsapp", "whats", "app", "signal",
+                               "telegram", "wechat", "line", "viber", "imessage", "reminders", "talent", "community",
+                               "mailing", "list"])
+_ASK_RX = re.compile(rf"^{_ASK_LEAD}{_ASK_VERB}(?P<obj>(?:\s[a-z0-9]+){{0,5}}?){_ASK_TAIL}$")
 
 
-def optin_value(f: FormField, chans: list[str], profile: ProfileLike) -> Any | None:
-    """Narrow opt-ins only: Yes if the owner stored Yes for every named channel; else No when required, else None
-    (left empty). Anything else the broad rule flags returns None (owner-only, unresolved)."""
-    if not permission_ask(f, chans):
+def is_single_permission_ask(label: str, company: str = "") -> list[str] | None:
+    """The channels of a label that is exactly ONE permission-to-contact clause (lead-in, permission verb, channel,
+    optional short tail), else None. Shared with the autonomy-level `safe_default` mode."""
+    raw = (label or "").strip()
+    body = re.sub(r"[?.!]+\s*$", "", raw)          # one trailing ? or . is allowed
+    if not body or _SECOND_CLAUSE.search(body) or _SINGLE_ASK_BLOCK.search(raw):
         return None
+    n = normalize(body)
+    m = _ASK_RX.match(n)
+    if not m:
+        return None
+    tail = n[m.end("obj"):].strip()
+    if tail.startswith("from ") and tail[5:] not in ("us", "recruiting"):
+        allowed = set(normalize(company).split()) | {"recruiting", "recruiters", "team", "talent", "hiring", "s"}
+        if not company or not set(tail[5:].split()) <= allowed:
+            return None
+    if not all(w in _ASK_OBJECT_WORDS for w in m.group("obj").split()):
+        return None
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n) and c != "contact"]
+    return chans if _AUTO_CHANNELS & set(chans) else None
+
+
+def optin_value(f: FormField, chans: list[str], profile: ProfileLike, company: str = "") -> Any | None:
+    """ADR-0050 (descoped): never an automatic answer. Only the owner's own stored `optin:<channel>` value, set for
+    EVERY named channel, answers a label that is exactly one permission clause (is_single_permission_ask)."""
+    single = is_single_permission_ask(f.label, company)
+    if not single:
+        return None
+    chans = single
     stored = [_truth(profile.lookup(f"optin:{c}")) for c in chans]
-    if all(v is True for v in stored):
-        want = True
-    elif any(v is False for v in stored) or f.required:
-        want = False
-    else:
-        return None
+    if any(v is None for v in stored):
+        return None                     # no automatic No: the owner (or a later safe-default mode) decides
+    want = all(stored)
     if f.kind == FieldKind.boolean:
         return want
     if not f.options:
@@ -1563,13 +1605,11 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             continue
         chans = optin_channels(f)
         if chans is not None:            # ADR-0050: messaging/marketing opt-in, before every answer source
-            ov = optin_value(f, chans, profile)
-            if ov is not None:
+            ov = optin_value(f, chans, profile, company)
+            if ov is not None:            # the owner's own optin:<channel> answer
                 res.answers.append(Answer(key=f.key, value=ov, source="rule:messaging_optin"))
-            elif f.required or not permission_ask(f, chans):
-                res.unresolved.append(f)  # owner-only: broad contact wording, no clean No option, opt-out, text box
             else:
-                res.omitted.append(f)     # optional narrow opt-in: left empty, never a task
+                res.unresolved.append(f)  # owner-only: never Yes, never an automatic No, no flat/persona/LLM
             continue
         ck = canonical_key(f.label)
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)

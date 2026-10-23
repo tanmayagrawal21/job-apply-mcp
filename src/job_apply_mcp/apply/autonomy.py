@@ -33,6 +33,8 @@ from typing import Any
 from ..core.models import Answer, FieldKind, FormField
 from .mapper import (
     _DEMOGRAPHIC_LABEL,
+    _SECOND_CLAUSE,
+    _SINGLE_ASK_BLOCK,
     DEMOGRAPHIC_KEYS,
     best_option,
     canonical_key,
@@ -41,6 +43,7 @@ from .mapper import (
     eeo_class,
     eeo_option_ok,
     is_auth_question,
+    is_single_permission_ask,
     never_llm_legal_place,
     normalize,
     tokens,
@@ -115,50 +118,41 @@ def _choice(f: FormField) -> bool:
     return f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
 
 
-# A GENUINE permission ask, by anchored whole-label templates (deny by default). The normalized label must be one head
-# below followed only by delivery wording (_ASK_TAIL); anything else ("... WhatsApp training", "... our marketing
-# team", "own our SMS product", "experience writing newsletters") is not an ask and is never declined.
-_WHO = (r"(?:we|i|our (?:team|recruiters?|recruiting team|talent team|hiring team)|"
-        r"(?:\w+ ){0,2}(?:recruiting|recruiters?|talent acquisition|talent team|hiring team))")
-_VERB = r"(?:contact|text|call|e ?mail|message|whats ?app|reach out to|reach|send)"
-_ASK_HEADS = [re.compile(p) for p in (
-    rf"(?:can|may|could|shall) {_WHO} (?:also )?{_VERB}(?: or {_VERB})? you(?P<tail>(?: .*)?)",
-    rf"(?:is it ok(?:ay)?|ok(?:ay)?) (?:if we|to) {_VERB}(?: or {_VERB})? you(?P<tail>(?: .*)?)",
-    (r"(?:do|would) you (?:like|want|wish) to (?:receive|get|be (?:contacted|notified|kept informed)|hear from us|"
-     r"opt in to (?:receive|receiving)?|subscribe to|sign up for)(?P<tail>(?: .*)?)"),
-    (r"(?:do you )?(?:opt in|optin|consent|agree) to (?:receive|receiving|be contacted|being contacted|"
-     r"be (?:texted|called|emailed|messaged))(?P<tail>(?: .*)?)"),
-    (r"i (?:would like|want|wish|agree|consent) to (?:receive|be contacted|subscribe to|sign up for)"
-     r"(?P<tail>(?: .*)?)"),
-    (r"(?:yes )?(?:please )?(?:sign me up for|subscribe me to|opt me in to|opt in to|opt in|keep me (?:informed|updated|"
-     r"posted)|stay in touch|contact me)(?P<tail>(?: .*)?)"),
-    (r"(?:(?:do|would) you (?:like|want|wish) to |i (?:would like|want|wish) to )?join (?:our|the|\w+ s) "
-     r"(?:talent (?:community|network|pool)|mailing list|newsletter)(?P<tail>(?: .*)?)"),
-    (r"(?:sms|text message|text|e ?mail|whats ?app|marketing|newsletter|push|phone|mobile) (?:opt in|optin|updates|"
-     r"alerts|notifications|communications|consent|messages|messaging)(?P<tail>(?: .*)?)"),
+# A GENUINE permission ask. The single source of truth is ADR-0050's is_single_permission_ask (one anchored clause,
+# a named messaging/marketing channel, no second clause, no legal/attestation/third-party term). A few common asks it
+# does not accept (generic channels, "join our talent community") are listed here: anchored whole-label, single
+# clause, and rejected by the SAME second-clause and blocked-term checks. The ADR-0050 template is never widened.
+_V = r"(?:text|call|e ?mail|contact|message|whats ?app|reach)"
+_ABOUT = (r"(?: (?:about|regarding) (?:interview scheduling|scheduling (?:an |your )?interviews?|your application|"
+          r"this application|this role|this position|(?:new|future|other|similar|relevant) (?:roles|jobs|"
+          r"opportunities|openings|positions)|updates)| with updates)?")
+_EXTRA_ASKS = [re.compile(p) for p in (
+    rf"(?:can|may|could) we {_V}(?: or {_V})? you(?: (?:by|via|on|at) (?:text|sms|phone|e ?mail))?{_ABOUT}",
+    rf"(?:is it )?ok(?:ay)? to {_V} you{_ABOUT}",
+    (r"(?:(?:do you want|would you like) to |i (?:would like|want) to )?join (?:our|the) (?:talent (?:community|network|"
+     r"pool)|mailing list|newsletter)"),
+    (rf"(?:do you want|would you like) to (?:receive|get) (?:e ?mail |text |sms |job )?(?:updates|alerts|notifications)"
+     rf"{_ABOUT}"),
 )]
-_ASK_TAIL = frozenset(["updates", "update", "news", "messages", "message", "texts", "text", "emails", "email", "e", "mail", "alerts", "alert", "notifications", "notification", "communications", "communication", "information", "info", "newsletter", "newsletters", "marketing", "offers", "events", "opportunities", "opportunity", "roles", "role", "openings", "opening", "jobs", "job", "positions", "position", "career", "careers", "future", "other", "similar", "new", "relevant", "related", "upcoming", "interview", "interviews", "scheduling", "reminders", "reminder", "application", "applications", "status", "recruiting", "recruitment", "recruiter", "recruiters", "talent", "community", "network", "pool", "mailing", "list", "hiring", "process", "this", "that", "these", "those", "your", "my", "our", "the", "a", "an", "and", "or", "about", "regarding", "on", "for", "by", "via", "through", "over", "at", "with", "from", "to", "of", "in", "us", "you", "me", "sms", "whatsapp", "whats", "app", "phone", "call", "calls", "mobile", "number", "provided", "telegram", "signal", "wechat", "viber", "line", "imessage", "push", "periodic", "occasional", "occasionally", "time", "promotional", "any", "more", "also", "when", "as", "they", "become", "available"])
+# "email or contact you": a disjunction of contact verbs inside the ONE clause, not a second clause
+_VERB_OR = re.compile(rf"\b{_V} or {_V} you\b", re.IGNORECASE)
 
 
 def contact_channels(f: FormField, company: str = "") -> list[str] | None:
-    """Channels of a GENUINE contact / marketing permission ask ("May we text you?", "Can we email or contact you with
-    updates?"), else None. The whole label must match an anchored template; the channels come from the ADR-0050
-    classifier's interface (contact_permission_channels)."""
+    """Channels of a GENUINE contact / marketing permission ask, else None. Compound labels ("Have you been arrested,
+    and may we text you?") are never asks."""
     if not _choice(f):
         return None
-    from . import mapper
-    single = getattr(mapper, "is_single_permission_ask", None)
-    if single is not None:              # ADR-0050 (#73): one source of truth for a single-clause permission ask
-        chans = single(f.label)
-        return list(chans) if chans else None
-    n = normalize(f.label)
-    for w in [w for w in normalize(company).split() if len(w) > 2]:
-        n = re.sub(rf"\b{re.escape(w)}(?: s)?\b", " ", n)
-    n = re.sub(r"\s+", " ", n).strip()
-    for head in _ASK_HEADS:
-        m = head.fullmatch(n)
-        if m and all(t in _ASK_TAIL for t in m.group("tail").split()):
-            return contact_permission_channels(f.label, choice=True) or ["contact"]
+    chans = is_single_permission_ask(f.label, company)
+    if chans:
+        return list(chans)
+    raw = (f.label or "").strip()
+    body = re.sub(r"[?.!]+\s*$", "", raw)
+    if not body or _SECOND_CLAUSE.search(_VERB_OR.sub("verb you", body)) or _SINGLE_ASK_BLOCK.search(raw):
+        return None
+    n = normalize(body)
+    if any(t.fullmatch(n) for t in _EXTRA_ASKS):
+        return contact_permission_channels(f.label, choice=True) or ["contact"]
     return None
 
 

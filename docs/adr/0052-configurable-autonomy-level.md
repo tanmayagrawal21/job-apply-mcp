@@ -26,21 +26,22 @@ user's usual "how did you hear about us" source.
    - **Contact and marketing permission asks** get the declining choice: an unticked box (`False`), the single
      No / "No, thanks" / opt-out option, or "None" on a multiselect. ADR-0050 (as narrowed in #73) makes every contact,
      messaging or marketing permission field owner-only and honours only a stored `optin:<channel>`. This ADR owns the
-     safe decline. Only a GENUINE permission ask is declined: after the posting company's name is removed, the whole
-     normalized label must match one anchored head (`autonomy._ASK_HEADS`, for example "can/may we <contact verb>
-     you", "would you like to receive", "do you opt in to receive", "I agree to receive", "join our talent
-     community", "SMS opt-in"), followed only by delivery wording (`_ASK_TAIL`: updates, future roles, about your
-     application, by text ...).
-     - Anything else is not an ask and is never declined. It stays unresolved, or at `infer` it may get a
-       resume-based answer. Examples: "Would you like to receive WhatsApp training?", "Do you have experience writing
-       newsletters?", "Would you like to join our marketing team?", "Would you like to own our SMS product?",
-       opt-out wording, and an ask bundled with a privacy policy or arbitration.
-     - The channels come only from the classifier's interface (`contact_permission_channels`), so a change to its
-       regexes does not change this rule.
+     safe decline. Only a GENUINE permission ask is declined:
+     - **The single source of truth** is ADR-0050's `is_single_permission_ask(label, company)`. It accepts one
+       anchored permission clause with a named messaging or marketing channel. It rejects a second clause and any
+       legal, attestation, EEO or third-party term.
+     - **A short supplementary list** (`autonomy._EXTRA_ASKS`) covers common asks that template does not accept.
+       Examples are "Can we text you about interview scheduling?", "Join our talent community?" and "Can we email
+       or contact you with updates?". Each entry is an anchored whole-label single clause. Each must pass the SAME
+       checks: `mapper._SECOND_CLAUSE` and `mapper._SINGLE_ASK_BLOCK`. The only exception is "<verb> or <verb>
+       you", a choice of contact verbs inside one clause. The ADR-0050 template itself is never widened.
+     - **Anything else is not an ask** and is never declined. It stays unresolved, or at `infer` it may get a
+       resume-based answer. Examples: "Would you like to receive WhatsApp training?", "Do you have experience
+       writing newsletters?", "Would you like to join our marketing team?", "Would you like to own our SMS
+       product?", "SMS opt-in", opt-out wording, and an ask bundled with a privacy policy or arbitration.
+     - **Compound labels are never declined, answered or assumed** at any level. Examples: "Have you been arrested,
+       and may we text you?" and "May we text you? Are you a US citizen?".
      - Without a clean declining option the field stays unresolved.
-     - When ADR-0050 exports `is_single_permission_ask(label)` (#73), that function alone decides: one anchored,
-       single-clause permission ask with no legal or attestation terms. The local templates are only a fallback until
-       then. Compound labels ("Have you been arrested, and may we text you?") are never declined or answered.
    - **"How did you hear about us"** gets `answers.referral_default`, then the `apply.referral_preference` list. On
      a choice field this is the first preference that matches an option (never a referral or employee option), else a
      plain "Other". On free text it is the first preference.

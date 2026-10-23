@@ -96,8 +96,9 @@ async def test_safe_default_contact_without_a_declining_option_stays_unresolved(
 @pytest.mark.parametrize("label", ["Can we email or contact you with updates?", "May we call you about other openings?",
                                    "Would you like to receive updates about future roles?",
                                    "Do you opt-in to receive WhatsApp messages from Acme Recruiting?",
-                                   "SMS opt-in", "I agree to receive text messages from Acme Robotics",
-                                   "Join our talent community", "Is it OK to text you about interview scheduling?"])
+                                   "I agree to receive text messages from Acme Robotics",
+                                   "Join our talent community?", "Can we text you about interview scheduling?",
+                                   "Is it OK to text you about interview scheduling?"])
 def test_contact_permission_asks_are_recognised(label):
     assert autonomy.contact_channels(F("q", label, FieldKind.select, options=YN), "Acme Robotics")
 
@@ -107,7 +108,9 @@ NOT_ASKS = ["Would you like to receive WhatsApp training?", "Do you have experie
             "Can we contact your references?", "Do you want to opt out of marketing emails?",
             "I agree to receive text messages and accept the privacy policy",
             "Would you like to receive updates and agree to binding arbitration?",
-            "Have you been arrested, and may we text you?",
+            "Have you been arrested, and may we text you?", "May we text you? Are you a US citizen?",
+            "Can we text you about interview scheduling and run a background check?",
+            "Join our talent community and accept the privacy policy?", "SMS opt-in",
             "Do you have WhatsApp experience, and may we message you there?"]
 
 
@@ -348,6 +351,8 @@ async def test_run_report_labels_assumed_answers_at_each_level(tmp_path, level):
 
 @pytest.mark.parametrize("level", ["safe_default", "infer"])
 @pytest.mark.parametrize("label", ["Have you been arrested, and may we text you?",
+                                   "May we text you? Are you a US citizen?",
+                                   "Can we text you about interview scheduling and run a background check?",
                                    "Do you have WhatsApp experience, and may we message you there?"])
 async def test_compound_permission_labels_are_never_assumed(level, label):
     class One(FakeAdapter):
@@ -355,5 +360,5 @@ async def test_compound_permission_labels_are_never_assumed(level, label):
             return ApplicationForm(ref=ref, submit_via=["api"], fields=[F("q", label, FieldKind.select, options=YN)])
     e = ApplyEngine(settings(answers__autonomy=level), resolve_adapter=lambda ref: One(), profile=FakeProfile(),
                     router=model(q=("Yes", 0.99)), gates=FakeGates(), store=FakeStore())
-    a = got(await e.plan(POSTING.ref)).get("q")
-    assert a is None or not a.assumed          # the autonomy layer never assumes it (the mapper's rule is #73's)
+    out = await e.plan(POSTING.ref)
+    assert "q" in out.plan.unresolved and "q" not in got(out)
