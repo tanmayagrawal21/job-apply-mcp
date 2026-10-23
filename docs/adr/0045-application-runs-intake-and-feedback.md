@@ -94,7 +94,11 @@ per-user assumptions.
 
    A human confirms with `job-apply-mcp feedback --confirm <id>`, which needs a TTY, as `approve` does. Rows still
    waiting are listed in `plan_context.awaiting_confirmation`. `profile_answer` rows are handed to the profile
-   builder only once confirmed, so a row recorded there as `user_written` really came from the user.
+   builder only once confirmed, so a row recorded there as `user_written` really came from the user. The sink passes
+   `origin="user_written"` explicitly whenever `store_answer` accepts an origin. Keys the builder refuses (for
+   example demographic keys, which come only from `profile.toml`) stay pending, with the refusal noted in the run
+   report. Verify: `test_confirmed_profile_answers_reach_builder_as_user_written`,
+   `test_builder_sink_passes_origin_when_supported`.
 2. **`answer` is deny-by-default.** A pattern stays a plain `answer` overlay only when every check clears, for the
    pattern itself, its regex words and a sample question label:
    - `canonical_key` is None;

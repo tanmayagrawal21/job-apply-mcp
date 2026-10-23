@@ -126,7 +126,9 @@ def make(tmp_path, *, adapter=None, search=None, router=None, live=False, connec
     eng = ApplyEngine(s, resolve_adapter=lambda ref: adapter, profile=Profile(), router=router,
                       gates=PolicyGates(s), store=Store())
     r = IntakeRunner(s, engine=eng, store=IntakeStore(tmp_path), resolve=resolve, search=search, mail_connect=connect,
-                     profile_answer_sink=sink)
+                     profile_answer_sink=None if sink is False else sink)
+    if sink is False:
+        r._sink = None
     return r, adapter, eng
 
 
@@ -400,8 +402,8 @@ async def test_salary_feedback_raises_but_never_below_floor(tmp_path):
 
 
 async def test_profile_answers_pending_until_builder_then_delivered(tmp_path):
-    r, _, eng = make(tmp_path)
-    assert r._sink is None                                   # the profile builder (ADR-0047) is not installed here
+    r, _, eng = make(tmp_path, sink=False)   # sink=False: no profile builder, rows stay pending
+    assert r._sink is None
     rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
     rid = rep["run_id"]
     fb = await r.give_feedback(rid, "https://boards.greenhouse.io/acme/jobs/1",
@@ -536,3 +538,40 @@ def test_untrusted_user_file_cannot_set_mail_identity(tmp_path, monkeypatch):
     from test_approvals import _cfg
     s = _cfg(tmp_path, monkeypatch, user='[intake.mail]\nself_aliases = ["intruder@example.org"]\n', via_env=True)
     assert s.intake.mail.self_aliases == []
+
+
+async def test_confirmed_profile_answers_reach_builder_as_user_written(tmp_path):
+    """With the profile builder installed (ADR-0047), confirmed rows are stored as the user's answers; unconfirmed
+    client rows never reach it; demographic keys are refused by the builder and stay pending with a note."""
+    from job_apply_mcp.persona.tools import db_for
+    r, _, _ = make(tmp_path)
+    assert r._sink is not None
+    rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
+    fb = await r.give_feedback(rep["run_id"], None, {"kind": "profile_answer", "key": "work_authorized",
+                                                     "value": "Yes"})
+    vet = await r.give_feedback(rep["run_id"], None, {"kind": "answer", "pattern": "veteran status", "value": "No"})
+    await r.run(links=[], sources=["links"])
+    db = db_for(r.s)
+    assert db.answer("work_authorized") is None                    # not confirmed: never delivered
+    await r.confirm_feedback(fb["id"], "human:cli")
+    await r.confirm_feedback(vet["id"], "human:cli")
+    rep = await r.run(links=[], sources=["links"])
+    assert db.answer("work_authorized") == "Yes"
+    origins = {row[0] for row in db._db.execute("SELECT origin FROM answers WHERE key='work_authorized'")}
+    assert origins == {"user_written"}
+    assert [p["key"] for p in rep["plan_context"]["pending_profile_answers"]] == ["veteran"]
+    assert any("veteran" in n for n in rep["plan_context"]["notes"])
+
+
+async def test_builder_sink_passes_origin_when_supported(tmp_path, monkeypatch):
+    import job_apply_mcp.persona.tools as pt
+    seen = {}
+
+    def fake(settings, key, value, scope="global", scope_value="", origin="client"):
+        seen.update(key=key, origin=origin)
+        return {"ok": True}
+
+    monkeypatch.setattr(pt, "store_answer", fake)
+    r, _, _ = make(tmp_path)
+    r._sink("work_authorized", "Yes", "global", "")
+    assert seen == {"key": "work_authorized", "origin": "user_written"}

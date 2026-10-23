@@ -18,6 +18,17 @@ Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to 
 | `dry_run` | `bool` | `true` | safe default: nothing is submitted until the user flips this |
 | `response_budget_chars` | `int` | `4000` | tools truncate/paginate to stay under this |
 
+## `[persona]`
+
+Profile builder (ADR-0047): gap collection, stored answers and interactive questions.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | `bool` | `true` | record gaps and apply stored answers/persona policies |
+| `ask_on_start` | `bool` | `true` | ask the top gaps once, at the start of a session, if the client can elicit |
+| `ask_limit` | `int` | `5` | questions per interactive round |
+| `min_hits` | `int` | `1` | a gap must have been seen on this many applications to be asked |
+
 ## `[search]`
 
 Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless `embeddings` is on.

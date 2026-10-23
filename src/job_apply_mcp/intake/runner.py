@@ -86,13 +86,21 @@ class IntakeRunner:
         self._sink = profile_answer_sink if profile_answer_sink is not None else self._builder_sink()
 
     def _builder_sink(self) -> Callable[..., Any] | None:
-        """The profile builder's answer_profile_question path (ADR-0047) when installed, else None: answers then
-        stay pending in intake_feedback and are delivered by the first run after it lands."""
+        """The profile builder's answer_profile_question path (ADR-0047). Only rows a human confirmed (or gave on a
+        TTY) are ever delivered, and they are delivered as origin="user_written" so the builder stores them as the
+        user's answers, not as suggestions. Returns None when the builder is not installed (rows stay pending)."""
         try:
-            from ..persona.tools import store_answer  # type: ignore[import-not-found]
+            import inspect
+
+            from ..persona.tools import store_answer
         except ImportError:
             return None
-        return lambda key, value, scope, scope_value: store_answer(self.s, key, value, scope, scope_value)
+        takes_origin = "origin" in inspect.signature(store_answer).parameters
+
+        def sink(key: str, value: str, scope: str, scope_value: str) -> Any:
+            kw = {"origin": "user_written"} if takes_origin else {}   # no origin param: it always stores user_written
+            return store_answer(self.s, key, value, scope, scope_value, **kw)
+        return sink
 
     @classmethod
     def from_services(cls, svc: Any) -> IntakeRunner:
