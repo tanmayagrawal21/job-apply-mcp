@@ -527,7 +527,9 @@ async def test_native_check_validity_on_the_application_form_only(drv, zip_value
 
 NOT_OPTINS = ["Do you have B2B marketing experience? *", "Have you built SMS gateways? *",
               "Are you open to future opportunities on other teams? *", "Marketing channel you manage *",
-              "Do you have B2B marketing experience?", "Newsletter?"]
+              "Have you led a product promotion launch? *", "Have you received a promotion in your current role? *",
+              "Experience with text messaging APIs? *", "Have you built opt-in flows? *", "Have you written a newsletter? *",
+              "Do you have experience with SMS gateways?", "Do you have B2B marketing experience?", "Newsletter?"]
 
 
 @pytest.mark.parametrize("wrapped", [True, False])
@@ -576,3 +578,45 @@ async def test_consent_words_in_container_or_help_text_do_not_exempt(drv):
     res = await drv.fill_and_submit(f"{base}/acme/jobs/23", ApplicationForm(ref="greenhouse:acme:23", fields=[GH_FIRST]),
                                     {"first_name": "Alex"}, {}, dry_run=True)
     assert res.status == "incomplete" and "Preferred contact" in res.detail, res.detail
+
+
+@pytest.mark.parametrize("variant", ["plain", "member-required", "api-required"])
+async def test_marketing_experience_question_blocks_in_every_variant(drv, variant):
+    req = "required" if variant == "member-required" else ""
+    block = (f"<fieldset><legend>* Do you have B2B marketing experience?</legend>"
+             f"<label><input type=radio name=b2b value=y {req}> Yes</label><label><input type=radio name=b2b value=n> No</label></fieldset>")
+    base, _ = _serve(_set_page(block))
+    fields = [GH_FIRST] + ([FormField(key="b2b", label="Do you have B2B marketing experience?", kind=FieldKind.boolean,
+                                      required=True)] if variant == "api-required" else [])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/24", ApplicationForm(ref="greenhouse:acme:24", fields=fields),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status != "dry_run", (variant, res.detail)
+
+
+async def test_marketing_option_under_which_team_blocks(drv):
+    block = ('<fieldset><legend>Which team? *</legend><label><input type=radio name=team value=m> Marketing</label>'
+             '<label><input type=radio name=team value=y> Yes</label></fieldset>')
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/25", ApplicationForm(ref="greenhouse:acme:25", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete" and "Which team" in res.detail, res.detail
+
+
+async def test_required_native_select_mentioning_marketing_blocks(drv):
+    block = ('<label for=chan>Marketing channel you manage *</label><select id=chan name=chan required>'
+             '<option value="">Select...</option><option>Email</option><option>Social</option></select>')
+    base, _ = _serve(_set_page(block))
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/26", ApplicationForm(ref="greenhouse:acme:26", fields=[GH_FIRST]),
+                                    {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete" and "Marketing channel" in res.detail, res.detail
+
+
+async def test_api_optional_key_matches_exactly(drv):
+    """An optional API key `comments` must not exempt a DOM group named `extra_comments`."""
+    block = '<div><p>Extra comments</p><label><input type=radio name=extra_comments value=a> A</label>' \
+            '<label><input type=radio name=extra_comments value=b> B</label></div>'
+    base, _ = _serve(_set_page(block))
+    form = ApplicationForm(ref="greenhouse:acme:27", fields=[
+        GH_FIRST, FormField(key="comments", label="Comments", kind=FieldKind.text, required=False)])
+    res = await drv.fill_and_submit(f"{base}/acme/jobs/27", form, {"first_name": "Alex"}, {}, dry_run=True)
+    assert res.status == "incomplete", res.detail

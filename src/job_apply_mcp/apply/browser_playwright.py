@@ -441,7 +441,13 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   // Explicit allowlist of groups that are not application questions (left empty on purpose; logged by the caller).
   // Exempt ONLY a field whose OWN label/legend states a consent intent (never a bare word, never container text),
   // and ONLY when no required markup and no API required:true applies (control review 4).
-  const CONSENT = /\\b((opt(ing)?[ -]?in|subscrib(e|ing)|sign(ing)? (me )?up|agree(ing)?|consent(ing)?) (to|for) (receiv(e|ing)|get(ting)?|be(ing)? (sent|contacted)|our (newsletter|mailing list|talent (community|network)))|receiv(e|ing) (text|sms)( message)?s? ?(messages?|updates|alerts|notifications)?|(text|sms) message (updates|alerts|notifications)|job alerts?|marketing (e-?mails?|communications?|messages?) from|(may|can) contact me (by|via) (text|sms)|join (our )?talent (community|network))\\b/i;
+  // ANCHORED: the whole question must be an opt-in statement (a short lead-in such as "Check Yes or No to indicate
+  // your" is allowed), never a question that merely mentions marketing / SMS / newsletters / promotions.
+  const CONSENT_RE = [
+    /^[^.?!]{0,60}?\\b(agree(ment)?|consent(ing)?|opt(ing)?[ -]?in|subscrib(e|ing)|sign(ing)? (me )?up|(would|'d) like) to (receive|get|be sent|be contacted)\\b[^?]*\\b(text|sms|messages?|marketing|newsletters?|job alerts?|updates|e-?mails?|communications?)\\b/,
+    /^(please )?(create (a )?job alert|(send me|get|receive) job alerts?|subscribe to (our |the )?(newsletter|mailing list)|join (our )?talent (community|network))\\b/,
+    /^[^.?!]{0,40}\\b(may|can) contact me (by|via) (text|sms)\\b/];
+  const CONSENT = { test: t => CONSENT_RE.some(r => r.test((t || '').toLowerCase().replace(/\\s+/g, ' ').trim())) };
   const REQ_ATTR = n => n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
     || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false') || /(^|[\\s_-])required([\\s_-]|$)/i.test(String(n.className || ''));
   const markedRequired = (members, container, headEl, text) => {
@@ -456,7 +462,7 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     return false; };
   const apiRequired = xs => xs.filter(Boolean).some(x => [...REQK].some(k => keyMatch(x, k)));
   const keyMatch = (x, k) => x === k || x.endsWith('_' + k) || x.startsWith(k + '_') || x.includes('_' + k + '-labeled-');
-  const apiOptional = xs => xs.filter(Boolean).some(x => OPTK.some(k => keyMatch(x, k)));
+  const apiOptional = xs => xs.filter(Boolean).some(x => OPTK.includes(x));      // EXACT name/id only
   const optText = m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '');
   const HEAD = 'legend, label, h1, h2, h3, h4, h5, h6, strong, b, .application-label, [class*=label i], [class*=question i], [class*=title i]';
   const HELP = 'small, [class*=help i], [class*=desc i], [class*=hint i], [class*=instruction i], [class*=subtitle i]';
