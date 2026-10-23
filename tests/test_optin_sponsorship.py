@@ -217,8 +217,9 @@ def test_control_labels_fail_closed(label, chans):
     p = view(CONTROL_FLAT)
     f = F("q", label, FieldKind.select, options=YN)
     assert optin_channels(f) == chans
-    if chans == ["contact"]:            # no named messaging channel: never auto-answered, even with optin:contact
-        for q in (p, view(CONTROL_FLAT | {"optin:contact": "Yes"})):
+    # no named messaging channel, or no delivery verb ("Would you like Signal updates?"): owner-only, never answered
+    if chans == ["contact"] or label == "Would you like Signal updates?":
+        for q in (p, view(CONTROL_FLAT | {f"optin:{c}": "Yes" for c in chans})):
             assert run(label, p=q)[:2] == (None, ["q"])
             assert run(label, p=q, required=False)[:2] == (None, ["q"])
         return
@@ -338,3 +339,37 @@ def test_narrow_optin_with_stored_yes_for_every_channel():
     p = view(EVERY_FLAT | {"optin:whatsapp": "Yes", "optin:sms": "Yes"})
     assert run("Can we text you using WhatsApp?", p=p)[0] == ("Yes", "rule:messaging_optin")
     assert run("Are you comfortable making cold calls?", p=view({"optin:phone": "Yes"}))[:2] == (None, ["q"])
+
+
+# control round 4: job questions about marketing / promotions / SMS products are not opt-ins and never get "No"
+MARKETING_JOBS = [
+    "Would you like to join our marketing team?",
+    "Would you like to lead marketing?",
+    "Would you like a marketing role?",
+    "Would you like to be considered for marketing roles?",
+    "Would you like to work on marketing promotions?",
+    "Would you like to lead promotions?",
+    "Do you consent to a marketing role with travel?",
+    "Would you like to own our SMS product?",
+]
+
+
+@pytest.mark.parametrize("label", MARKETING_JOBS)
+def test_marketing_and_sms_job_questions_stay_unresolved(label):
+    for p in (view(), view(EVERY_FLAT | {"marketing": "Yes", "promotions": "Yes", "sms product": "Yes"})):
+        for req in (True, False):
+            got, unresolved, _ = run(label, p=p, required=req)
+            assert (got, unresolved) == (None, ["q"]), (label, req)
+            assert run(label, FieldKind.boolean, options=None, p=p, required=req)[:2] == (None, ["q"])
+
+
+@pytest.mark.parametrize("label", [
+    "Would you like to receive marketing emails from Acme?",
+    "Do you consent to receive SMS messages?",
+    "I agree to receive promotional emails",
+    "Subscribe to our newsletter",
+    "Sign me up for the Acme newsletter",
+    "Opt in to WhatsApp updates",
+])
+def test_delivery_verb_permission_asks_are_still_declined(label):
+    assert run(label)[0] == ("No", "rule:messaging_optin")

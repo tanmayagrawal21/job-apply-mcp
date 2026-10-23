@@ -1346,11 +1346,16 @@ _OPTIN_CHANNELS: list[tuple[str, re.Pattern[str]]] = [
     ("viber", re.compile(r"\bviber\b")),
     ("imessage", re.compile(r"\bimessage\b|\brcs\b")),
     ("push", re.compile(r"\bpush\b")),
-    ("marketing", re.compile(r"\bmarketing\b|\bnewsletters?\b|\bpromotion(?:s|al)?\b|\bfuture (?:roles|opportunit\w*|"
-                             r"openings|positions|jobs)\b|\btalent (?:community|network|pool)\b|\bjob alerts?\b")),
+    # a marketing COMMUNICATION only (control round 4); bare "marketing" / "promotion" is a job topic (see "contact")
+    ("marketing", re.compile(r"\bmarketing (?:e ?mails?|messages?|communications?|texts?|offers|updates|materials?)\b|"
+                             r"\bnewsletters?\b|\bpromotional (?:e ?mails?|messages?|offers|communications?|texts?)\b|"
+                             r"\bpromotions? (?:by|via) (?:e ?mail|text|sms)\b|\bmailing list\b|"
+                             r"\babout (?:future|other|new) (?:roles|opportunit\w*|openings|positions|jobs)\b|"
+                             r"\btalent (?:community|network|pool)\b|\bjob alerts?\b")),
     # generic contact permission with no named channel: stored Yes needs optin:contact
     ("contact", re.compile(r"\b(?:contact(?:ed|ing)?|reach(?:ed|ing)?(?: out)?|messag\w*|updates?|alerts?|"
-                           r"notif\w*|reminders?|communicat\w*|keep in touch|stay in touch|hear from)\b")),
+                           r"notif\w*|reminders?|communicat\w*|keep in touch|stay in touch|hear from|"
+                           r"marketing|promotion(?:s|al)?)\b")),       # broad marker only: never auto-answered
 ]
 # ADR-0050 (deny by default): on a choice or boolean field, any channel / contact word that addresses the candidate
 # makes the field a messaging opt-in. Only these exits make it something else.
@@ -1448,12 +1453,15 @@ def _no_option(options: Sequence[str]) -> str | None:
 # answered. The broad classifier (contact_permission_channels) only marks a field owner-only: "Are you comfortable
 # making cold calls?" or "Do you have a valid email address?" is never answered by this rule.
 _PERMISSION_ASK = re.compile(
-    r"\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bsubscri\w*|\bsign(?: me)? up\b|\bpermission\b|"
-    r"\bagree\w* to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged))\b|"
+    # control round 4: every alternative names a delivery (receive / be contacted / text you ...); a bare
+    # "would you like", "consent" or "permission" never counts
+    r"\bopt(?:ing|ed)? ?in(?: to| for|$)|\bsubscri\w* to\b|\bsign (?:me )?up (?:for|to)\b|"
+    r"\b(?:consent\w*|agree\w*) to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged|sent))\b|"
+    r"\bpermission to (?:send|contact|text|call|email|message|reach)\w* (?:you|your|me)\b|"
     r"\b(?:may|can|could) (?:we|our (?:team|recruiters?)|recruiters?|\w+ recruiting) (?:send|contact|text|call|email|"
     r"message|reach|whats ?app)\w*(?: or (?:contact|text|call|email|message)\w*)? (?:you|your)\b|"
     r"\bok(?:ay)? to (?:text|call|email|contact|message|whats ?app)\w* (?:you|your)\b|"
-    r"\b(?:would|d) (?:you |i )?like (?:to receive|to get)?\b|"
+    r"\b(?:would|d) (?:you |i )?like to (?:receive|get|be sent|hear)\b|"
     r"\bjoin (?:our|the|\w+(?: \w+)? s) (?:talent (?:community|network|pool)|mailing list|newsletter)\b")
 # channels that may be auto-answered; bare phone/call, email, push and generic contact words never are
 _AUTO_CHANNELS = frozenset({"whatsapp", "sms", "signal", "telegram", "wechat", "line", "viber", "imessage",
