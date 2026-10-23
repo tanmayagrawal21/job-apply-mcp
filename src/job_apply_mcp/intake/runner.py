@@ -69,6 +69,7 @@ class Cand:
     title: str = ""
     approval_id: str | None = None
     deferred: bool = False  # not handled this run (over the cap): its mail message stays unprocessed
+    assumed: list[dict[str, Any]] | None = None   # ADR-0052: answers the agent assumed for this posting
 
     def row(self) -> dict[str, Any]:
         r = {"ref": self.target, "url": self.target if self.target.startswith("http") else None,
@@ -284,11 +285,15 @@ class IntakeRunner:
                        {**{k: p[k] for k in ("id", "key", "value", "scope", "scope_value") if p.get(k)},
                         **({} if p["confirmed"] else {"confirm": f"job-apply-mcp feedback --confirm {p['id']}"})}
                        for p in pending_pa],
-                   "awaiting_confirmation": getattr(self, "_awaiting", [])}
+                   "awaiting_confirmation": getattr(self, "_awaiting", []),
+                   # ADR-0052: every assumed answer, labelled, per posting
+                   "assumed": {c.target: c.assumed for c in cands if c.target and c.assumed}}
             rep = self._build(run_id, rows, cfg.report_rows)
-            await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live"})
-        out = {**rep, "mode": "dry_run" if dry else "live", "max_applications": n or None,
-               "plan_context": {k: v for k, v in ctx.items() if v}}
+            await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live",
+                                          "autonomy": self.s.answers.autonomy})
+        out = {**rep, "mode": "dry_run" if dry else "live", "autonomy": self.s.answers.autonomy,
+               "max_applications": n or None, "assumed": ctx["assumed"] or None,
+               "plan_context": {k: v for k, v in ctx.items() if v and k != "assumed"}}
         if preview:
             out["live_preview"] = preview
         return {k: v for k, v in out.items() if v is not None}
@@ -365,6 +370,8 @@ class IntakeRunner:
                 c.co, c.title = cached.posting.company or c.co, cached.posting.title or c.title
             g = out.plan.gate
             c.approval_id = out.approval_id
+            c.assumed = [{"key": a.key, "value": a.value, "rule": a.source, **({"why": a.rationale} if a.rationale else {})}
+                         for a in out.plan.answers if a.assumed] or None
             if g.decision != Decision.submit:
                 c.status = "skipped" if g.decision == Decision.skip else "needs_human"
                 c.why = "; ".join(g.reasons) or g.decision.value
@@ -542,6 +549,7 @@ class IntakeRunner:
                                  "awaiting_confirmation")
                if summ.get(k)}
         return {**rep, "started": run["started_at"], "finished": run["finished_at"], "mode": summ.get("mode"),
+                "autonomy": summ.get("autonomy") or "strict", **({"assumed": summ["assumed"]} if summ.get("assumed") else {}),
                 **({"plan_context": ctx} if ctx else {})}
 
     async def confirm_feedback(self, fid: int, by: str) -> dict[str, Any]:

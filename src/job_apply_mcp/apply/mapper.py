@@ -1044,6 +1044,14 @@ def llm_safe_short(f: FormField) -> bool:
     return any(t.fullmatch(n) for t in _LLM_SAFE_TEMPLATES)
 
 
+def never_llm_legal_place(f: FormField) -> bool:
+    """never_llm() without the ADR-0050 contact-permission clause: legal-status and place wording only (ADR-0052)."""
+    texts = [normalize(f.label), *(normalize(o) for o in f.options)]
+    if any(_NEVER_LLM_LEGAL.search(t) or _NEVER_LLM_PLACE.search(t) for t in texts):
+        return True
+    return f.kind != FieldKind.textarea and any(_NEVER_LLM_PLACE_SHORT.search(t) for t in texts)
+
+
 def never_llm(f: FormField) -> bool:
     """True for legal-status and place questions (label or options): deterministic rule or owner only."""
     texts = [normalize(f.label), *(normalize(o) for o in f.options)]

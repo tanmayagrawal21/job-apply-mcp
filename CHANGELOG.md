@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Autonomy level `[answers] autonomy = strict | safe_default | infer` (trusted user config only; default strict):
+  safe declines for genuine contact/marketing permission asks, the configured "how did you hear" default and
+  "decline to self-identify"; at `infer`, conservative resume-based answers to capability questions. Hard limits
+  (authorization, background, attestations, legal agreements, salary, start date/location) are never assumed.
+  Assumed answers are labelled in plan, evidence and run report; repeated kinds become one profile question
+  (ADR-0052).
 - Human-provided email/SMS verification codes: `awaiting_code` state, `provide_verification_code`, MCP elicitation, optional desktop notification; the tool never reads mail and never stores the code (ADR-0026).
 - Human-signed, time-limited grants (`job-apply-mcp grant`), `grants_status`, `otp_assist` (ADR-0027).
 - Consent window: `job-apply-mcp consent --for 24h | --per-run [--max N] [--scopes ...]` (TTY only), `--status`,
