@@ -1195,6 +1195,9 @@ class ApplyEngine:
         try:
             if not dry:
                 await self.expire_pending()
+                from ..migrate import pending_message, pending_old_state
+                if old := pending_old_state(self.s):          # ignored dir holds submitted records (ADR-0054)
+                    return SubmitResult(ref=ref, status="error", detail=pending_message(old))
                 blocked = self._state_block(ref)
                 if blocked:
                     return blocked

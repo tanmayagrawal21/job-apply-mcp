@@ -4,7 +4,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from ..config import Settings
+from ..config import Settings, state_path
 from ..core import registry
 from ..core.interfaces import PlatformAdapter
 from .engine import ApplyEngine
@@ -56,7 +56,7 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
         gates = ad.PolicyGates(settings)
     if store is None:
         sqlite = _need("store.sqlite", "application store", "feat/store-policy")
-        store = sqlite.SqliteStore(settings.paths.data_dir, dedupe_days=settings.policy.dedupe_days,
+        store = sqlite.SqliteStore(state_path(settings), dedupe_days=settings.policy.dedupe_days,
                                   dedupe_mode=settings.dedupe.mode, company_aliases=settings.dedupe.company_aliases,
                                   title_threshold=settings.dedupe.title_threshold)
     if router is None:
@@ -71,7 +71,7 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
         except ImportError:
             control = None
     from .approvals import ApprovalBook
-    book = ApprovalBook(settings.paths.data_dir, ttl_s=settings.apply.approval_ttl_s,
+    book = ApprovalBook(state_path(settings), ttl_s=settings.apply.approval_ttl_s,
                        reconcile_delays_min=settings.ingest.reconcile_delays_min)
     engine = ApplyEngine(settings, approvals=book, resolve_adapter=resolve_adapter or adapter_resolver(settings),
                          profile=profile, router=router, gates=gates, store=store, driver_factory=driver_factory,

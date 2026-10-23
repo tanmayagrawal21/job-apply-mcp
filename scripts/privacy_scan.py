@@ -5,7 +5,7 @@ Modes: --diff [BASE] (added lines only), --staged, --paths P [P ...], or no mode
 Private terms (--terms FILE, one per line, case-insensitive) are never printed; findings show
 "private term #k" and a masked excerpt.
 
---allow FILE (default ~/.config/job-apply-mcp/privacy_allow.txt when it exists; kept outside the repo)
+--allow FILE (default <config dir>/privacy_allow.txt, honouring XDG_CONFIG_HOME, when it exists; kept outside the repo)
 accepts known, owner-approved findings in whole-tree scans only (--diff/--staged always report added lines).
 Lines: `@salt <random>`, `<path-glob>\t<fingerprint-or-*>` (fingerprint = --fingerprint K, a salted SHA-256
 prefix of term #K, so rules survive reordering and hold no value), or `@urls` (a private term inside the owner
@@ -27,7 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ALLOW_FILE = ".privacy-allow"
-DEFAULT_ACCEPT_FILE = Path("~/.config/job-apply-mcp/privacy_allow.txt")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from job_apply_mcp import paths as _paths  # the one path resolver (stdlib-only, ADR-0054)
+
+DEFAULT_ACCEPT_FILE = _paths.privacy_allow_file()
 GITHUB_OWNER_RE = re.compile(r"https://github\.com/([A-Za-z0-9-]{1,39})(?=[/\s)\]>\"'`.,]|$)", re.IGNORECASE)
 FP_RE = re.compile(r"[0-9a-f]{12}")
 SAFE_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "localhost", "users.noreply.github.com",

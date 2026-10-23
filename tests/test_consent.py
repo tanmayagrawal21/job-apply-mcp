@@ -720,7 +720,7 @@ def test_raw_mail_parses_authentication_results():
 
 def _write_user_config(text):
     from job_apply_mcp import paths
-    f = paths.config_file()
+    f = paths.trusted_config_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(text)
     f.chmod(0o600)

@@ -6,6 +6,7 @@ from job_apply_mcp.config import load_settings
 def test_probe_ignores_hostile_environment(tmp_path):
     assert tmp_path in paths.config_dir().parents and tmp_path in paths.data_dir().parents
     assert tmp_path in paths.config_file().parents
+    assert tmp_path in paths.trusted_config_file().parents and tmp_path in paths.state_dir().parents
     s = load_settings()
     assert s.dry_run is True
     assert s.apply.approval_mode != "agent"

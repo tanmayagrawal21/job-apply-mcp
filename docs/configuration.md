@@ -167,6 +167,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `data_dir` | `str` | `"~/.local/share/job-apply-mcp"` |  |
 | `profile` | `str` | `"~/.config/job-apply-mcp/profile.toml"` |  |
 | `resume` | `str \| None` | `none` |  |
+| `state_dir` | `str \| None` | `none` | security-state stores (consent, grants, approvals, audit); trusted user config only |
 
 ## `[provenance]`
 

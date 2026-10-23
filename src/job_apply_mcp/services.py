@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import Settings
+from .config import Settings, state_path
 from .core.concurrency import HostLimiter, bounded_gather
 from .core.interfaces import PlatformAdapter
 from .core.models import Posting
@@ -70,7 +70,7 @@ class Services:
         if self._store is None:
             from .store.sqlite import SqliteStore
 
-            self._store = SqliteStore(self.settings.paths.data_dir, dedupe_days=self.settings.policy.dedupe_days,
+            self._store = SqliteStore(state_path(self.settings), dedupe_days=self.settings.policy.dedupe_days,
                                  dedupe_mode=self.settings.dedupe.mode,
                                       company_aliases=self.settings.dedupe.company_aliases,
                                       title_threshold=self.settings.dedupe.title_threshold)
