@@ -27,8 +27,10 @@ live run (for example Greenhouse at 25/25). Statuses were unclear: `handed_off` 
    a `needs_human` whose detail is the control layer's `quota reached` -> `quota_blocked`; `duplicate` ->
    `skipped`; `roadblock` -> `unknown`; `error` -> `failed`. Rows stored before this ADR (`handed_off`, `dry_run`)
    are mapped on read, and `run_report(category=...)` accepts the old names.
-   A mail message is marked processed only when every link in it reached a final state; a `quota_blocked` or
-   cap-skipped link keeps its message pending, so the next run retries it.
+   A mail message is marked processed only by a live run, and only when every link in it reached a final state
+   (submitted, needs_human recorded, or ineligible). A `quota_blocked` or cap-skipped link keeps its message
+   pending, so the next run retries it. A dry run applies nothing and never marks a message processed, so the live
+   run still sees every link.
 4. **Dry runs preview the live quota.** `live_preview` = `{would_submit, quota_blocked, blocked: [{ref, by}],
    warning: [...]}` built from the control layer's read-only `daily_limit_status()` (the same data as
    `control_status`), walking the `dry_run_ok` rows in order against the day, run and per-platform remainders. It

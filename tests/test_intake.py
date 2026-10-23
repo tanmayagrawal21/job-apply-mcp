@@ -257,11 +257,11 @@ async def test_priority_order_links_then_mail_then_discovery(tmp_path):
 
 
 async def test_mail_ids_recorded_and_deferred_mail_kept(tmp_path):
-    r, _ad, _ = make(tmp_path)
+    r, _ad, _ = make(tmp_path, live=True)   # only a live run consumes mail (ADR-0049)
     r.s.intake.plan_factor = 1.0
     rep = await r.run(sources=["mail"], max_applications=1)
     # message 1: greenhouse + lever + unsupported; only one planned, the rest deferred -> message stays unprocessed
-    assert rep["counts"]["dry_run_ok"] == 1 and rep["counts"]["unsupported_site"] == 1
+    assert rep["counts"]["submitted"] == 1 and rep["counts"]["unsupported_site"] == 1
     assert await r.store.processed(["<links-001@fixture.test>", "<links-002@fixture.test>"]) == set()
     rep = await r.run(sources=["mail"], max_applications=10)
     assert await r.store.processed(["<links-001@fixture.test>", "<links-002@fixture.test>"]) == {

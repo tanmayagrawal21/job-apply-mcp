@@ -193,3 +193,13 @@ async def test_quota_blocked_and_cap_skipped_mail_links_stay_pending(tmp_path):
     assert await r.store.processed(keys) != set(keys)  # the message with a cap-skipped link stays pending
     rep = await r.run(sources=["mail"], max_applications=10)
     assert await r.store.processed(keys) == set(keys)  # every link reached a final state: now processed
+
+
+async def test_dry_run_never_marks_mail_processed(tmp_path):
+    keys = ["<links-001@fixture.test>", "<links-002@fixture.test>"]
+    r, _ad, _ = make(tmp_path)                         # dry run
+    rep = await r.run(sources=["mail"], max_applications=10)
+    assert rep["mode"] == "dry_run" and rep["counts"]["dry_run_ok"] >= 2
+    assert await r.store.processed(keys) == set()     # a dry run applies nothing: the live run still sees the links
+    rep2 = await r.run(sources=["mail"], max_applications=10)
+    assert rep2["counts"] == rep["counts"]            # same links offered again

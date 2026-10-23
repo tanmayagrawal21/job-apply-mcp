@@ -9,8 +9,8 @@ Order of a run:
      dry and live mode (ADR-0049); skipped and ineligible ones never count. Submit the ready ones concurrently
      across hosts, at most 1 per host, under intake.submit_parallel; the engine's gates, dedupe, approvals, control
      layer and dry_run all still apply
-  6. write the run report (items + summary; one status per posting, see store.CATEGORIES) and mark fully handled
-     mail messages as processed. A dry run also previews what the live quota would do (`live_preview`).
+  6. write the run report (items + summary; one status per posting, see store.CATEGORIES) and, in a live run only,
+     mark fully handled mail messages as processed. A dry run also previews what the live quota would do (`live_preview`).
 """
 from __future__ import annotations
 
@@ -273,7 +273,8 @@ class IntakeRunner:
             await self._plan_and_submit(cands, n, dry)
             preview = self._live_preview(cands) if dry else None
         finally:
-            done = self._processed_messages(cands)
+            # A dry run applies nothing, so it never consumes a mail message: the live run must still see its links.
+            done = {} if dry else self._processed_messages(cands)
             if done:
                 await self.store.mark_processed(run_id, done)
             rows = [c.row() for c in cands if c.target]
