@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import time
@@ -33,6 +34,7 @@ from ..core.models import (
     SubmitResult,
 )
 from ..llm.base import LLM_TIMINGS
+from ..writing import checks
 from .approvals import ApprovalBook, evidence_path
 from .mapper import (
     DEMOGRAPHIC_KEYS,
@@ -48,7 +50,7 @@ from .mapper import (
 )
 from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
 from .salary import compute_ask, format_ask, is_salary_field
-from .writing import WriteProgress, load_exemplar, review_rubric, summarize_posting, write_text
+from .writing import WriteProgress, load_exemplar, review_rubric, review_text, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
 _SENSITIVE_KEYS = SEMANTIC_SENSITIVE | {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
@@ -61,6 +63,73 @@ _SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|
 _ATTEST_LABEL = re.compile(
     r"certif|attest|foreign talent|own work|by selecting|i agree|i acknowledge|i declare|under penalty|"
     r"true and (?:correct|accurate)|truthful|export control|conflict of interest", re.IGNORECASE)
+# Attestation, certification, no-AI and consent wording that must never ride along inside an answer (ADR-0044).
+_ATTEST_TEXT = re.compile(
+    r"\b(?:i|we|the\s+applicant|applicant|the\s+candidate|candidate|the\s+undersigned)\s+"
+    r"(?:hereby\s+|also\s+|further\s+|have\s+|has\s+|do\s+|did\s+|can\s+|will\s+)?"
+    r"(?:certif(?:y|ies|ied)|attest(?:s|ed)?|affirm(?:s|ed)?|declar(?:e|es|ed)|confirm(?:s|ed)?|"
+    r"acknowledg(?:e|es|ed)|agree(?:s|d)?|consent(?:s|ed)?|authori[sz](?:e|es|ed))\b|"
+    r"\bhereby\b|\bpersonally\s+(?:completed|wrote|written|prepared)\b|"
+    r"\b(?:completed|written|prepared)\s+by\s+me\s+personally\b|"
+    r"\bwithout\s+(?:the\s+)?(?:use|help|assistance|aid)\s+of\s+(?:any\s+)?(?:an?\s+)?(?:ai|artificial intelligence|"
+    r"llms?|chatgpt|generative)\b|\b(?:did\s+not|didn\W?t|never)\s+use(?:d)?\s+(?:any\s+|an?\s+)?(?:chatgpt|copilot|"
+    r"ai|artificial intelligence|generative|llms?)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\b|"
+    r"\bwithout\s+(?:any\s+|the\s+)?(?:ai|a\.i\.|artificial intelligence|llms?|chatgpt|generative)\b|"
+    r"\b(?:ai|artificial intelligence|chatgpt|llms?)\s+(?:was|were|is|are|has\s+been|had\s+been)\s+(?:not|never)\s+(?:used|involved)\b|"
+    r"\b(?:ai|llm)\W?free\b|\bzero\s+(?:ai|artificial intelligence|llms?)\b|\bsolemnly\b|\bswear\b|\bsworn\b|"
+    r"\b(?:written|wrote|authored|composed|drafted|completed|prepared)\s+(?:this\s+|it\s+|all\s+)?by\s+me\b|"
+    r"\bby\s+myself\b|\b(?:wrote|written|authored|composed|drafted)\s+(?:this|it|these)\s+myself\b|"
+    r"\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b|"
+    r"\bpermission\s+to\s+(?:text|call|contact|email|e\W?mail|message|sms)\b|\bsms\b|\btexts\b|"
+    r"\btext\s+(?:me|messages?|messaging|updates?|alerts?)\b|\bcall\s+or\s+text\b|"
+    r"\bcontact\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|text|sms|mobile|cell)\b|"
+    # authorship and no-AI claims by meaning (ADR-0044)
+    r"\bnot\s+(?:ai|llm|machine|computer)\W?(?:generated|written|assisted|produced)\b|\bnon\W?ai\b|"
+    r"\bhuman\W?(?:written|authored|made|generated|crafted)\b|\b100\s?%\s+human\b|\bentirely\s+human\b|"
+    r"\bmy\s+own\s+(?:words|writing|work)\b|\bevery\s+(?:single\s+)?word\b[^.!?\n]{0,60}\bmy\s+own\b|"
+    r"\bentirely\s+(?:my\s+own|mine)\b|\bunaided\b|"
+    r"\b(?:no|without(?:\s+any)?)\s+(?:outside\s+|external\s+)?(?:assistance|help)\b|"
+    r"\b(?:wrote|written|authored|composed|drafted)\s+(?:this|it|these|them|everything)?\s*"
+    r"(?:entirely\s+|completely\s+)?(?:alone|by\s+myself|myself|on\s+my\s+own|single\W?handedly)\b|"
+    r"\bhand\W?written\s+by\b|"
+    r"\b(?:did\s+not|didn\W?t|never|do\s+not|don\W?t|have\s+not|haven\W?t)\s+(?:use|used|rely\s+on|relied\s+on|consult|"
+    r"consulted)\s+(?:any\s+|an?\s+)?(?:gpt|chatgpt|claude|gemini|copilot|bard|openai|llms?|ai|artificial intelligence)\b|"
+    r"\b(?:gpt|chatgpt|claude|gemini|copilot|bard|openai|llms?|ai)(?:\W?\d+(?:\.\d+)?)?\s+(?:was|were|is|has\s+been|had\s+been)"
+    r"\s+(?:not|never)\s+(?:used|involved|consulted|employed)\b|"
+    # pledges, completeness statements and other consent/contact wording
+    r"\b(?:i|we)\s+(?:hereby\s+)?(?:pledge|vouch|guarantee|warrant|promise)\b|"
+    r"\b(?:accurate|true|correct)\s+and\s+(?:complete|accurate|correct|true)\b|"
+    r"\baccept\s+the\s+(?:privacy|terms|policy|conditions)\b|\bprivacy\s+(?:policy|notice)\b|"
+    r"\bopt\W?in\s+to\b|\bopt\s+me\s+in\b|\bsign\s+me\s+up\b|\bsubscribe\s+me\b|"
+    r"\b(?:okay|ok|fine|happy|free|welcome)\s+to\s+(?:email|e\W?mail|call|ring|phone|text|contact|message)\s+me\b|"
+    r"\b(?:receive|get|send\s+me|email\s+me)\s+(?:\w+\s+){0,3}?(?:promotions?|promotional|marketing|offers|newsletters?)\b|"
+    # meaning-level paraphrases (general wording, any locale)
+    r"\b(?:ai|llms?|chatgpt|generative\s+ai|language\s+models?)\s+(?:involvement|usage|use|assistance)\s*[:=-]\s*"
+    r"(?:none|nil|no|zero|0|n/?a)\b|\buse\s+of\s+(?:ai|llms?|language\s+models?)\s*[:=-]\s*(?:none|nil|no|zero|0)\b|"
+    r"\b(?:ai|llms?)\s*[:=-]\s*(?:none|nil|zero|0)\b|\bno\s+generative\s+tools?\b|"
+    r"\bzero\s+use\s+of\s+(?:ai|llms?|language\s+models?)\b|\bnot\s+(?:generated|written|produced)\s+by\s+(?:a\s+)?"
+    r"(?:machine|computer|bot|model|ai)\b|\bsole\s+(?:author|writer|creator)\b|\b(?:penned|authored)\s+by\s+me\b|"
+    r"\b(?:authentically|genuinely|wholly|truly)\s+(?:mine|my\s+own)\b|\bon\s+my\s+(?:honou?r|word)\b|"
+    r"\b(?:i\s+)?give\s+(?:you\s+)?my\s+word\b|\bfalse\s+(?:statements?|information)\s+(?:may|will|could|can)\b|"
+    r"\b(?:reach|contact|message)\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|mobile|cell|whatsapp|"
+    r"telegram|signal|viber|wechat|line|sms|text)\b",
+    re.IGNORECASE)
+# Text aimed at the reviewer model rather than the employer (ADR-0044).
+_INJECT_TEXT = re.compile(
+    r"[{\[]\s*\"?\s*(?:pass|violations|scores|at_least_as_strong|corrected)\b|(?:^|[\n.!?]\s*)(?:dear\s+)?(?:reviewer|"
+    r"grader|evaluator|assistant|system|note to (?:the\s+)?(?:reviewer|model|ai))\s*[:,]|\bignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
+    r"(?:instructions|rules|text)|\b(?:respond|reply|answer)\s+with\b|\breturn\s+json\b|\bpass\s*[:=]\s*true\b|"
+    r"\bevaluator\b|\brubric\b|</?\s*(?:pass|verdict|score)\s*>|\boutput\s+(?:a\s+)?[\"']?(?:pass|true)\b|"
+    r"\bignore\s+(?:the\s+|all\s+|any\s+|your\s+)?(?:rubric|rules|instructions|criteria|checks?|guidelines|above|"
+    r"previous|prior)\b|<<<|>>>",
+    re.IGNORECASE)
+# Consent / opt-in labels: like attestations, never set by the client in agent mode (ADR-0044).
+_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|marketing|opt[\s-]?in|subscribe|newsletter|"
+                            r"terms (?:and|&) conditions|i agree|i accept", re.IGNORECASE)
+_EXACT_VALUE = re.compile(
+    r"(?:https?://|www\.)\S+|[+-]?\d[\d,]*(?:\.\d+)?\s?%?|\d{4}-\d{2}(?:-\d{2})?|\d{1,2}/\d{1,2}/\d{2,4}|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?:\d{1,2},?\s+)?\d{4}", re.IGNORECASE)
+_FREE_TEXT_KINDS = frozenset({FieldKind.text, FieldKind.textarea, FieldKind.unknown})
 _AI_LABEL = re.compile(r"\bai\b|artificial intelligence|\bllms?\b|chatgpt|copilot|generative", re.IGNORECASE)
 _HUMAN_LABEL = re.compile(_ATTEST_LABEL.pattern + "|" + _AI_LABEL.pattern, re.IGNORECASE)
 # "What AI tools are you using?" is a factual prose question (writer + review), not an AI-use attestation (ADR-0033).
@@ -154,6 +223,7 @@ class ApplyEngine:
         self._exemplar: str | None = None
         self.persona: Any = None      # PersonaPolicy (ADR-0047); set by the factory
         self.gaps: Any = None         # ProfileDB gap collector; set by the factory
+        self._reviewed: set[str] = set()     # digests of (ref, key, text) client prose that passed review (ADR-0044)
 
     # ---------------------------------------------------------------- helpers
     def _default_driver(self, name: str) -> BrowserDriver:
@@ -678,6 +748,154 @@ class ApplyEngine:
         reasons = res.get("reasons") if isinstance(res, dict) else getattr(res, "reasons", None)
         return f"control: {v}" + (f" ({'; '.join(map(str, reasons))[:120]})" if reasons else "")
 
+    def _client_prose_review_on(self) -> bool:
+        """Agent mode (and auto-approve, which is agent-only): nobody but the client sees its prose before an
+        approval covers it, so it gets the writer path's review. Human mode: a human approves (ADR-0044)."""
+        return self.s.apply.approval_mode == "agent" and self.s.writing.review_client_prose
+
+    def _digest(self, ref: str, key: str, text: str) -> str:
+        return hashlib.sha256(f"{ref}\0{key}\0{text}".encode()).hexdigest()
+
+    async def _review_client_prose(self, ctx: _Ctx, eff: dict[str, Any],
+                                   base: dict[str, Any]) -> list[dict[str, Any]]:
+        """Review free-text answers the client supplied (not identical to a server-written/approved answer) under
+        writing.timeout_s. Returns needs_review client_tasks for every field that did not pass; [] when all pass.
+        Fails closed: a timeout or reviewer error is a failure (ADR-0044)."""
+        if not self._client_prose_review_on():
+            return []
+        ref = ctx.form.ref
+        fields = {f.key: f for f in ctx.form.fields}
+        failed: list[dict[str, Any]] = []
+        todo: list[tuple[FormField, str]] = []
+        for k, v in eff.items():
+            if base.get(k) == v and k in base:
+                continue                                         # server-written or already approved
+            f = fields.get(k)
+            if f is None:                                        # not a form field: never carried to the adapter
+                if v not in (None, ""):
+                    failed.append({"key": k, "needs_review": True, "violations": ["[field] not a field of this form"]})
+                continue
+            if v is None or v is False or v == "":
+                continue                                         # nothing filled / declined
+            if not (isinstance(v, str | bool | int | float)
+                    or (isinstance(v, list | tuple) and all(isinstance(x, str) for x in v))):
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    f"[type] answer must be a string, bool, number or list of strings, got {type(v).__name__}"]}))
+                continue
+            if self._needs_human(f) or _CONSENT_LABEL.search(f.label):
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    "[attestation] attestation/consent field: only a profile answer or a human may set it"]}))
+                continue
+            texts = [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)] \
+                if isinstance(v, list | tuple) else []
+            bad = next((b for b in (self._text_guard(x, x in f.options) for x in texts) if b), None)
+            if bad:                                              # never reaches the reviewer or the form
+                failed.append(self._task(f, ctx, {"needs_review": True, "draft": str(v)[:2000], "violations": [bad]}))
+                continue
+            if f.kind not in _FREE_TEXT_KINDS or self._deterministic(f, v):
+                continue
+            if not isinstance(v, str):                           # lists, dicts, ...: never coerced into free text
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    f"[type] free-text answer must be a string, got {type(v).__name__}"]}))
+                continue
+            if not v.strip():
+                continue
+            if self._digest(ref, k, v) not in self._reviewed:
+                todo.append((f, v))
+        if not todo:
+            self._audit_rejected(ref, failed)
+            return failed
+        w = self.s.writing
+        if self._exemplar is None:
+            self._exemplar = load_exemplar(w.style_exemplar)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + w.timeout_s if w.timeout_s and w.timeout_s > 0 else None
+        resume = getattr(self.profile, "resume_facts", None)
+        corpus = getattr(self.profile, "corpus", None)
+
+        async def one(f: FormField, text: str):
+            coro = review_text(
+                self.router, w, text, kind="cover_letter" if "cover" in normalize(f.label) else "free_text",
+                label=f.label, company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
+                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
+                resume=resume, corpus=corpus)
+            if deadline is None:
+                return await coro
+            async with asyncio.timeout_at(deadline):
+                return await coro
+
+        with self._llm_timings(ref), self._stage(ref, "review_client"):
+            results = await bounded_gather((one(f, v) for f, v in todo), self.s.concurrency.global_limit)
+        for (f, text), res in zip(todo, results, strict=True):
+            if isinstance(res, TimeoutError):
+                why, card, rubric = [f"[timeout] review exceeded writing.timeout_s={w.timeout_s:g}s (fail closed)"], {}, ""
+            elif isinstance(res, BaseException):
+                why, card, rubric = [f"[error] reviewer failed: {type(res).__name__} (fail closed)"], {}, ""
+            elif res.status == "pass":
+                self._reviewed.add(self._digest(ref, f.key, text))
+                continue
+            else:
+                why, card, rubric = [v.line() for v in res.violations][:6], res.scorecard, res.rubric
+            extra: dict[str, Any] = {"needs_review": True, "draft": text, "violations": why}
+            if rubric:
+                extra["review"] = rubric
+            if card:
+                extra["scorecard"] = card
+            failed.append(self._task(f, ctx, extra))
+        self._audit_rejected(ref, failed)
+        return failed
+
+    def _audit_rejected(self, ref: str, failed: list[dict[str, Any]]) -> None:
+        if failed:
+            self.approvals.audit("client_prose_rejected", ref=ref, actor="review",
+                                 detail=",".join(t["key"] for t in failed)[:200])
+
+    def _deterministic(self, f: FormField, v: Any) -> bool:
+        """Exact values that need no prose review: the profile's own value for a recognised key, a URL, a number,
+        a date, or an option of the field's fixed set (ADR-0044)."""
+        if v is None:
+            return True                                          # nothing is filled
+        if isinstance(v, bool):
+            return bool(f.options) and str(v) in f.options
+        if isinstance(v, int | float):
+            return True
+        if not isinstance(v, str):
+            return False
+        t = v.strip()
+        if f.options and t in f.options:
+            return True
+        if self._is_prose_question(f):
+            return False                                         # a URL or number in a "Why..." box is still prose
+        key = canonical_key(f.label)
+        if key is not None:
+            with contextlib.suppress(Exception):
+                pv = self.profile.lookup(key)
+                if pv is not None and str(pv).strip() == t:
+                    return True
+        return bool(_EXACT_VALUE.fullmatch(t))
+
+    def _text_guard(self, text: str, option: bool = False) -> str | None:
+        """Deterministic checks on every client string before any reviewer call (ADR-0044). Deny by default: any
+        code point outside the prose allowlist is `[charset]` (skipped only for an exact option of the field's
+        fixed set, which is form text, not client text). Then stop phrases, attestation/no-AI/consent wording and
+        reviewer-addressed text are scanned on the normalised views from `checks.scan_forms`."""
+        bad = checks.charset_violations(text)
+        if bad and not option:
+            return f"[charset] characters outside the allowlist {bad[:4]}"
+        forms = checks.scan_forms(text)
+        for t in forms:
+            low = t.lower()
+            for p in self.s.policy.stop_phrases:
+                if p.strip() and re.search(rf"(?<!\w){re.escape(p.lower())}(?!\w)", low):
+                    return f"[attestation] attestation/consent text in an answer: {p!r}"
+            m = _ATTEST_TEXT.search(t)
+            if m:
+                return f"[attestation] attestation/consent text in an answer: {m.group(0)!r}"
+        m = _INJECT_TEXT.search(forms[0])
+        if m:
+            return f"[injection] text addressed to the reviewer: {m.group(0)!r}"
+        return None
+
     async def submit(self, ref: str, answers: dict[str, Any] | None = None, approval_id: str | None = None,
                      dry_run: bool | None = None, approver: Approver | None = None) -> SubmitResult:
         try:
@@ -706,14 +924,22 @@ class ApplyEngine:
                         return SubmitResult(ref=ref, status="error",
                                             detail=f"answer '{k}' differs from the approved plan; re-plan")
                 eff = {**cached.answers, **supplied}
+                base = cached.answers
             elif dry or self.s.apply.auto_approve_active:
                 plan = await self._plan_ctx(ref, ctx)
                 if plan.plan.gate.decision != Decision.submit:
                     return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
                                         else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
-                eff = {**{a.key: a.value for a in plan.plan.answers}, **supplied}
+                base = {a.key: a.value for a in plan.plan.answers}
+                eff = {**base, **supplied}
             else:
                 eff = supplied                      # stateless: must hash-match the server-held record
+                rec, _ = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
+                base = eff if rec is not None and self.approvals.matches(rec, eff, self._split(ctx.form, eff)[1]) else {}
+            failed = await self._review_client_prose(ctx, eff, base)
+            if failed:
+                return SubmitResult(ref=ref, status="needs_review", client_tasks=failed,
+                                    detail=f"client prose failed review: {[t['key'] for t in failed][:8]}")
             hits = self._stop_hits(ctx.form)
             if hits:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
