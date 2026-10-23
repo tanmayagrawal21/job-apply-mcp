@@ -216,3 +216,19 @@ async def test_dry_run_never_marks_mail_processed(tmp_path):
     assert await r.store.processed(keys) == set()     # a dry run applies nothing: the live run still sees the links
     rep2 = await r.run(sources=["mail"], max_applications=10)
     assert rep2["counts"] == rep["counts"]            # same links offered again
+
+
+async def test_needs_human_why_has_count_and_labels_not_values(tmp_path):
+    r, _ad, _ = make(tmp_path)
+    why = r._unresolved_why([f"q{i}" for i in range(9)] + ["x"], type("C", (), {"form": ApplicationForm(
+        ref="r", submit_via=["api"], fields=[F("q0", "L" * 90), F("q1", "Current employer")])})())
+    assert why.startswith("10 unresolved (7 shown): ") and "Current employer" in why and why.endswith(", …")
+    assert "L" * 61 not in why and "q2" in why
+
+
+async def test_control_status_reports_last_run_mode(tmp_path):
+    from job_apply_mcp.control.tools import last_run_info
+    r, _ad, _ = make(tmp_path)
+    rep = await r.run(links=GH[:1], sources=["links"], dry_run=True)
+    info = await last_run_info(r.s.paths.data_dir)
+    assert info["dry_run"] is True and info["run_id"] == rep["run_id"]

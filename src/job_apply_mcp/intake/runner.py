@@ -379,7 +379,7 @@ class IntakeRunner:
                     c.status = "skipped"
                     c.why = f"required prose not approved yet: {prose[:4]} (draft_answers, then submit)"
                 else:
-                    c.status, c.why = "needs_human", f"unresolved required fields: {out.plan.unresolved[:6]}"
+                    c.status, c.why = "needs_human", self._unresolved_why(out.plan.unresolved, cached)
                     eligible.append(c)
                 continue
             pid = cached.posting.ref if cached is not None else _key(c.target)
@@ -428,6 +428,20 @@ class IntakeRunner:
                     await one(c)
 
         await asyncio.gather(*(host_worker(v) for v in by_host.values()))
+
+    @staticmethod
+    def _unresolved_why(keys: list[str], cached: Any) -> str:
+        """'14 unresolved (7 shown): <label>, ...'. Labels only (never answer values), redacted, ~60 chars each (#78)."""
+        from ..core.secrets import redact
+
+        form = getattr(cached, "form", None)
+        labels = {f.key: f.label for f in getattr(form, "fields", [])}
+        shown = []
+        for k in keys[:7]:
+            lab = " ".join(str(labels.get(k) or k).split())
+            shown.append(redact(lab if len(lab) <= 60 else lab[:59] + "…"))
+        more = ", …" if len(keys) > 7 else ""
+        return f"{len(keys)} unresolved ({len(shown)} shown): {', '.join(shown)}{more}"
 
     def _live_preview(self, cands: list[Cand]) -> dict[str, Any] | None:
         """Dry run only: what a live run of the dry_run_ok rows would do under the current quotas and approval mode.
