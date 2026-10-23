@@ -43,7 +43,8 @@ Python = 3
 # home_country = "US"           # ISO-2 or name; the flat keys below describe this country. Unset: derived from
                                # [contact].country; if that is not a known country, the flat keys apply nowhere
 work_authorized = true
-requires_sponsorship = false
+requires_sponsorship = false   # now OR in the future
+# requires_sponsorship_now = false   # optional: "do you require sponsorship NOW?" only (ADR-0053)
 citizen = true
 # citizenship = "Canada"        # country of citizenship (optional); "Citizenship Status" never picks a citizen option unless US
 # Per-country facts (ADR-0040): one table per ISO-2 country. A question about a country with no facts stays

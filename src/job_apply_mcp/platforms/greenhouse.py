@@ -61,8 +61,9 @@ class GreenhouseAdapter(BaseAdapter):
         return iso_date(j.get("updated_at") or j.get("first_published"))
 
     def _countries(self, j: dict) -> list[str]:
-        """Per office, the ISO-2 of a location that ends in a full country name (ADR-0040); any non-dict, malformed or
-        country-less office is "UNCONFIRMED". No offices -> [] (not confirmed; there is no text fallback)."""
+        """Per office, the ISO-2 of a location that ends in a full country name (ADR-0040), or of a location-less office
+        whose name is exactly a full country name (ADR-0053); any non-dict, malformed or country-less office is
+        "UNCONFIRMED". No offices -> [] (not confirmed; there is no text fallback)."""
         raw = j.get("offices") or []
         if not isinstance(raw, list):
             return ["UNCONFIRMED"]
@@ -71,6 +72,10 @@ class GreenhouseAdapter(BaseAdapter):
             loc = o.get("location") if isinstance(o, dict) else None
             tail = loc.rsplit(",", 1)[-1] if isinstance(loc, str) else ""
             code = self.country_code(tail, allow_codes=False) or (self.country_code(tail) if tail.strip() == "US" else None)
+            if not code and isinstance(o, dict) and not (loc or "").strip() and isinstance(o.get("name"), str):
+                # ADR-0053: an office with no location whose NAME is exactly a full country name ("United States").
+                # Codes and labels such as "US-PERM" or "NYC" never confirm.
+                code = self.country_code(o["name"], allow_codes=False)
             out.append(code or "UNCONFIRMED")
         return sorted(set(out))
 

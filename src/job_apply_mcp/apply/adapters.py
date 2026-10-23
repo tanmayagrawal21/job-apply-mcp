@@ -87,6 +87,18 @@ class ProfileView:
         cur = [w for w in self.p.work if not w.end]
         return (cur or self.p.work or [None])[0]
 
+    def _work_fact(self, key: str) -> str | None:
+        """ADR-0053: "current_*" = the one [[work]] entry with no end date; "recent_*" = that entry, else the entry
+        with the latest end date. Several current entries, or a tie, is ambiguous (None)."""
+        cur = [w for w in self.p.work if not w.end]
+        if key.startswith("recent_") and not cur:
+            ended = sorted((w for w in self.p.work if w.end), key=lambda w: w.end, reverse=True)
+            cur = ended[:1] if len(ended) == 1 or (ended and ended[0].end != ended[1].end) else []
+        if len(cur) != 1:
+            return None
+        w = cur[0]
+        return (w.company if key.endswith("_company") else w.title).strip() or None
+
     def _edu(self):
         return max(self.p.education, key=lambda e: e.end or "") if self.p.education else None
 
@@ -125,6 +137,7 @@ class ProfileView:
         home = a.facts_for(a.home_country) if a.home_country else None   # ADR-0050: flat keys need a home country
         return {"work_authorized": home and home.work_authorized,
                 "requires_sponsorship": home and home.requires_sponsorship,
+                "requires_sponsorship_now": home and home.requires_sponsorship_now,
                 # ADR-0040: US citizenship comes from the US facts (flat `citizen` only when home_country is US)
                 "us_citizen": a.facts_for("US").citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
@@ -151,6 +164,12 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key.startswith("work:"):                 # ADR-0053: employer / title facts from [[work]]
+            return self._work_fact(key[5:])
+        if key == "work_history":
+            return "Yes" if self._employers() else None
+        if key in ("contact:city", "contact:region"):
+            return getattr(self.p.contact, key[8:]).strip() or None
         if key == "derived:region":                 # ADR-0040: state/region for the continental-US rule
             return self.p.contact.region or None
         if key == "home_country":
@@ -215,7 +234,8 @@ class ProfileView:
             want = key.lower()
             return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
         v = self._lookup(key)
-        if self.persona is not None and (v is None or v == "") and " " not in key:   # canonical keys only
+        if (self.persona is not None and (v is None or v == "") and " " not in key
+                and not key.startswith(("work:", "contact:")) and key != "work_history"):   # canonical keys only
             s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile
             if s is not None:
                 return s
@@ -224,8 +244,8 @@ class ProfileView:
     def _lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
                     "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:",
-                                                                        "derived:", "auth:"))
-                or key == "home_country"):
+                                                                        "derived:", "auth:", "work:", "contact:"))
+                or key in ("home_country", "work_history")):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v
