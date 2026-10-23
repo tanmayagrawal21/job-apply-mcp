@@ -46,7 +46,8 @@ def _snippet(msg: EmailMessage) -> str:
 def message_from_bytes(raw: bytes) -> Message:
     m = email.message_from_bytes(raw, policy=policy.default)
     return Message(sender=str(m.get("From", "")), subject=str(m.get("Subject", "")),
-                   date=_parse_date(str(m.get("Date", ""))), snippet=_snippet(m))  # type: ignore[arg-type]
+                   date=_parse_date(str(m.get("Date", ""))), snippet=_snippet(m),  # type: ignore[arg-type]
+                   auth_results=tuple(str(h) for h in (m.get_all("Authentication-Results") or [])))
 
 
 class ClientSource:
@@ -122,8 +123,17 @@ def _or_chain(terms: list[tuple[str, str]]) -> list[str]:
     return crit
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def imap_date(d: datetime) -> str:
+    """RFC 3501 date (`22-Oct-2026`). Month names are fixed English tokens in the protocol, so never use the
+    process locale (`%b` is localized)."""
+    return f"{d.day:02d}-{_MONTHS[d.month - 1]}-{d.year}"
+
+
 def build_search(since: datetime, senders: list[str], subjects: list[str]) -> list[str]:
-    crit = ["SINCE", since.strftime("%d-%b-%Y")]
+    crit = ["SINCE", imap_date(since)]
     terms = [("SUBJECT", s) for s in subjects if s.isascii() and s.strip()]
     terms += [("FROM", s) for s in senders if s.isascii() and s.strip()]
     return crit + (_or_chain(terms) if terms else [])
@@ -161,6 +171,37 @@ class ImapSource:
                         msg = message_from_bytes(part[1])
                         if msg.date is None or msg.date >= since:
                             yield msg
+        finally:
+            with contextlib.suppress(Exception):  # best-effort close
+                conn.logout()
+
+    def latest_from(self, domain: str, since: datetime) -> Message | None:
+        """ONLY the newest message FROM `domain` since `since` (ADR-0048): SEARCH, then FETCH the last match only.
+        Sequence numbers grow with arrival, so the highest one is the newest message."""
+        cfg = self.cfg
+        if not cfg.host and self._connect is None:
+            raise ValueError("ingest.imap.host is not configured")
+        user, pw = _credentials(cfg) if self._connect is None else ("", "")
+        conn = self._connect() if self._connect else imaplib.IMAP4_SSL(cfg.host, cfg.port)
+        try:
+            if self._connect is None:
+                conn.login(user, pw)
+            typ, _ = conn.select(f'"{cfg.folder}"', readonly=True)  # EXAMINE
+            if typ != "OK":
+                raise RuntimeError(f"cannot EXAMINE folder {cfg.folder!r}")
+            typ, data = conn.search(None, *build_search(since, [domain], []))
+            ids = data[0].split() if typ == "OK" and data and data[0] else []
+            if not ids:
+                return None
+            newest = max(ids, key=int)
+            typ, parts = conn.fetch(newest, f"(BODY.PEEK[]<0.{self.PEEK_BYTES}>)")
+            if typ != "OK":
+                return None
+            for part in parts:
+                if isinstance(part, tuple):
+                    msg = message_from_bytes(part[1])
+                    return msg if msg.date is not None and msg.date >= since else None
+            return None
         finally:
             with contextlib.suppress(Exception):  # best-effort close
                 conn.logout()

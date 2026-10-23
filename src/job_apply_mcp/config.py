@@ -230,6 +230,11 @@ class GrantsCfg(BaseModel):
     max_uses_cap: int = 1000                      # upper bound for --max-uses
     otp_window_min: int = 10                      # otp_assist reads only a message newer than this
     use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available; only the user config file may disable it
+    # consent window (ADR-0048): `job-apply-mcp consent --for 24h|--per-run`; raising either cap is user-config only
+    consent_max_duration_s: int = 7 * 86400       # longest window `consent --for` will issue (a week)
+    consent_per_run_max_s: int = GRANT_MAX_DURATION_S   # a --per-run consent also expires after this
+    otp_unattended_wait_s: int = 180              # otp_unattended: how long to wait for the code mail before `unknown`
+    otp_poll_s: int = 15                          # otp_unattended: mail poll interval while waiting
 
 
 class AccountsCfg(BaseModel):
@@ -347,6 +352,7 @@ class VerificationCfg(BaseModel):
     min_length: int = 4                 # format bounds when the page's input declares none
     max_length: int = 12
     typing_delay_ms: int = 60           # real keystroke cadence when entering the code
+    trusted_authserv_ids: list[str] = Field(default_factory=list)   # otp_unattended: Authentication-Results ids of YOUR mail server(s); empty = unattended codes OFF; trusted user config only (ADR-0048)
 
 
 class WritingCfg(BaseModel):
@@ -547,6 +553,10 @@ class PersonaCfg(BaseModel):
 
 
 class Settings(BaseModel):
+    # ADR-0048: False when the mail settings otp_unattended relies on (sender domains, mail source, IMAP server,
+    # trusted authserv ids) came from anything but the trusted user config. Fail closed: False until load_settings
+    # has verified them; programmatic Settings must opt in explicitly.
+    _otp_mail_trusted: bool = PrivateAttr(default=False)
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
     search: SearchCfg = Field(default_factory=SearchCfg)
     dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
@@ -636,6 +646,8 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("grants", "max_uses_cap"): _raises,
     ("grants", "otp_window_min"): _raises,
     ("grants", "use_keyring"): _bool_off,
+    ("grants", "consent_max_duration_s"): _raises,          # ADR-0048
+    ("grants", "consent_per_run_max_s"): _raises,
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
     ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
@@ -832,6 +844,12 @@ def _enforce(s: Settings, base: Settings) -> None:
                     q[k] = _legacy_base(base, k)
 
 
+def _mail_view(s: Settings) -> tuple:
+    """Everything otp_unattended trusts to pick the code mail (ADR-0048)."""
+    return (dict(s.verification.sender_domains), list(s.verification.trusted_authserv_ids), s.ingest.source,
+            s.ingest.path, s.ingest.imap.model_dump())
+
+
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
     """Only the platform-default user config, owned by this user and not group/world-writable, may relax
     security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
@@ -874,6 +892,10 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     data = _deep_merge(data, _restrict(edata, "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
     _enforce(s, base)
+    s._otp_mail_trusted = _mail_view(s) == _mail_view(base) and (trusted_user or _mail_view(base) == _mail_view(defaults))
+    if not s._otp_mail_trusted:
+        log.info("otp_unattended disabled: mail settings come from a project file, the environment or an untrusted "
+                 "user config (ADR-0048)")
     if trusted_user:     # log which settings the trusted user file relaxed relative to the built-in defaults
         hits, qhits = _relaxations(udata, defaults)
         for sect, key, raw in hits:

@@ -337,6 +337,11 @@ class VerificationMixin:
                             detail=f"{why}; the application was already submitted once and is NOT retried. "
                                    f"Finish or verify it in the open browser tab, then resolve_submission.{ev}")
 
+    async def abandon_pending(self, pending_id: str, why: str) -> SubmitResult | None:
+        """Give up on a prompt without entering anything (otp_unattended found no usable mail, ADR-0048)."""
+        p = self.codes.pending.get(pending_id)
+        return None if p is None else await self._to_handoff(p, why)
+
     async def expire_pending(self) -> list[SubmitResult]:
         """Hand off every prompt whose window passed (evidence saved, page left open for the human)."""
         return [await self._to_handoff(p, "verification code window expired") for p in self.codes.expired()]

@@ -227,6 +227,7 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `min_length` | `int` | `4` | format bounds when the page's input declares none |
 | `max_length` | `int` | `12` |  |
 | `typing_delay_ms` | `int` | `60` | real keystroke cadence when entering the code |
+| `trusted_authserv_ids` | `list[str]` | `[]` | otp_unattended: Authentication-Results ids of YOUR mail server(s); empty = unattended codes OFF; trusted user config only (ADR-0048) |
 
 ## `[writing]`
 
@@ -359,6 +360,10 @@ Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only
 | `max_uses_cap` | `int` | `1000` | upper bound for --max-uses |
 | `otp_window_min` | `int` | `10` | otp_assist reads only a message newer than this |
 | `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available; only the user config file may disable it |
+| `consent_max_duration_s` | `int` | `604800` | longest window `consent --for` will issue (a week) |
+| `consent_per_run_max_s` | `int` | `43200` | a --per-run consent also expires after this |
+| `otp_unattended_wait_s` | `int` | `180` | otp_unattended: how long to wait for the code mail before `unknown` |
+| `otp_poll_s` | `int` | `15` | otp_unattended: mail poll interval while waiting |
 
 ## `[intake]`
 
