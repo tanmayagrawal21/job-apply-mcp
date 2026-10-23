@@ -8,3 +8,16 @@
 ^tests/fixtures/mail/[a-z_]+\.eml:From: 
 # Placeholder addresses (ada@x.com) in a pure-function test.
 ^tests/test_apply_browser_pure\.py:.*\b[A-Za-z]+@x\.com
+# Public project identity (ADR-0042): the repository owner's GitHub handle, ONLY where a manifest or registry
+# requires it. Each entry matches one whole line exactly (anchored at both ends), so nothing else can ride along.
+^\.claude-plugin/(plugin|marketplace)\.json:\s*"name": "tanmayagrawal21"$
+^\.claude-plugin/plugin\.json:\s*"(homepage|repository)": "https://github\.com/tanmayagrawal21/job-apply-mcp",?$
+^\.mcp\.json:\s*"git\+https://github\.com/tanmayagrawal21/job-apply-mcp@[0-9a-f]{40}",?$
+^README\.md:<!-- mcp-name: io\.github\.tanmayagrawal21/applywise -->$
+^README\.md:claude plugin marketplace add tanmayagrawal21/job-apply-mcp$
+^pyproject\.toml:Repository = "https://github\.com/tanmayagrawal21/job-apply-mcp"$
+^server\.json:\s*"name": "io\.github\.tanmayagrawal21/applywise",?$
+^server\.json:\s*"url": "https://github\.com/tanmayagrawal21/job-apply-mcp",?$
+^mcpb/manifest\.json:\s*"name": "tanmayagrawal21"$
+^mcpb/manifest\.json:\s*"(url|homepage)": "https://github\.com/tanmayagrawal21/job-apply-mcp",?$
+^skills/applywise/SKILL\.md:uvx --from git\+https://github\.com/tanmayagrawal21/job-apply-mcp@[0-9a-f]{40} job-apply-mcp (init|doctor)$
