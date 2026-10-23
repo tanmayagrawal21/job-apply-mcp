@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from ..core.models import ApplicationForm, FieldKind, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, iso_date, not_before
+from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
 from .http import HttpError
 from .lever_cards import parse_cards
 from .textflags import html_to_text
@@ -100,7 +100,9 @@ class LeverAdapter(BaseAdapter):
         try:
             return await self.http.get_json(url, params=params)
         except HttpError as e:
-            raise AdapterError("posting not found (closed or moved)" if e.status == 404 else str(e)) from e
+            if e.status == 404:
+                raise PostingClosed("posting not found (closed or moved)") from e
+            raise AdapterError(str(e)) from e
 
     async def get_form(self, url_or_ref: str) -> ApplicationForm:
         """Lever exposes no public schema; this is the standard apply payload. Custom questions are only

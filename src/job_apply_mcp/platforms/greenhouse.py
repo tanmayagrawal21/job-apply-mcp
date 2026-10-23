@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, iso_date, not_before
+from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
 from .http import HttpError
 from .textflags import html_to_text
 
@@ -110,7 +110,9 @@ class GreenhouseAdapter(BaseAdapter):
         try:
             return await self.http.get_json(url, params=params)
         except HttpError as e:
-            raise AdapterError("job not found (closed or moved)" if e.status == 404 else str(e)) from e
+            if e.status == 404:
+                raise PostingClosed("job not found (closed or moved)") from e
+            raise AdapterError(str(e)) from e
 
     async def _questions(self, board: str, jid: str) -> dict:
         return await self._get(f"{API}/{board}/jobs/{jid}", params={"questions": "true"})

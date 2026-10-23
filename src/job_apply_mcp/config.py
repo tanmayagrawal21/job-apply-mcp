@@ -338,6 +338,7 @@ class BrowserCfg(BaseModel):
     upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)
     hydrate_wait_s: float = 10.0        # server-rendered forms: wait for the JS app to take over before typing (ADR-0039)
     confirmation_wait_s: float = 10.0
+    combobox_commit_s: float = Field(default=20.0, gt=0, le=20.0)   # autocomplete commit budget per field (ADR-0056)
     evidence: bool = True               # screenshot + text + errors + submit responses under <data_dir>/evidence/<ref-hash>/
     evidence_text_chars: int = 20000    # cap on saved visible page text
     evidence_body_chars: int = 500      # cap on each saved submit-response body

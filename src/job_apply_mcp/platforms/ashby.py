@@ -8,7 +8,7 @@ from typing import Any
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, iso_date, not_before
+from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
 from .http import HttpError
 
 BOARD_API = "https://api.ashbyhq.com/posting-api/job-board"
@@ -102,7 +102,7 @@ class AshbyAdapter(BaseAdapter):
         for j in await self._board(board):
             if j.get("id") == jid:
                 return self._to_posting(board, j, with_description=with_description)
-        raise AdapterError("job not found (closed or unlisted)")
+        raise PostingClosed("job not found (closed or unlisted)")
 
     async def get_form(self, url_or_ref: str) -> ApplicationForm:
         board, jid = self._need_job(url_or_ref)
@@ -113,6 +113,9 @@ class AshbyAdapter(BaseAdapter):
                                           headers={"content-type": "application/json"})
         except HttpError as e:
             raise AdapterError(str(e)) from e
+        if isinstance(d, dict) and not d.get("errors") and isinstance(d.get("data"), dict) \
+                and d["data"].get("jobPosting", 0) is None:      # the API answered: no such open posting
+            raise PostingClosed("Ashby returned no posting (closed or unlisted)")
         if not isinstance(d, dict) or d.get("errors") or not (d.get("data") or {}).get("jobPosting"):
             raise AdapterError("Ashby form query returned no posting (closed, or the query shape changed)")
         fields: list[FormField] = []
