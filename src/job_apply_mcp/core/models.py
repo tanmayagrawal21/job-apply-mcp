@@ -46,6 +46,10 @@ class Posting(BaseModel):
     salary: str | None = None
     description: str | None = None  # only populated when explicitly requested
     flags: dict[str, list[str]] = Field(default_factory=dict)  # policy flags found in the text
+    # ADR-0040: countries of the job from STRUCTURED adapter metadata ("US" for the United States; other countries as an
+    # ISO-2 code or an upper-cased name). Empty = unknown; the free-text `location` heuristic is then the fallback.
+    countries: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)   # every structured location string (offices, secondary, ...)
 
     def compact(self) -> dict[str, Any]:
         d = {"ref": self.ref, "co": self.company, "title": self.title, "loc": self.location}
@@ -95,3 +99,4 @@ class SubmitResult(BaseModel):
     confirmation: str | None = None
     detail: str | None = None
     pending_id: str | None = None   # awaiting_code only: pass to provide_verification_code (ADR-0026)
+    client_tasks: list[dict[str, Any]] = Field(default_factory=list)   # needs_review: prose that failed review (ADR-0044)

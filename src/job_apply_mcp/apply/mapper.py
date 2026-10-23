@@ -16,6 +16,16 @@ from typing import Any
 
 from ..core.models import Answer, FieldKind, FormField
 from .derive import pick_languages, whole_years, years_option
+from .places import (
+    _VISA_COMMON,
+    ISO2,
+    MULTI_REGION,
+    VISA_LEXICON,
+    VISA_MARKERS,
+    _part_in,
+    split_location,
+    strip_own_subdivisions,
+)
 from .ports import ProfileLike
 
 _PUNCT = re.compile(r"[^a-z0-9 ]+")
@@ -42,6 +52,10 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("languages_known", (r"\blanguages?\b.*\b(proficient|production|programming|coding|comfortable|strongest|primary|expert)",
                         r"\b(proficient|programming|coding)\b.*\blanguages?\b",
                         r"\b(strongest|primary|main|favou?rite|preferred|best)\b.*\b(coding|programming|code)\b.*\blanguage\b")),
+    # ADR-0040: "country/countries of citizenship" (export control). Before us_citizen so "... (US citizens: write USA)"
+    # takes the strict vocabulary check below instead of a Yes/No citizen answer.
+    ("citizenship_countries", (r"\bcountr(y|ies)( s)? of (your )?citizenships?\b", r"\bcitizenship countr(y|ies)\b",
+                               r"\b(which|what) countr(y|ies)\b.*\bcitizen", r"\bcountr(y|ies)\b.*\b(are you|you are) a citizen\b")),
     ("us_citizen", (r"\b(u s|us|usa|united states|american) citizen",)),
     # ADR-0033 keys
     ("citizenship", (r"^(your |current )?citizenship( status)?$", r"\bcitizenship status\b",
@@ -69,11 +83,12 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("current_title", (r"^current (job )?title$",)),
     ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization",
                          r"authori[sz]ation to work", r"(permitted|allowed) to work", r"right to work")),
-    ("requires_sponsorship", (r"sponsorship", r"require.* visa")),
+    ("requires_sponsorship", (r"sponsorship", r"require.* visa", r"\bsponsor(s|ed|ing)?\b")),
     ("willing_to_relocate", (r"relocat",)),
     ("open_to_hybrid", (r"\bhybrid\b",)),
     ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",)),
-    ("located_in_us", (r"(located|based|reside|live|residing)\b.*\b(in|within) the (us|u s|usa|united states)\b",)),
+    ("located_in_us", ((r"(located|based|reside|live|residing)\b.*\b(in|within) the ((continental|contiguous) )?"
+                        r"(us|u s|usa|united states)\b"),)),
     ("start_date", (r"(earliest )?start date", r"available to start", r"notice period")),
     ("salary_expectation", (r"salary expectation", r"expected (salary|compensation)", r"desired (salary|compensation)")),
     ("referral_source", (r"how did you (hear|find)", r"source$")),
@@ -173,10 +188,20 @@ def _yes_no_option(value_yes: bool, options: list[str]) -> str | None:
     return neg[0] if len(neg) == 1 else None
 
 
+# explicit EEO synonyms (ADR-0040): the only non-identical pairs exact_option accepts
+_EEO_SYNONYMS = [frozenset(["man", "male"]), frozenset(["woman", "female"]),
+                 frozenset(["non binary", "nonbinary", "non-binary"])]
+
+
 def exact_option(value: Any, options: list[str]) -> str | None:
-    """Near-exact only (equal after normalization, or equal/nested token sets of >=1 word). For demographic,
-    pronoun and EEO answers, where a semantic guess is never acceptable."""
+    """Near-exact only (equal after normalization, or equal/nested token sets of >=1 word, or an explicit synonym).
+    For demographic, pronoun and EEO answers, where a semantic guess is never acceptable."""
     nv = normalize(str(value))
+    syn = next((g for g in _EEO_SYNONYMS if nv in g), None)
+    if syn:
+        hit = [o for o in options if normalize(o) in syn]
+        if len(hit) == 1:
+            return hit[0]
     tv = set(tokens(str(value)))
     if not tv:
         return None
@@ -209,6 +234,8 @@ def best_option(value: Any, options: list[str], *, cutoff: float = 0.78) -> str 
         return decline_option(options)
     if nv in nopts:
         return nopts[nv]
+    if option_topics(sv) or any(option_topics(o) for o in options):
+        return exact_option(sv, options)   # ADR-0040: demographic values never snap by containment or similarity
     if nv in _YES | _NO:
         return _yes_no_option(nv in _YES, list(nopts.values()))
     vneg = has_negator(sv)
@@ -217,7 +244,8 @@ def best_option(value: Any, options: list[str], *, cutoff: float = 0.78) -> str 
     if vpol == 1 and not vneg:  # affirmative sentence: never land on a negated option
         ok = {n: o for n, o in ok.items() if polarity(o) >= 0}
     # containment, preferring the tightest (shortest) container; require word-level overlap
-    cands = [o for n, o in ok.items() if nv and (re.search(rf"\b{re.escape(nv)}\b", n) or n in nv)]
+    cands = [o for n, o in ok.items()
+             if nv and n and (re.search(rf"\b{re.escape(nv)}\b", n) or re.search(rf"\b{re.escape(n)}\b", nv))]
     if cands:
         return min(cands, key=len)
     cv = _content(sv)
@@ -353,7 +381,7 @@ _AUTH_NEG = re.compile(r"\bunauthori[sz]ed\b|\bunable to work\b|\bineligible\b|"
 _SPOKEN = re.compile(r"speak|spoken|fluen|english|native|written|verbal|translat", re.IGNORECASE)
 _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relocation_support", "open_to_hybrid",
                   "open_to_onsite", "knows_employee", "years_experience", "languages_known", "citizenship", "gpa",
-                  "prior_employee", "marketing_optin"}
+                  "prior_employee", "marketing_optin", "citizenship_countries", "located_in_us"}
 # Never sent to the local LLM: a guess is a false statement about the candidate.
 SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"}
 _TOTAL_GENERIC = frozenset(
@@ -492,7 +520,7 @@ _CONSENT = re.compile(r"consent|agree|acknowledg|privacy|gdpr|attest|certif|auth
 # ---- country of an authorization / sponsorship question (ADR-0038) ---------------------------------
 # The structured [authorization] facts describe the United States only. A question naming another country is answered
 # only from the user's own [answers] pattern that names that country; otherwise it stays unresolved.
-_US_IN_LABEL = re.compile(r"\b(u s a?|usa|united states( of america)?|america|american)\b")
+_US_IN_LABEL = re.compile(r"\b(u s(?: a)?|usa|united states( of america)?|america|american)\b")
 _COUNTRY_PATTERNS: dict[str, str] = {
     "united kingdom": r"united kingdom|\buk\b|\bu k\b|great britain|\bbritain\b|\bbritish\b|england|scotland|wales|northern ireland",
     "canada": r"canada|canadian", "ireland": r"(?<!northern )ireland|\birish\b",
@@ -520,10 +548,28 @@ def question_countries(label: str) -> tuple[bool, list[str]]:
     return bool(_US_IN_LABEL.search(n)), [c for c, rx in _COUNTRY_RES.items() if rx.search(n)]
 
 
-# Deny-by-default (ADR-0038): US facts answer only a label whose every word is generic authorization/sponsorship
-# wording or names the US. Any other word (a city, region, unlisted country, "here", "the country where ...") -> the
-# question may be about another place, so it stays unresolved.
-_AUTH_VOCAB = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "h", "1b", "h1b", "l", "1", "l1", "e", "3", "e3", "tn", "opt", "cpt", "stem", "ead", "f", "f1", "j", "j1", "o", "o1", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", "us", "u", "s", "usa", "united", "states", "america", "american"])
+# question-pattern names -> ISO-2 (None = a region such as the EU: never one country)
+_NAME_ISO: dict[str, str | None] = {
+    "united kingdom": "GB", "canada": "CA", "ireland": "IE", "european union": None, "germany": "DE", "france": "FR",
+    "netherlands": "NL", "spain": "ES", "italy": "IT", "portugal": "PT", "poland": "PL", "sweden": "SE", "norway": "NO",
+    "denmark": "DK", "finland": "FI", "switzerland": "CH", "austria": "AT", "belgium": "BE", "luxembourg": "LU",
+    "czechia": "CZ", "romania": "RO", "ukraine": "UA", "greece": "GR", "hungary": "HU", "estonia": "EE",
+    "turkey": "TR", "israel": "IL", "united arab emirates": "AE", "india": "IN", "pakistan": "PK", "china": "CN",
+    "hong kong": "HK", "taiwan": "TW", "japan": "JP", "south korea": "KR", "singapore": "SG", "philippines": "PH",
+    "vietnam": "VN", "indonesia": "ID", "malaysia": "MY", "thailand": "TH", "australia": "AU", "new zealand": "NZ",
+    "mexico": "MX", "brazil": "BR", "argentina": "AR", "colombia": "CO", "chile": "CL", "peru": "PE",
+    "costa rica": "CR", "south africa": "ZA", "nigeria": "NG", "kenya": "KE", "egypt": "EG",
+}
+_ISO_NAME = {v: k for k, v in _NAME_ISO.items() if v}
+
+# Deny-by-default (ADR-0038/0040): a country's facts answer only a label whose every word is generic
+# authorization/sponsorship wording, that country's visa lexicon, or the country itself (replaced by a placeholder).
+# Any other word (a city, region, another country, "here", "the country where ...") leaves it unresolved.
+_PLACE = "zzplacezz"
+_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", _PLACE])
+_US_WORDS = frozenset(["us", "u", "s", "usa", "united", "states", "america", "american"])
+_AUTH_VOCAB = _AUTH_VOCAB_GENERIC | VISA_LEXICON["US"] | _US_WORDS      # ADR-0038 US vocabulary (compatibility)
+_US_NAME_IN_QUESTION = re.compile(r"\b(?:united states(?: of america)?|usa|u s(?: a)?|america|american|us)\b")
 
 
 def auth_place_ok(label: str) -> bool:
@@ -531,15 +577,190 @@ def auth_place_ok(label: str) -> bool:
     return all(t in _AUTH_VOCAB or t.isdigit() for t in normalize(label).split())
 
 
-def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any]:
-    n = normalize(f.label)
-    if not auth_place_ok(f.label):
-        us, foreign = question_countries(f.label)
-        if len(foreign) == 1 and not us:     # only the user's own [answers] pattern naming that country
-            return True, profile.lookup(f"country_answer:{foreign[0]}:{n}")
+_EXAMPLE_CLAUSE = re.compile(
+    r"\(\s*(?:e\.?\s?g\.?|i\.?\s?e\.?|ex\.?|such as|like|for example|including)\s*[,:]?\s*([^()]*)\)|"
+    r"[,;:]?\s*\b(?:e\.\s?g\.|i\.\s?e\.|such as|for example|including)\s*[,:]?\s*([^.?;()]*)", re.IGNORECASE)
+_VISA_TYPES = VISA_MARKERS["US"]
+_AUTH_NOTE_VOCAB = frozenset(["if", "qualify", "qualifies", "defined", "define", "regulations", "note", "considered",
+                              "applicants", "candidates", "those", "under", "per", "etc", "e", "g"])
+_JOB_PLACE = re.compile(r"\b(?:the|this) country (?:where|in which) (?:the|this) (?:job|role|position) is "
+                        r"(?:located|based)\b|\bthis country\b|\bthis location\b|\bthe country of employment\b",
+                        re.IGNORECASE)
+
+
+def _drop_examples(text: str, country: str | None = "US") -> str:
+    """Drop example clauses that list only `country`'s visa types (None: drop every example clause, for detection)."""
+    def sub(m: re.Match[str]) -> str:
+        inner = normalize(m.group(1) if m.group(1) is not None else m.group(2) or "").split()
+        if country is None:
+            return " "
+        lex, marks = VISA_LEXICON.get(country, frozenset()), VISA_MARKERS.get(country, frozenset())
+        visa = any(t in marks for t in inner)
+        return " " if inner and visa and all(t in lex or t in _VISA_COMMON or t.isdigit() for t in inner) else m.group(0)
+    return _EXAMPLE_CLAUSE.sub(sub, text)
+
+
+def _country_name_rx(country: str) -> re.Pattern[str] | None:
+    if country == "US":
+        return _US_NAME_IN_QUESTION
+    name = _ISO_NAME.get(country)
+    return _COUNTRY_RES[name] if name else None
+
+
+def auth_core(label: str, country: str = "US", job_place: bool = False) -> str | None:
+    """The authorization/sponsorship question about `country` inside `label` (normalized, the country replaced by a
+    placeholder), or None when it may be about another place. `job_place`: "this country" / "the country where the job
+    is located" refer to `country` (the job's confirmed country)."""
+    text = _drop_examples(label, country)
+    if job_place:
+        text = _JOB_PLACE.sub(_PLACE, text)
+    q, _, note = text.partition("?")
+    vocab = _AUTH_VOCAB_GENERIC | VISA_LEXICON.get(country, frozenset())
+    rx = _country_name_rx(country)
+
+    def ok(part: str, extra: frozenset[str] = frozenset()) -> bool:
+        n = normalize(part)
+        if rx is not None:
+            n = rx.sub(_PLACE, n)
+        return all(t in vocab or t in extra or t.isdigit() for t in n.split())
+    if note.strip() and (question_countries(note)[1] or not ok(note, _AUTH_NOTE_VOCAB)):
+        return None
+    return q if ok(q) else None
+
+
+# The US named as the PLACE of the work: "in the US", "within the United States", "in the U.S.A.". Visa examples
+# ("e.g., H-1B") and "work for US" (the company) never count.
+_US_PLACE = re.compile(r"\b(?:in|within|inside) (?:the )?(?:U\.?S\.?A?\.?(?![A-Za-z])|united states(?: of america)?\b|"
+                       r"america\b)", re.IGNORECASE)
+
+
+def names_us(text: str) -> bool:
+    """The text names the United States as a place ("... to work in the US?"), after example clauses are dropped."""
+    t = _drop_examples(text or "", None)
+    for m in _US_PLACE.finditer(t):
+        hit = m.group(0)
+        if re.search(r"united states|america", hit, re.IGNORECASE) or re.search(r"U\.?S", hit):   # "US" in capitals only
+            return True
+    return False
+
+
+def named_countries(label: str) -> list[str | None]:
+    """Countries a question names as the place of work (ISO-2; None for a region such as the EU)."""
+    t = _drop_examples(label or "", None)
+    out: list[str | None] = ["US"] if names_us(t) or re.search(r"\b(?:united states|usa)\b", t, re.IGNORECASE) else []
+    out += [_NAME_ISO.get(c) for c in question_countries(t)[1]]
+    return list(dict.fromkeys(out))
+
+
+# ---- job country (ADR-0040): one strict, deny-by-default rule for any country ------------------------------------
+def location_in_country(location: str, country: str) -> bool:
+    """True only when every part of a location is explicitly in `country` (its name, a full subdivision name, or a
+    "City, XX" subdivision code; ambiguous codes need a listed city). No location, "Remote" or another country -> False."""
+    parts = split_location(location)
+    for p in parts:
+        foreign = [c for c in question_countries(strip_own_subdivisions(p, country))[1] if _NAME_ISO.get(c) != country]
+        if not _part_in(p, country, foreign):
+            return False
+    return bool(parts)
+
+
+def location_is_us(location: str) -> bool:
+    """Alias: location_in_country(location, "US")."""
+    return location_in_country(location, "US")
+
+
+def job_country(location: str, countries: Sequence[str] = (), locations: Sequence[str] = ()) -> str | None:
+    """ISO-2 of the job, or None. A country only if (a) the structured adapter countries are exactly one ISO-2 code
+    (every location entry parsed; malformed, country-less or extra entries are "UNCONFIRMED"), AND (b) every location
+    string (posting location, offices, allLocations, secondaryLocations) is in that country, AND (c) none names a
+    region or several places. No text fallback, and text never overrides a structured value."""
+    cs = list(dict.fromkeys(countries))
+    if len(cs) != 1 or cs[0] not in ISO2:
+        return None
+    code = cs[0]
+    texts = [str(t) for t in (location, *locations) if str(t or "").strip()]
+    if all(not MULTI_REGION.search(t) and location_in_country(t, code) for t in texts):
+        return code
+    return None
+
+
+def job_is_us(location: str, countries: Sequence[str] = (), locations: Sequence[str] = ()) -> bool:
+    """Alias: job_country(...) == "US"."""
+    return job_country(location, countries, locations) == "US"
+
+
+# ADR-0040 (control review): an authorization/sponsorship rule never answers a field whose label, help text or options
+# mention export control or a legal status other than work authorization. "Authorized to work in the US? (U.S. persons
+# as defined under ITAR/EAR)" is an export-control question; it stays with the owner (and never goes to an LLM).
+_AUTH_LEGAL_BLOCK = re.compile(r"\bitar\b|\bear\b|\bu ?s persons?\b|\bexport|\bcitizen\w*|permanent resident\w*|"
+                               r"green card|\bclearance\b|deemed export")
+
+
+def auth_legal_blocked(f: FormField) -> bool:
+    return any(_AUTH_LEGAL_BLOCK.search(normalize(t)) for t in (f.label, *f.options))
+
+
+_FLAT_KEY = {"work_authorized": "work_authorized", "requires_sponsorship": "requires_sponsorship", "citizen": "us_citizen"}
+
+
+def country_fact(profile: ProfileLike, country: str, fact: str) -> bool | None:
+    """The profile's per-country fact; the flat [authorization] keys count for the home country only."""
+    v = _truth(profile.lookup(f"auth:{country}:{fact}"))
+    home = str(profile.lookup("home_country") or "").upper() or None
+    if v is None and country == home and not (fact == "citizen" and home != "US"):
+        v = _truth(profile.lookup("structured:" + _FLAT_KEY[fact]))   # ADR-0050: never a flat [answers] pattern
+    return v
+
+
+# ADR-0050: wording that names only the posting company or the places picked in an earlier question. On a confirmed
+# home-country job it does not change which country the question is about.
+_SELECTED_PLACES = re.compile(r"\b(?:for|in|to work in) (?:the )?locations? (?:s )?(?:that )?you (?:have )?selected"
+                              r"(?: (?:in )+(?:your|the) previous (?:response|answer|question))?")
+
+
+def _home_job_core(label: str, country: str, company: str) -> str | None:
+    """auth_core() after the company's name and "the location(s) you selected" are removed (home-country job only)."""
+    n = _SELECTED_PLACES.sub(" ", normalize(label))
+    words = [w for w in normalize(company).split() if w not in _LEGAL_SUFFIX and w not in _AUTH_VOCAB_GENERIC]
+    if words:
+        n = re.sub(rf"\b{re.escape(' '.join(words))}(?: s)?\b", " company ", n)
+    return auth_core(re.sub(r"\s+", " ", n).strip(), country)
+
+
+def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str | None = None,
+                 gaps: list[dict[str, Any]] | None = None, company: str = "") -> tuple[bool, Any]:
+    if auth_legal_blocked(f):
         return True, None
-    auth, req = _truth(profile.lookup("work_authorized")), _truth(profile.lookup("requires_sponsorship"))
-    cit = _truth(profile.lookup("us_citizen"))
+    named = named_countries(f.label)
+    job_place = bool(_JOB_PLACE.search(f.label))
+    if len(named) > 1 or (named and named[0] is None) or (named and job_place and named[0] != job_country):
+        if gaps is not None:                                 # several places, a region, or a contradiction
+            gaps.append({"country": None, "fact": None, "key": f.key})
+        return True, None
+    country = named[0] if named else job_country
+    if country is None:                                      # place-less and the job's country is not confirmed
+        if gaps is not None:                                 # ADR-0040: no reusable gap key for this context
+            gaps.append({"country": None, "fact": None, "key": f.key})
+        return True, None
+    core = auth_core(f.label, country, job_place=job_place and country == job_country)
+    home = str(profile.lookup("home_country") or "").upper() or None
+    if core is None and not named and country == job_country == home and company:
+        core = _home_job_core(f.label, country, company)
+    if core is None:
+        name = _ISO_NAME.get(country)
+        if name and named:                                   # only the user's own [answers] pattern naming that country
+            return True, profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
+        return True, None
+    n = normalize(core)
+    auth, req = country_fact(profile, country, "work_authorized"), country_fact(profile, country, "requires_sponsorship")
+    cit = country_fact(profile, country, "citizen")
+
+    def missing(fact: str) -> tuple[bool, Any]:
+        if gaps is not None:
+            gaps.append({"country": country, "fact": fact, "key": f.key})
+        if country != home and (name := _ISO_NAME.get(country)) and named:
+            return True, profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
+        return True, None                    # ADR-0050: never a fall-through to flat [answers]
     ma, ms = _AUTH_WORDS.search(n), re.search(r"sponsor|\bvisa\b", n)
     has_auth, has_sp = bool(ma), bool(ms)
     if ma and ms and ms.start() < ma.start():    # "require sponsorship ... for work authorization": a sponsorship question
@@ -551,13 +772,15 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike) -> tuple[bool, Any
     if has_auth and has_sp:                  # compound: only the explicit "authorized ... without sponsorship" form
         if _SPONS_NEG.search(n) and auth is not None and req is not None:
             return True, _yn(auth and not req)
+        if auth is None or req is None:
+            missing("work_authorized" if auth is None else "requires_sponsorship")
         return True, None
     if ck == "requires_sponsorship" or (has_sp and not has_auth):
         if req is None:
-            return False, None
+            return missing("requires_sponsorship")
         return True, _yn(not req if _SPONS_NEG.search(n) else req)
     if auth is None:
-        return False, None
+        return missing("work_authorized")
     return True, _yn(not auth if _AUTH_NEG.search(n) else auth)
 
 
@@ -609,10 +832,13 @@ _DIRECT_EMPLOY = re.compile(
     rf"(?:employee|intern) (?:of|at) {_CO}$")
 _CO_QUALIFIERS = frozenset(["state", "states", "federal", "government", "agency", "competitor", "competitors",
                             "affiliate", "affiliates", "parent", "subsidiary", "subsidiaries", "partner", "partners",
-                            "client", "clients", "vendor", "vendors", "public", "national", "department"])
-# military / defence qualifiers: "worked for Army?" must never be read as the posting company "Army Labs"
-_CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|marines?|military|defen[cs]e|coast guard|national guard|"
-                                   r"veterans?)\b")
+                            "client", "clients", "vendor", "vendors", "public", "national", "department",
+                            # public-sector employers (ADR-0040): "worked for the county?" is not about "County Labs"
+                            "county", "counties", "city", "cities", "municipal", "municipality", "police", "township",
+                            "borough", "sheriff", "university", "universities", "usaf"])
+# military / defence / public-body phrases: "worked for Army?" must never be read as the posting company "Army Labs"
+_CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|armed forces|marines?|military|defen[cs]e|coast guard|"
+                                   r"national guard|veterans?|transit authority|school district)\b")
 _GENERIC_CO_WORDS = frozenset(["the", "global", "united", "american", "national", "general", "first", "international",
                                "data", "systems", "group", "technologies", "digital", "new", "world", "health"])
 
@@ -647,19 +873,79 @@ def about_this_company(label: str, company: str, aliases: Sequence[str] = ()) ->
     return bool(_DIRECT_EMPLOY.match(" ".join(words)))
 
 
+# ---- export-control citizenship countries (ADR-0040) ----------------------------------------------
+# Deny-by-default: answered from the profile's citizenship fact only when every word of the label asks for the
+# country/countries of citizenship. Permanent residence, dates ("when obtained"), "U.S. person", ITAR, dual/former
+# citizenship, someone else's citizenship or any other word leave the field unresolved.
+_CIT_VOCAB = frozenset(["a", "an", "the", "of", "and", "or", "for", "in", "is", "are", "am", "i", "you", "your", "do",
+                        "what", "which", "please", "list", "all", "any", "provide", "enter", "indicate", "select",
+                        "name", "names", "state", "current", "currently", "hold", "country", "countries", "s",
+                        "citizen", "citizenship", "citizenships", "export", "control", "controls", "compliance",
+                        "purposes", "purpose"])
+
+
+def citizenship_countries_ok(label: str) -> bool:
+    """True when the label asks only for the candidate's country/countries of citizenship."""
+    words = normalize(label).split()
+    return bool(words) and all(t in _CIT_VOCAB for t in words)
+
+
+def _citizenship_countries(f: FormField, profile: ProfileLike) -> Any | None:
+    c = profile.lookup("citizenship_country")
+    if not c or not citizenship_countries_ok(f.label):
+        return None
+    if not f.options:
+        return str(c) if f.kind in (FieldKind.text, FieldKind.textarea, FieldKind.unknown) else None
+    parts = [x.strip() for x in re.split(r"[,;/]| and ", str(c)) if x.strip()]
+    picks = [exact_option(x, f.options) for x in parts]
+    if not picks or any(p is None for p in picks):
+        return None
+    if f.kind == FieldKind.multiselect:
+        return list(dict.fromkeys(picks))
+    return picks[0] if len(picks) == 1 else None
+
+
+_RESIDE_VOCAB = frozenset(["do", "you", "are", "currently", "presently", "reside", "live", "living", "residing",
+                           "located", "based", "in", "within", "the", "continental", "contiguous", "us", "u", "s",
+                           "usa", "united", "states", "of", "america", "your", "is"])
+_NONCONTIGUOUS = frozenset(["ak", "alaska", "hi", "hawaii", "pr", "puerto rico", "gu", "guam", "vi", "virgin islands",
+                            "as", "american samoa", "mp", "northern mariana islands"])
+
+
+def _residence_answer(f: FormField, profile: ProfileLike) -> Any | None:
+    """ADR-0040: "Do you (currently) reside/live/are you located in the (continental) US?" from the profile location
+    only; any other wording, or a continental question without a configured state, stays unresolved."""
+    n = normalize(f.label)
+    if not all(t in _RESIDE_VOCAB for t in n.split()):
+        return None
+    v = _truth(profile.lookup("located_in_us"))
+    if v is None:
+        return None
+    if v and re.search(r"\b(continental|contiguous)\b", n):
+        region = normalize(str(profile.lookup("derived:region") or ""))
+        if not region:
+            return None
+        if region in _NONCONTIGUOUS:
+            return "No"
+    return _yn(v)
+
+
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
-              company_aliases: Sequence[str] = ()) -> tuple[bool, Any]:
+              company_aliases: Sequence[str] = (), job_country: str | None = None,
+              gaps: list[dict[str, Any]] | None = None) -> tuple[bool, Any]:
     """(handled, value). handled=False -> continue with the generic profile lookup."""
     n = normalize(f.label)
+    if ck == "located_in_us":
+        return True, _residence_answer(f, profile)
     if ck == "us_citizen":
         if _AUTH_WORDS.search(n):
-            return _auth_answer(f, "work_authorized", profile)
+            return _auth_answer(f, "work_authorized", profile, job_country, gaps, company)
         if re.search(r"permanent resident|green card|national\b", n):
             return True, None
         v = profile.lookup("us_citizen")
         return (False, None) if v is None else (True, v)
     if ck in ("work_authorized", "requires_sponsorship"):
-        return _auth_answer(f, ck, profile)
+        return _auth_answer(f, ck, profile, job_country, gaps, company)
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite"):
         if not _YESNO_STYLE.search(n):
             return True, None
@@ -674,6 +960,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return True, ("Yes" if f.options or f.kind == FieldKind.boolean else str(who))
     if ck == "years_experience":
         return True, _years_answer(f, profile)
+    if ck == "citizenship_countries":
+        return True, _citizenship_countries(f, profile)
     if ck == "citizenship":
         cit = _truth(profile.lookup("us_citizen"))
         if not f.options:
@@ -692,10 +980,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         if not company or not about_this_company(f.label, company, company_aliases):   # ADR-0038: government/competitor/other employers
             return True, profile.lookup(n)                            # only the user's own explicit answer
         return True, "Yes" if profile.lookup("employer:" + normalize(company)) else "No"
-    if ck == "marketing_optin":
-        if _CONSENT.search(f.label):          # consent/privacy acknowledgements need the owner's decision
-            return True, None
-        return True, "No"
+    if ck == "marketing_optin":               # ADR-0050: owner-only, never an automatic No (or Yes)
+        return True, None
     if ck == "languages_known":
         if _SPOKEN.search(f.label):
             return True, None
@@ -710,11 +996,208 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
     return False, None
 
 
+# ---- never-LLM questions (ADR-0040) ------------------------------------------------------------------
+# Legal status (export control, ITAR/EAR, "U.S. person", citizenship, immigration, authorization, sponsorship,
+# clearance, criminal history) and place (residence, location, relocation, commute, on-site, hybrid, remote, time zone)
+# are facts about the candidate. They are answered by the deterministic rules above or left to the owner; a model
+# never guesses them, whatever the label's canonical key.
+_NEVER_LLM_LEGAL = re.compile(r"export|\bitar\b|\bear\b|\bu ?s persons?\b|citizen|nationalit|\bnationals?\b|green card|"
+                              r"permanent resid|clearance|sanction|embargo|immigra|\bvisas?\b|sponsor|authori[sz]|"
+                              r"right to work|eligible to work|work permit|work rights|criminal|convict|felon|arrest|"
+                              r"\bf ?1\b|\bh ?1 ?b\b|\bh1b\b|\bopt\b|\bcpt\b|\btn\b|\bj ?1\b|\bo ?1\b|\bl ?1\b|\bead\b|"
+                              r"passport|1324b|debar|lawful|permitted to be employed|public trust|charge|crime|\bdui\b|"
+                              r"\bdwi\b|background|screen|\bpr\b|schengen|leave to remain|blue card|legally|"
+                              r"working from|work from")
+_NEVER_LLM_PLACE = re.compile(r"resid|\blocat|\blive\b|\bliving\b|\bbased\b|relocat|commut|\bon ?site\b|\bin office\b|"
+                              r"\bin person\b|hybrid|\bremote\b|time ?zones?\b|continental|contiguous|\bzip\b|postal|"
+                              r"\bcity\b|\bstate\b|\bcountry\b|\baddress\b|\btravel")
+# extra place wording for SHORT answers only (a textarea essay such as "Where do you see yourself in 5 years?" may still
+# go to the writer; a one-line "Which office would you prefer?" never goes to a model)
+_NEVER_LLM_PLACE_SHORT = re.compile(r"\boffices?\b|\bmetro\b|\bnear\b|\bwhere\b|\bmoving\b|\bmove\b|\bhq\b|"
+                                    r"\bheadquarters\b|\bwork (?:in|from)\b|\barea\b|\bregion\b|\bon campus\b|"
+                                    r"\bcome (?:in|to)\b")
+
+
+# ADR-0040 (final, fail-closed): the short-answer model may only answer a label that FULLY matches one of these strict
+# templates (normalized label, anchored). One allowlisted word inside another question never qualifies. Questions
+# that would make the model guess a fact about the candidate (years with X, experience with X) are not templates:
+# the profile answers them deterministically or the owner does.
+_LLM_SAFE_TEMPLATES = [re.compile(p) for p in (
+    (r"(?:which|what) (?:tools|technologies|frameworks|libraries|programming languages|languages|databases|platforms)"
+     r"(?: do you| have you)?(?: (?:use|used|know|prefer|work with))?"),
+    (r"(?:what is your |what are your )?(?:favou?rite|preferred) (?:build tool|tool|programming language|language|"
+     r"editor|ide|framework|library|database)"),
+    r"how did you (?:hear|find out|learn) about (?:us|this (?:role|job|position|opportunity))",
+    r"(?:github|portfolio|website|personal website)(?: url| link| profile)?",
+    r"(?:what is your )?notice period",
+    r"(?:what is your )?earliest (?:possible )?start date",
+)]
+
+
+def llm_safe_short(f: FormField) -> bool:
+    """True only when the whole normalized label matches an allowlisted template and names nothing sensitive."""
+    n = normalize(f.label)
+    if not n or never_llm(f) or eeo_class(f.label)[0] or _CONSENT.search(f.label):
+        return False
+    return any(t.fullmatch(n) for t in _LLM_SAFE_TEMPLATES)
+
+
+def never_llm(f: FormField) -> bool:
+    """True for legal-status and place questions (label or options): deterministic rule or owner only."""
+    texts = [normalize(f.label), *(normalize(o) for o in f.options)]
+    if any(_NEVER_LLM_LEGAL.search(t) or _NEVER_LLM_PLACE.search(t) for t in texts):
+        return True
+    choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
+    if contact_permission_channels(f.label, choice=choice) or _TEXT_OPTIN.search(_strip_exceptions(texts[0])):
+        return True                     # ADR-0050: contact-permission questions are owner-only
+    return f.kind != FieldKind.textarea and any(_NEVER_LLM_PLACE_SHORT.search(t) for t in texts)
+
+
 @dataclass
 class MapResult:
     answers: list[Answer] = field(default_factory=list)
     unresolved: list[FormField] = field(default_factory=list)
     omitted: list[FormField] = field(default_factory=list)   # derived fields with no source (never tasks)
+    # ADR-0040: optional self-identification questions left blank (no profile value, or wording not safe to answer).
+    # Also in `unresolved`; the engine lists them in the plan output and never sends them to an LLM.
+    skipped_voluntary: list[FormField] = field(default_factory=list)
+    hints: dict[str, dict[str, Any]] = field(default_factory=dict)  # field key -> known partial facts for the owner
+    # ADR-0040: per-country authorization facts a question needed but the profile lacks ({country, fact, key})
+    profile_gaps: list[dict[str, Any]] = field(default_factory=list)
+    no_gap_keys: set[str] = field(default_factory=set)     # ADR-0040: unconfirmed-country auth fields, never collected
+
+
+# ---- voluntary self-identification (ADR-0040) -----------------------------------------------------------
+# Declining never states a fact, so the decline option may be chosen for any demographic-looking label.
+# A real value (e.g. "No", a race) is used only when every label word is generic self-identification wording or a
+# topic word of that same key: "Veteran-owned supplier?", "Gender of your emergency contact" or "Race and gender"
+# get the decline option if there is one, else stay blank.
+_DEMO_TOPICS: dict[str, frozenset[str]] = {
+    "gender": frozenset(["gender", "genders", "sex"]),
+    "hispanic": frozenset(["hispanic", "latino", "latina", "latinx", "latine", "origin"]),
+    "race": frozenset(["race", "races", "racial", "ethnicity", "ethnicities", "ethnic", "background", "origin",
+                       "heritage"]),
+    "veteran": frozenset(["veteran", "veterans", "protected"]),
+    "disability": frozenset(["disability", "disabilities", "disabled"]),
+    "sexual_orientation": frozenset(["sexual", "orientation"]),
+    "pronouns": frozenset(["pronoun", "pronouns"]),
+}
+_DEMO_GENERIC = frozenset(["a", "an", "the", "of", "or", "and", "to", "in", "is", "are", "am", "i", "you", "your", "do",
+                           "does", "have", "has", "what", "which", "how", "would", "describe", "describes", "best",
+                           "following", "please", "select", "choose", "identify", "identification", "self",
+                           "indicate", "status", "voluntary", "optional", "required", "identity", "as", "that",
+                           "apply", "applies", "all", "one", "more", "any", "if", "s", "category", "categories",
+                           "classification", "classifications", "eeo", "eeoc", "my"])
+# optional fields that are self-identification even without a demographic keyword (listed, never answered here)
+_VOLUNTARY_LABEL = re.compile(r"self[- ]identif|voluntary|demographic|impairment|armed forces|military|lgbt|"
+                              r"transgender|\bsex\b|ethnic|\braces?\b|\bracial\b", re.IGNORECASE)
+
+# EEO isolation (ADR-0040). Classification runs FIRST in map_fields: a field whose label names any demographic category
+# (any word form) is EEO, and only its [demographics] value or the decline option may answer it. No other rule
+# (us_citizen, privacy_ack, authorization, prior_employee, saved [answers]) ever sees it.
+_EEO_TOPIC_RES: dict[str, re.Pattern[str]] = {k: re.compile(p) for k, p in {
+    "gender": r"\bgenders?\b|\btransgender\w*\b|\bsex\b",
+    "hispanic": r"\bhispanics?\b|\blatin[oaxe]s?\b|\blatinx\b",
+    "race": r"\braces?\b|\bracial\b|\bethnic\w*\b",
+    "veteran": r"\bveterans?\b|\bmilitary\b|\barmed forces\b",
+    "disability": r"\bdisab(?:ility|ilities|led)\b|\bimpairments?\b",
+    "sexual_orientation": r"\bsexual orientations?\b|\blgbt\w*\b|\bqueer\b",
+    "pronouns": r"\bpronouns?\b",
+}.items()}
+# category VALUES (option texts), used only to check chosen options, never to classify a label
+_EEO_VALUE_RES: dict[str, re.Pattern[str]] = {k: re.compile(p) for k, p in {
+    "gender": r"\b(?:man|woman|men|women|male|female|non ?binary|genderqueer|agender|genderfluid)\b",
+    "race": r"\b(?:asian|white|black|african american|caucasian|native american|american indian|alaska native|"
+            r"pacific islander|native hawaiian|two or more)\b",
+    "sexual_orientation": r"\b(?:gay|lesbian|bisexual|heterosexual|straight|asexual|pansexual)\b",
+    "pronouns": r"\b(?:he him|she her|they them|he they|she they)\b",
+}.items()}
+_EEO_GENERIC = re.compile(r"\beeoc?\b|\bself ?identif\w*|\bequal (?:employment )?opportunity\b|\bdemographics?\b")
+# option domains: race and Hispanic/Latino options share one "ethnicity" domain ("Hispanic or Latino" is a race option)
+_EEO_DOMAIN = {"hispanic": "ethnicity", "race": "ethnicity"}
+
+
+def eeo_topics(text: str) -> list[str]:
+    """Demographic categories named anywhere in `text`, in a fixed order."""
+    n = normalize(str(text))
+    return [k for k, rx in _EEO_TOPIC_RES.items() if rx.search(n)]
+
+
+def option_topics(option: str) -> list[str]:
+    """Demographic categories an option belongs to: category words plus category values ("Asian", "Woman")."""
+    n = normalize(str(option))
+    return list(dict.fromkeys(eeo_topics(option) + [k for k, rx in _EEO_VALUE_RES.items() if rx.search(n)]))
+
+
+def eeo_class(label: str) -> tuple[bool, str | None]:
+    """(is EEO/self-identification, demographic key or None when no single category can be named)."""
+    topics = eeo_topics(label)
+    if topics:
+        return True, topics[0]
+    return bool(_EEO_GENERIC.search(normalize(label))), None
+
+
+def _is_category_option(o: str) -> bool:
+    n = normalize(o)
+    return bool(n) and n not in ("yes", "no") and not any(m in n for m in DECLINE_MARKERS)
+
+
+def eeo_option_ok(option: Any, key: str | None, options: Sequence[str]) -> bool:
+    """A chosen option must belong to the field's own domain: no other category's option (a disability option never
+    answers a gender field) and no bare Yes/No when the field offers category options."""
+    want = _EEO_DOMAIN.get(key or "", key)
+    for o in option if isinstance(option, list) else [option]:
+        if any(_EEO_DOMAIN.get(t, t) != want for t in option_topics(str(o))):
+            return False
+        if normalize(str(o)) in ("yes", "no") and any(_is_category_option(x) for x in options):
+            return False
+    return True
+
+
+def _is_decline(v: Any) -> bool:
+    nv = normalize(str(v))
+    return nv in ("decline", "prefer not to say") or nv.startswith("decline")
+
+
+def demographic_label_ok(label: str, ck: str) -> bool:
+    """Every word is generic self-identification wording or a topic word of `ck` (never another topic)."""
+    own = _DEMO_TOPICS.get(ck)
+    if own is None:
+        return False
+    words = normalize(label).split()
+    return bool(words) and bool(own & set(words)) and all(t in own or t in _DEMO_GENERIC for t in words)
+
+
+def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any | None:
+    """The owner's [demographics] value as the exact option; the decline option when the profile declines or the
+    value/wording does not match exactly; else None. Never a guessed or nearest option."""
+    if not ck:
+        return None
+    if not f.options and f.kind != FieldKind.boolean:
+        # ADR-0040: a free-text EEO box is blank by default. Only a REQUIRED free-text gender field is filled, and only
+        # from demographics.gender_if_required (never from `gender`, never when optional).
+        if ck == "gender" and f.required and f.kind in (FieldKind.text, FieldKind.unknown):
+            g = profile.lookup("gender_if_required")
+            return None if g in (None, "") or _is_decline(g) or not demographic_label_ok(f.label, ck) else str(g)
+        return None
+    v = profile.lookup("gender_if_required") if ck == "gender" and f.required else None
+    if v in (None, ""):
+        v = profile.lookup(ck)              # profile.demographics only, never free-form answers
+    if v in (None, ""):
+        return None
+    if _is_decline(v):
+        if not f.options:
+            return None             # a free-text EEO box is left blank (listed as skipped_voluntary when optional)
+        got = decline_option(f.options)
+    elif not f.options:
+        if not demographic_label_ok(f.label, ck):
+            return None
+        if f.kind == FieldKind.boolean:
+            return _truth(v)
+        return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
+    else:   # the exact option for a plainly-worded question; otherwise declining (never a nearest guess)
+        got = (exact_option(str(v), f.options) if demographic_label_ok(f.label, ck) else None) or decline_option(f.options)
+    return None if got is None else [got] if f.kind == FieldKind.multiselect else got
 
 
 # ---- applicant privacy-notice acknowledgement (ADR-0034) ---------------------------------------------
@@ -763,57 +1246,324 @@ def is_sensitive_question(label: str) -> bool:
 _ACK_VOCAB = frozenset(["privacy", "notice", "notices", "policy", "policies", "statement", "disclosure", "acknowledgement", "acknowledgment", "acknowledge", "acknowledged", "acknowledges", "acknowledging", "read", "reviewed", "review", "understand", "understood", "agree", "agreed", "accept", "accepted", "confirm", "confirmed", "applicant", "applicants", "candidate", "candidates", "job", "recruitment", "recruiting", "data", "processing", "protection", "personal", "information", "i", "have", "has", "the", "our", "that", "and", "a", "an", "of", "to", "by", "in", "my", "me", "you", "your", "please", "this", "we", "it", "its", "how", "use", "uses", "used", "s", "am", "do", "submitting", "application", "yes", "y", "ok", "been", "with"])
 
 
+# ADR-0040 (#56): ordinary acknowledgement wording that states nothing about the candidate
+_ACK_EXTRA = frozenset(["below", "above", "receipt", "received", "linked", "attached", "here", "herein", "following",
+                        "at", "for", "on", "is", "are", "was", "which", "can", "be", "found", "available", "provided",
+                        "collection", "notification", "required"])
+
+
 def _only_ack_words(text: str) -> bool:
-    return all(t in _ACK_VOCAB for t in normalize(text).split())
+    return all(t in _ACK_VOCAB or t in _ACK_EXTRA for t in normalize(text).split())
+
+
+_LEGAL_SUFFIX = frozenset(["inc", "llc", "ltd", "corp", "co", "corporation", "gmbh", "plc", "limited", "company"])
+_NOTICE_OWNED = r"(?=(?:applicant |candidate |job applicant |recruitment |recruiting )?(?:privacy|data protection)\b)"
+
+
+def strip_company_owner(text: str, company: str) -> str:
+    """Normalized `text` with the posting company's full name removed ONLY where it owns the notice
+    ("Acme's Privacy Notice", "Acme Applicant Privacy Policy"). Elsewhere its words stay and must pass on their own."""
+    n = normalize(text)
+    words = normalize(company).split()
+    names = {" ".join(words)}
+    while words and words[-1] in _LEGAL_SUFFIX:
+        words = words[:-1]
+        names.add(" ".join(words))
+    for name in sorted((x for x in names if x), key=len, reverse=True):
+        n = re.sub(rf"\b{re.escape(name)}(?: s)? {_NOTICE_OWNED}", "", n)
+    return re.sub(r"\s+", " ", n).strip()
 
 
 _ACK_STRONG = re.compile(r"\b(acknowledg\w*|agree\w*|accept\w*|confirm\w*|understand\w*|read)\b")
 
 
-def is_ack_option(option: str) -> bool:
+def is_ack_option(option: str, company: str = "") -> bool:
     """The option itself must be an acknowledgement ("I acknowledge", "Yes, I have read it", or a bare "Yes"),
     never a demographic, veteran, authorization or other sensitive choice."""
     n = normalize(option)
     if not n or is_sensitive_question(option) or has_negator(option) or any(w in n for w in DECLINE_MARKERS):
         return False
-    if not _only_ack_words(option):
+    if not _only_ack_words(strip_company_owner(option, company)):
         return False
     return bool(_ACK_STRONG.search(n)) or n in ("yes", "y")
 
 
-def is_privacy_notice(label: str, stop_phrases: Sequence[str] = ()) -> bool:
+def is_privacy_notice(label: str, stop_phrases: Sequence[str] = (), company: str = "") -> bool:
     """True only for a plain privacy-notice acknowledgement label; any excluded topic or stop phrase -> False."""
     from ..config import PolicyCfg
     default_stop = PolicyCfg.model_fields["stop_phrases"].get_default(call_default_factory=True)
     low = label.lower()
     if _PRIVACY_EXCLUDE.search(low) or any(p.lower() in low for p in (*default_stop, *stop_phrases) if p):
         return False
-    if canonical_key(label) not in (None, "privacy_ack") or is_sensitive_question(label) or not _only_ack_words(label):
+    stripped = strip_company_owner(label, company)
+    if (canonical_key(label) not in (None, "privacy_ack") or is_sensitive_question(label)
+            or not _only_ack_words(stripped)):
         return False
-    return bool(_PRIVACY_LABEL.search(normalize(label)))
+    return bool(_PRIVACY_LABEL.search(stripped))     # a privacy / data-protection notice noun must remain
 
 
-def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = ()) -> Any | None:
+def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: str = "") -> Any | None:
     """The affirmative answer for a privacy-notice field, or None (leave unresolved) if unsure."""
-    if not is_privacy_notice(f.label, stop_phrases):
+    if not is_privacy_notice(f.label, stop_phrases, company):
+        return None
+    if eeo_class(f.label)[0] or any(option_topics(o) or eeo_class(o)[0] for o in f.options):   # ADR-0040
         return None
     if f.kind == FieldKind.boolean:
         return True
     if f.kind in (FieldKind.select, FieldKind.multiselect) or f.options:
         if any(_PRIVACY_EXCLUDE.search(o) for o in f.options):
             return None
-        aff = [o for o in f.options if _ACK_OPTION.search(normalize(o)) and is_ack_option(o)]
+        aff = [o for o in f.options if _ACK_OPTION.search(normalize(o)) and is_ack_option(o, company)]
         if len(aff) != 1:
             return None
         return [aff[0]] if f.kind == FieldKind.multiselect else aff[0]
     return None
 
 
+# ---- messaging / marketing opt-ins (ADR-0050) -------------------------------------------------------
+# Fail closed, descoped: every contact / messaging / marketing permission field is OWNER-ONLY. It is never Yes and
+# never an automatic No; client answers are refused, no model, flat [answers] or persona answer ever applies, and it
+# stays unresolved. The one exception is the owner's own stored [answers] "optin:<channel>" value for every named
+# channel. Automatic declines belong to a future safe-default mode, not to this rule.
+_OPTIN_CHANNELS: list[tuple[str, re.Pattern[str]]] = [
+    ("whatsapp", re.compile(r"\bwhats ?app\w*\b")),
+    ("sms", re.compile(r"\bsms\b|\bmms\b|\b(?:mobile|cell(?:ular)?|phone) messag\w*|\btext(?:s|ed|ing)?\b(?! (?:box|field|area|input|below|above|editor)\b)")),
+    ("phone", re.compile(r"\b(?:call(?:s|ed|ing)?|phone(?:d|s)?|voicemail)\b")),
+    ("email", re.compile(r"\be ?mail(?:s|ed|ing)?\b")),
+    ("signal", re.compile(r"\bsignal\b")),
+    ("telegram", re.compile(r"\btelegram\b")),
+    ("wechat", re.compile(r"\bwe ?chat\b")),
+    ("line", re.compile(r"\b(?:on|via|through|by|over) line\b|\bline app\b")),
+    ("viber", re.compile(r"\bviber\b")),
+    ("imessage", re.compile(r"\bimessage\b|\brcs\b")),
+    ("push", re.compile(r"\bpush\b")),
+    # a marketing COMMUNICATION only (control round 4); bare "marketing" / "promotion" is a job topic (see "contact")
+    ("marketing", re.compile(r"\bmarketing (?:e ?mails?|messages?|communications?|texts?|offers|updates|materials?)\b|"
+                             r"\bnewsletters?\b|\bpromotional (?:e ?mails?|messages?|offers|communications?|texts?)\b|"
+                             r"\bpromotions? (?:by|via) (?:e ?mail|text|sms)\b|\bmailing list\b|"
+                             r"\babout (?:future|other|new) (?:roles|opportunit\w*|openings|positions|jobs)\b|"
+                             r"\btalent (?:community|network|pool)\b|\bjob alerts?\b")),
+    # generic contact permission with no named channel: stored Yes needs optin:contact
+    ("contact", re.compile(r"\b(?:contact(?:ed|ing)?|reach(?:ed|ing)?(?: out)?|messag\w*|updates?|alerts?|"
+                           r"notif\w*|reminders?|communicat\w*|keep in touch|stay in touch|hear from|"
+                           r"marketing|promotion(?:s|al)?)\b")),       # broad marker only: never auto-answered
+]
+# ADR-0050 (deny by default): on a choice or boolean field, any channel / contact word that addresses the candidate
+# makes the field a messaging opt-in. Only these exits make it something else.
+_OPTIN_ADDRESSED = re.compile(r"\b(?:you|your|me|my|i)\b|\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bagree\w*|\breceiv\w*|"
+                              r"\bsubscri\w*|\bsign(?: me)? up\b|\bok(?:ay)?\b|\ballow\w*|\bpermission\b|\benroll\w*")
+# a choice/checkbox whose label starts with the channel ("SMS updates", "WhatsApp: may we ...") is addressed too
+_OPTIN_LEADING = re.compile(r"^(?:sms|text|e ?mail|whats ?app|phone|push|marketing|newsletter|signal|telegram)\b")
+# skills / experience, facts about the past, other people and the company's own process are not opt-ins
+# Exceptions REMOVE only the words they account for (control round 3): "WhatsApp experience", "experience with Twilio
+# SMS", "call your references", "on call", "phone screen". Whatever remains is checked again, so "Do you have WhatsApp
+# experience, and may we message you there?" still asks to contact the candidate.
+_W = r"(?: (?!and\b|or\b|but\b|also\b)\w+)"           # one following word inside the same clause
+_OPTIN_NOT = re.compile(
+    r"(?:\b\w+ ){0,2}\b(?:experience\w*|expertise|skills?|knowledge|proficien\w*|familiar\w*|background in)\b"
+    rf"(?: (?:with|in|using|of|on|building|managing|as)\b{_W}{{0,4}})?|"
+    rf"\b(?:built|build|building|developed|develop\w*|implement\w*|designed|designing|integrat\w*|deploy\w*|"
+    rf"managed|managing|worked (?:on|with)|administer\w*)\b{_W}{{0,3}}|"   # never "using": "text you using WhatsApp"
+    r"\b(?:\d+ )?years?(?: of)?\b|\bengineer\w*|\btools?\b|\btechnolog\w*|\bplatforms?\b|\bapis?\b|\bgateways?\b|"
+    r"\btwilio\b|"
+    rf"\bhave you (?:ever |previously |already )?(?:been )?(?:contact|call|email|messag|text|reach)\w*"
+    rf"(?: by{_W}{{1,4}})?(?: before)?|"
+    rf"\b(?:did|has|have) (?:anyone|someone|a recruiter|we|our)\b{_W}{{0,4}}|"
+    r"\b(?:your |the |my |our )?(?:current |previous |former |past )?(?:references?|referees?|employers?|managers?|"
+    r"supervisors?|emergency contacts?|next of kin)\b|"
+    r"\bon ?call\b|\bpager\w*|\bphone (?:interview|screen)\w*|\bvideo (?:call|interview)\w*|\bavailab\w*")
+
+
+def _names_channel(f: FormField) -> bool:
+    """A choice/boolean field whose raw label names any contact channel (before exceptions are removed)."""
+    choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
+    n = normalize(f.label)
+    return choice and any(rx.search(n) for c, rx in _OPTIN_CHANNELS if c != "contact")
+
+
+def _strip_exceptions(n: str) -> str:
+    return re.sub(r"\s+", " ", _OPTIN_NOT.sub(" ", n)).strip()
+
+
+_OPTOUT = re.compile(r"\bopt(?:ing|ed)? ?out\b|\bunsubscri\w*|\bstop receiving\b|\b(?:do not|don t|never) "
+                     r"(?:want|wish) to (?:receive|be contacted)\b")
+
+
+_OPTIN_BUNDLED = re.compile(r"acknowledg|privacy|gdpr|attest|certif|\bterms\b|conditions|polic(?:y|ies)|\btrue\b|"
+                            r"accura|arbitrat|background|record(?:ed|ing)?\b|transcri")
+_TEXT_OPTIN = re.compile(r"\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bsubscri\w*|\bsign(?: me)? up\b|\bpermission\b|"
+                         r"\b(?:may|can) we (?:contact|text|call|email|message|reach)\b")
+
+
+def contact_permission_channels(label: str, choice: bool = False) -> list[str]:
+    """ADR-0050: the channels a label asks permission to contact the candidate on ([] when it is not such a
+    question). Shared by the mapper's opt-in rule and the engine, which refuses client answers for these fields."""
+    n = _strip_exceptions(normalize(label))
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
+    if not chans or not (_OPTIN_ADDRESSED.search(n) or (choice and _OPTIN_LEADING.search(n))):
+        return []
+    return [c for c in chans if c != "contact"] or ["contact"]
+
+
+def optin_channels(f: FormField) -> list[str] | None:
+    """The channels a choice/boolean field asks permission to contact the candidate on, or None when it is not a
+    contact-permission question. [] = an opt-in the owner must answer (opt-out wording, bundled consent, free text).
+    A text field naming a channel ("WhatsApp number", "Your email") is not an opt-in."""
+    n = _strip_exceptions(normalize(f.label))      # exceptions remove only the words they cover
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
+    if not chans:
+        return None                     # "experience with Twilio SMS", "built SMS gateways", "call your references"
+    choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
+    if not choice:
+        return [] if _TEXT_OPTIN.search(n) else None
+    shared = contact_permission_channels(f.label, choice=True)
+    if not shared:
+        return None
+    if is_auth_question(f) or eeo_class(f.label)[0] or canonical_key(f.label) in _OPTIN_OTHER_KEYS:
+        # a question with its own rule; if another clause still asks permission to contact, the owner decides
+        return [] if _PERMISSION_ASK.search(n) else None
+    if _OPTOUT.search(n) or _OPTIN_BUNDLED.search(n):
+        return []                       # opt-out wording, or bundled with a notice/terms/attestation: the owner decides
+    return shared
+
+
+_OPTIN_OTHER_KEYS = {"knows_employee", "prior_employee", "referral_source", "relocation_support", "willing_to_relocate",
+                     "open_to_hybrid", "open_to_onsite", "located_in_us", "over_18", "start_date", "years_experience",
+                     "languages_known", "email", "phone", "first_name", "last_name", "full_name", "preferred_name",
+                     "linkedin", "github", "website", "location", "country", "zip"}
+
+
+def _no_option(options: Sequence[str]) -> str | None:
+    hits = [o for o in options if tokens(o)[:1] == ["no"]] or \
+        [o for o in options if _OPTOUT.search(normalize(o)) or re.search(r"\b(?:do not|don t) (?:want|wish|opt)\b",
+                                                                          normalize(o))]
+    return hits[0] if len(hits) == 1 else None
+
+
+# ADR-0050: a stored optin:<channel> value is used only for a NARROW permission question (delivery verb, named
+# messaging channel or marketing communication, and a contact as the thing delivered). The broad classifier
+# (contact_permission_channels) only marks a field owner-only: "Are you comfortable making cold calls?" is never
+# answered, not even from a stored optin:phone.
+_PERMISSION_ASK = re.compile(
+    # control round 4: every alternative names a delivery (receive / be contacted / text you ...); a bare
+    # "would you like", "consent" or "permission" never counts
+    r"\bopt(?:ing|ed)? ?in(?: to| for|$)|\bsubscri\w* to\b|\bsign (?:me )?up (?:for|to)\b|"
+    r"\b(?:consent\w*|agree\w*) to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged|sent))\b|"
+    r"\bpermission to (?:send|contact|text|call|email|message|reach)\w* (?:you|your|me)\b|"
+    r"\b(?:may|can|could) (?:we|our (?:team|recruiters?)|recruiters?|\w+ recruiting) (?:send|contact|text|call|email|"
+    r"message|reach|whats ?app)\w*(?: or (?:contact|text|call|email|message)\w*)? (?:you|your)\b|"
+    r"\bok(?:ay)? to (?:text|call|email|contact|message|whats ?app)\w* (?:you|your)\b|"
+    r"\b(?:would|d) (?:you |i )?like to (?:receive|get|be sent|hear)\b|"
+    r"\bjoin (?:our|the|\w+(?: \w+)? s) (?:talent (?:community|network|pool)|mailing list|newsletter)\b")
+# channels that may be auto-answered; bare phone/call, email, push and generic contact words never are
+_AUTO_CHANNELS = frozenset({"whatsapp", "sms", "signal", "telegram", "wechat", "line", "viber", "imessage",
+                            "marketing"})
+
+
+# ---- the single-clause permission template (control round 6; shared with the autonomy-level PR) -----------------
+# A stored optin:<channel> is applied ONLY when the whole label is one permission clause. A second clause ("Have you
+# been arrested, and may we text you?", "May we text you? Are you a US citizen?") or any legal, attestation, EEO or
+# third-party term anywhere rejects it, and the field stays unresolved.
+_SECOND_CLAUSE = re.compile(r"\band\b|\bor\b|;|,|\?\s*\S|\.\s+\S|!\s*\S", re.IGNORECASE)
+_SINGLE_ASK_BLOCK = re.compile(
+    r"arrest|criminal|convict|felon|citizen|authori[sz]|sponsor|visa|\b18\b|\bage\b|certif|attest|\btrue\b|accura|"
+    r"background|drug|gender|\brace\b|ethnic|veteran|disab|referen|referee|manager|employer|third|emergency|\bkin\b|"
+    r"terms|arbitrat|privacy|record(?:ed|ing)?\b|relocat|salary|clearance|export", re.IGNORECASE)
+_ASK_LEAD = r"(?:(?:do you|would you like to|i would like to|i d like to|i|yes)\s)?"
+_ASK_VERB = (r"(?:opt in (?:to|for)(?: receive| receiving)?|subscribe to|sign (?:me )?up (?:for|to)|"
+             r"(?:consent|agree) to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged))|"
+             r"would you like to (?:receive|get)|"
+             r"(?:may|can|could) we (?:send|contact|text|call|email|message|reach|whats ?app) (?:you|your)|"
+             r"(?:is it )?ok(?:ay)? to (?:text|call|email|contact|message|whats ?app) (?:you|your))")
+_ASK_TAIL = (r"(?:\s(?:about (?:this|my|your) application|about (?:new|future) (?:roles|jobs|opportunities)|"
+             r"from (?:us|[a-z0-9 ]{1,40})))?")
+_ASK_OBJECT_WORDS = frozenset(["a", "the", "our", "your", "my", "via", "by", "on", "over", "through", "mobile", "phone",
+                               "cell", "number", "messages", "message", "updates", "update", "alerts", "alert",
+                               "notifications", "notification", "texts", "text", "emails", "email", "e", "mail",
+                               "communications", "newsletter", "newsletters", "marketing", "promotional", "offers",
+                               "recruiting", "recruiter", "job", "sms", "mms", "whatsapp", "whats", "app", "signal",
+                               "telegram", "wechat", "line", "viber", "imessage", "reminders", "talent", "community",
+                               "mailing", "list"])
+_ASK_RX = re.compile(rf"^{_ASK_LEAD}{_ASK_VERB}(?P<obj>(?:\s[a-z0-9]+){{0,5}}?){_ASK_TAIL}$")
+
+
+def is_single_permission_ask(label: str, company: str = "") -> list[str] | None:
+    """The channels of a label that is exactly ONE permission-to-contact clause (lead-in, permission verb, channel,
+    optional short tail), else None. Shared with the autonomy-level `safe_default` mode."""
+    raw = (label or "").strip()
+    body = re.sub(r"[?.!]+\s*$", "", raw)          # one trailing ? or . is allowed
+    if not body or _SECOND_CLAUSE.search(body) or _SINGLE_ASK_BLOCK.search(raw):
+        return None
+    n = normalize(body)
+    m = _ASK_RX.match(n)
+    if not m:
+        return None
+    tail = n[m.end("obj"):].strip()
+    if tail.startswith("from ") and tail[5:] not in ("us", "recruiting"):
+        allowed = set(normalize(company).split()) | {"recruiting", "recruiters", "team", "talent", "hiring", "s"}
+        if not company or not set(tail[5:].split()) <= allowed:
+            return None
+    if not all(w in _ASK_OBJECT_WORDS for w in m.group("obj").split()):
+        return None
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n) and c != "contact"]
+    return chans if _AUTO_CHANNELS & set(chans) else None
+
+
+def optin_value(f: FormField, chans: list[str], profile: ProfileLike, company: str = "") -> Any | None:
+    """ADR-0050 (descoped): never an automatic answer. Only the owner's own stored `optin:<channel>` value, set for
+    EVERY named channel, answers a label that is exactly one permission clause (is_single_permission_ask)."""
+    single = is_single_permission_ask(f.label, company)
+    if not single:
+        return None
+    chans = single
+    stored = [_truth(profile.lookup(f"optin:{c}")) for c in chans]
+    if any(v is None for v in stored):
+        return None                     # no automatic No: the owner (or a later safe-default mode) decides
+    want = all(stored)
+    if f.kind == FieldKind.boolean:
+        return want
+    if not f.options:
+        return None
+    pick = (next((o for o in f.options if tokens(o)[:1] == ["yes"]), None) if want else _no_option(f.options))
+    if pick is None:
+        return None
+    return [pick] if f.kind == FieldKind.multiselect else pick
+
+
+# ---- flat [answers] and authorization (ADR-0050) -----------------------------------------------------------
+# Since ADR-0040 a job outside the home country takes only [authorization.<CC>] facts or a stored
+# authorization.<CC>.* answer. A flat [answers] pattern ("now or in the future", "require sponsorship") states a
+# home-country fact, so it may answer an authorization/sponsorship question only on a confirmed home-country job.
+_AUTH_TOPIC = re.compile(r"sponsor|\bvisas?\b|authori[sz]|eligib\w* to work|right to work|work permit|work rights|"
+                         r"permitted to work|allowed to work|legally (?:able|entitled) to work|immigra|"
+                         r"\bh ?1 ?b\b|\bopt\b(?! (?:me |us )?(?:in|into|out)\b)|\bcpt\b|\bead\b|leave to remain|blue card")
+
+
+def is_auth_question(f: FormField) -> bool:
+    return any(_AUTH_TOPIC.search(normalize(t)) for t in (f.label, *f.options))
+
+
+def flat_auth_allowed(f: FormField, profile: ProfileLike, job_country: str | None) -> bool:
+    """True only when the question's country (the one it names, else the job's confirmed country) is the home country."""
+    named = named_countries(f.label)
+    if len(named) > 1 or (named and named[0] is None):
+        return False
+    country = named[0] if named else job_country
+    home = str(profile.lookup("home_country") or "").upper() or None
+    return country is not None and country == home
+
+
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
-               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = ()) -> MapResult:
+               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
+               job_in_us: bool = False, job_country: str | None = None) -> MapResult:
+    """`job_country`: the job's confirmed ISO-2 country (see job_country()); `job_in_us=True` is the old alias for "US"."""
+    if job_country is None and job_in_us:
+        job_country = "US"
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
     res = MapResult()
+    eeo_keys: set[str] = set()
+    gaps: list[dict[str, Any]] = []
 
     def ok(f: FormField, v: Any, src: str) -> None:
         if v is None or v == "":
@@ -837,12 +1587,28 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             else:
                 res.answers.append(Answer(key=f.key, value=str(v), source="derived:geo"))
             continue
+        is_eeo, ek = eeo_class(f.label)
+        if is_eeo:                       # ADR-0040: EEO isolation, before every other rule
+            v = demographic_value(f, ek, profile)
+            if v is not None and f.options and not eeo_option_ok(v, ek, f.options):
+                v = None
+            eeo_keys.add(f.key)
+            ok(f, v, f"rule:{ek or 'eeo'}")
+            continue
+        chans = optin_channels(f)
+        if chans is not None:            # ADR-0050: messaging/marketing opt-in, before every answer source
+            ov = optin_value(f, chans, profile, company)
+            if ov is not None:            # the owner's own optin:<channel> answer
+                res.answers.append(Answer(key=f.key, value=ov, source="rule:messaging_optin"))
+            else:
+                res.unresolved.append(f)  # owner-only: never Yes, never an automatic No, no flat/persona/LLM
+            continue
         ck = canonical_key(f.label)
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
             ck = canonical_key(f.label, skip=("privacy_ack",))
         # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0038)
         if ck in (None, "privacy_ack") and _truth(profile.lookup("acknowledge_privacy_notices")) is True:
-            pv = privacy_ack_value(f, stop_phrases)
+            pv = privacy_ack_value(f, stop_phrases, company)
             if pv is not None:
                 res.answers.append(Answer(key=f.key, value=pv, source="rule:privacy_ack"))
                 continue
@@ -850,32 +1616,24 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             ok(f, derive_graduation(f, profile.lookup("graduation")), "derived:graduation")
             continue
         if ck in DEMOGRAPHIC_KEYS or (ck is None and _DEMOGRAPHIC_LABEL.search(f.label)):
-            v = profile.lookup(ck) if ck else None  # profile.demographics only, never free-form answers
-            if v is None or v == "":
-                res.unresolved.append(f)
-            elif not f.options:
-                ok(f, str(v), f"rule:{ck}")
-            else:
-                dv = str(v)
-                if normalize(dv) in ("decline", "prefer not to say") or normalize(dv).startswith("decline"):
-                    got = decline_option(f.options)
-                else:
-                    got = exact_option(dv, f.options) or decline_option(f.options)
-                ok(f, got, f"rule:{ck}")
+            res.unresolved.append(f)     # demographic alias without a category word: never answered by another rule
             continue
         if ck == "referral_source" and f.options:
             ok(f, pick_source(profile.lookup("referral_source"), f.options, pref), "rule:referral_source")
             continue
         if ck in _SEMANTIC_KEYS:
-            handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases)
+            handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases, job_country, gaps)
             if handled:
                 if sv is None or sv == "":
                     res.unresolved.append(f)
+                    if ck == "citizenship_countries" and (c := profile.lookup("citizenship_country")):
+                        res.hints[f.key] = {"citizenship": str(c),
+                                            "note": "profile citizenship only; the rest of the question needs the owner"}
                     continue
                 if f.kind == FieldKind.multiselect and isinstance(sv, list):
                     res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
                     continue
-                if ck in ("years_experience", "languages_known", "gpa", "citizenship") and f.options and sv in f.options:
+                if ck in ("years_experience", "languages_known", "gpa", "citizenship", "citizenship_countries") and f.options and sv in f.options:
                     res.answers.append(Answer(key=f.key, value=sv, source=f"rule:{ck}"))
                     continue
                 c = _coerce(f, sv, min_score)
@@ -884,7 +1642,19 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 else:
                     res.answers.append(Answer(key=f.key, value=c, source=f"rule:{ck}"))
                 continue
+        if is_auth_question(f):          # ADR-0050: only structured per-country facts (above) answer these
+            res.unresolved.append(f)
+            if not flat_auth_allowed(f, profile, job_country):
+                gaps.append({"country": None, "fact": None, "key": f.key})
+            continue
+        if _names_channel(f):            # ADR-0050: a choice field naming a contact channel never takes a flat,
+            res.unresolved.append(f)     # persona or alias-phrase answer (only optin:<channel>, via the rule above)
+            continue
         value: Any | None = profile.lookup(ck) if ck else None
+        persona_src = False
+        if value is None and ck is None and persona is not None:   # ADR-0047: after every sensitive guard above
+            value = persona.claim(f.label, ck, stop_phrases)
+            persona_src = value is not None
         if value is None:
             value = profile.lookup(normalize(f.label))
         coerced = _coerce(f, value, min_score) if value is not None else None
@@ -894,7 +1664,25 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
         if coerced is None or coerced == "":
             res.unresolved.append(f)
         else:
-            res.answers.append(Answer(key=f.key, value=coerced, source="profile" if ck is None else f"rule:{ck}"))
+            res.answers.append(Answer(key=f.key, value=coerced, source="persona:answer" if persona_src else "profile" if ck is None else f"rule:{ck}"))
+    # ADR-0040 option domain: outside the EEO path, a chosen option may never name a demographic category
+    by_key = {f.key: f for f in fields}
+    keep: list[Answer] = []
+    for a in res.answers:
+        f = by_key.get(a.key)
+        if (f is not None and a.key not in eeo_keys and f.options
+                and any(option_topics(str(x)) for x in (a.value if isinstance(a.value, list) else [a.value]))):
+            res.unresolved.append(f)
+        else:
+            keep.append(a)
+    res.answers = keep
+    answered = {a.key for a in res.answers}
+    res.profile_gaps = list({(g["country"], g["fact"]): g for g in gaps
+                             if g["key"] not in answered and g["country"]}.values())
+    # authorization/sponsorship fields whose country is not confirmed: never a gap under any reusable key
+    res.no_gap_keys = {g["key"] for g in gaps if not g["country"] and g["key"] not in answered}
+    res.skipped_voluntary = [f for f in res.unresolved if not f.required
+                             and (f.key in eeo_keys or _DEMOGRAPHIC_LABEL.search(f.label) or _VOLUNTARY_LABEL.search(f.label))]
     return res
 
 

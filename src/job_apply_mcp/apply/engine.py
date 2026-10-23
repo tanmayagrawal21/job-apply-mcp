@@ -7,17 +7,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import hashlib
 import json
 import re
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..consent.otp import OTP_SETUP_HINT
 from ..control.builtin import _NOT_SENT
 from ..core.concurrency import bounded_gather
 from ..core.interfaces import BrowserDriver, PlatformAdapter, Store
@@ -32,22 +36,29 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
+from ..llm.base import LLM_TIMINGS
+from ..writing import checks
 from .approvals import ApprovalBook, evidence_path
 from .mapper import (
     DEMOGRAPHIC_KEYS,
     SEMANTIC_SENSITIVE,
     best_option,
     canonical_key,
+    contact_permission_channels,
+    eeo_class,
     geo_kind,
+    job_country,
+    llm_safe_short,
     looks_fabricated,
     map_fields,
+    never_llm,
     normalize,
     polarity,
     tokens,
 )
 from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
 from .salary import compute_ask, format_ask, is_salary_field
-from .writing import load_exemplar, summarize_posting, write_text
+from .writing import WriteProgress, load_exemplar, review_rubric, review_text, summarize_posting, write_text
 
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
 _SENSITIVE_KEYS = SEMANTIC_SENSITIVE | {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
@@ -60,6 +71,75 @@ _SENSITIVE_LABEL = re.compile(r"how many years|years of|criminal|convict|felony|
 _ATTEST_LABEL = re.compile(
     r"certif|attest|foreign talent|own work|by selecting|i agree|i acknowledge|i declare|under penalty|"
     r"true and (?:correct|accurate)|truthful|export control|conflict of interest", re.IGNORECASE)
+# Attestation, certification, no-AI and consent wording that must never ride along inside an answer (ADR-0044).
+_ATTEST_TEXT = re.compile(
+    r"\b(?:i|we|the\s+applicant|applicant|the\s+candidate|candidate|the\s+undersigned)\s+"
+    r"(?:hereby\s+|also\s+|further\s+|have\s+|has\s+|do\s+|did\s+|can\s+|will\s+)?"
+    r"(?:certif(?:y|ies|ied)|attest(?:s|ed)?|affirm(?:s|ed)?|declar(?:e|es|ed)|confirm(?:s|ed)?|"
+    r"acknowledg(?:e|es|ed)|agree(?:s|d)?|consent(?:s|ed)?|authori[sz](?:e|es|ed))\b|"
+    r"\bhereby\b|\bpersonally\s+(?:completed|wrote|written|prepared)\b|"
+    r"\b(?:completed|written|prepared)\s+by\s+me\s+personally\b|"
+    r"\bwithout\s+(?:the\s+)?(?:use|help|assistance|aid)\s+of\s+(?:any\s+)?(?:an?\s+)?(?:ai|artificial intelligence|"
+    r"llms?|chatgpt|generative)\b|\b(?:did\s+not|didn\W?t|never)\s+use(?:d)?\s+(?:any\s+|an?\s+)?(?:chatgpt|copilot|"
+    r"ai|artificial intelligence|generative|llms?)\b|\bno\s+(?:generative\s+)?(?:ai|artificial intelligence)\b|"
+    r"\bwithout\s+(?:any\s+|the\s+)?(?:ai|a\.i\.|artificial intelligence|llms?|chatgpt|generative)\b|"
+    r"\b(?:ai|artificial intelligence|chatgpt|llms?)\s+(?:was|were|is|are|has\s+been|had\s+been)\s+(?:not|never)\s+(?:used|involved)\b|"
+    r"\b(?:ai|llm)\W?free\b|\bzero\s+(?:ai|artificial intelligence|llms?)\b|\bsolemnly\b|\bswear\b|\bsworn\b|"
+    r"\b(?:written|wrote|authored|composed|drafted|completed|prepared)\s+(?:this\s+|it\s+|all\s+)?by\s+me\b|"
+    r"\bby\s+myself\b|\b(?:wrote|written|authored|composed|drafted)\s+(?:this|it|these)\s+myself\b|"
+    r"\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b|"
+    r"\bpermission\s+to\s+(?:text|call|contact|email|e\W?mail|message|sms)\b|\bsms\b|\btexts\b|"
+    r"\btext\s+(?:me|messages?|messaging|updates?|alerts?)\b|\bcall\s+or\s+text\b|"
+    r"\bcontact\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|text|sms|mobile|cell)\b|"
+    # authorship and no-AI claims by meaning (ADR-0044)
+    r"\bnot\s+(?:ai|llm|machine|computer)\W?(?:generated|written|assisted|produced)\b|\bnon\W?ai\b|"
+    r"\bhuman\W?(?:written|authored|made|generated|crafted)\b|\b100\s?%\s+human\b|\bentirely\s+human\b|"
+    r"\bmy\s+own\s+(?:words|writing|work)\b|\bevery\s+(?:single\s+)?word\b[^.!?\n]{0,60}\bmy\s+own\b|"
+    r"\bentirely\s+(?:my\s+own|mine)\b|\bunaided\b|"
+    r"\b(?:no|without(?:\s+any)?)\s+(?:outside\s+|external\s+)?(?:assistance|help)\b|"
+    r"\b(?:wrote|written|authored|composed|drafted)\s+(?:this|it|these|them|everything)?\s*"
+    r"(?:entirely\s+|completely\s+)?(?:alone|by\s+myself|myself|on\s+my\s+own|single\W?handedly)\b|"
+    r"\bhand\W?written\s+by\b|"
+    r"\b(?:did\s+not|didn\W?t|never|do\s+not|don\W?t|have\s+not|haven\W?t)\s+(?:use|used|rely\s+on|relied\s+on|consult|"
+    r"consulted)\s+(?:any\s+|an?\s+)?(?:gpt|chatgpt|claude|gemini|copilot|bard|openai|llms?|ai|artificial intelligence)\b|"
+    r"\b(?:gpt|chatgpt|claude|gemini|copilot|bard|openai|llms?|ai)(?:\W?\d+(?:\.\d+)?)?\s+(?:was|were|is|has\s+been|had\s+been)"
+    r"\s+(?:not|never)\s+(?:used|involved|consulted|employed)\b|"
+    # pledges, completeness statements and other consent/contact wording
+    r"\b(?:i|we)\s+(?:hereby\s+)?(?:pledge|vouch|guarantee|warrant|promise)\b|"
+    r"\b(?:accurate|true|correct)\s+and\s+(?:complete|accurate|correct|true)\b|"
+    r"\baccept\s+the\s+(?:privacy|terms|policy|conditions)\b|\bprivacy\s+(?:policy|notice)\b|"
+    r"\bopt\W?in\s+to\b|\bopt\s+me\s+in\b|\bsign\s+me\s+up\b|\bsubscribe\s+me\b|"
+    r"\b(?:okay|ok|fine|happy|free|welcome)\s+to\s+(?:email|e\W?mail|call|ring|phone|text|contact|message)\s+me\b|"
+    r"\b(?:receive|get|send\s+me|email\s+me)\s+(?:\w+\s+){0,3}?(?:promotions?|promotional|marketing|offers|newsletters?)\b|"
+    # meaning-level paraphrases (general wording, any locale)
+    r"\b(?:ai|llms?|chatgpt|generative\s+ai|language\s+models?)\s+(?:involvement|usage|use|assistance)\s*[:=-]\s*"
+    r"(?:none|nil|no|zero|0|n/?a)\b|\buse\s+of\s+(?:ai|llms?|language\s+models?)\s*[:=-]\s*(?:none|nil|no|zero|0)\b|"
+    r"\b(?:ai|llms?)\s*[:=-]\s*(?:none|nil|zero|0)\b|\bno\s+generative\s+tools?\b|"
+    r"\bzero\s+use\s+of\s+(?:ai|llms?|language\s+models?)\b|\bnot\s+(?:generated|written|produced)\s+by\s+(?:a\s+)?"
+    r"(?:machine|computer|bot|model|ai)\b|\bsole\s+(?:author|writer|creator)\b|\b(?:penned|authored)\s+by\s+me\b|"
+    r"\b(?:authentically|genuinely|wholly|truly)\s+(?:mine|my\s+own)\b|\bon\s+my\s+(?:honou?r|word)\b|"
+    r"\b(?:i\s+)?give\s+(?:you\s+)?my\s+word\b|\bfalse\s+(?:statements?|information)\s+(?:may|will|could|can)\b|"
+    r"\b(?:reach|contact|message)\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|mobile|cell|whatsapp|"
+    r"telegram|signal|viber|wechat|line|sms|text)\b",
+    re.IGNORECASE)
+# Text aimed at the reviewer model rather than the employer (ADR-0044).
+_INJECT_TEXT = re.compile(
+    r"[{\[]\s*\"?\s*(?:pass|violations|scores|at_least_as_strong|corrected)\b|(?:^|[\n.!?]\s*)(?:dear\s+)?(?:reviewer|"
+    r"grader|evaluator|assistant|system|note to (?:the\s+)?(?:reviewer|model|ai))\s*[:,]|\bignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
+    r"(?:instructions|rules|text)|\b(?:respond|reply|answer)\s+with\b|\breturn\s+json\b|\bpass\s*[:=]\s*true\b|"
+    r"\bevaluator\b|\brubric\b|</?\s*(?:pass|verdict|score)\s*>|\boutput\s+(?:a\s+)?[\"']?(?:pass|true)\b|"
+    r"\bignore\s+(?:the\s+|all\s+|any\s+|your\s+)?(?:rubric|rules|instructions|criteria|checks?|guidelines|above|"
+    r"previous|prior)\b|<<<|>>>",
+    re.IGNORECASE)
+# Consent / opt-in labels: like attestations, never set by the client in agent mode (ADR-0044).
+# ADR-0050: plus every contact-permission question (mapper.contact_permission_channels), whatever its wording
+_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|\btext(?:ed|ing)? (?:you|your|me)\b|\ba text\b|"
+                            r"\b(?:call|ring) or text\b|whats ?app|marketing|opt[\s-]?in|subscribe|newsletter|"
+                            r"terms (?:and|&) conditions|i agree|i accept", re.IGNORECASE)
+_EXACT_VALUE = re.compile(
+    r"(?:https?://|www\.)\S+|[+-]?\d[\d,]*(?:\.\d+)?\s?%?|\d{4}-\d{2}(?:-\d{2})?|\d{1,2}/\d{1,2}/\d{2,4}|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?:\d{1,2},?\s+)?\d{4}", re.IGNORECASE)
+_FREE_TEXT_KINDS = frozenset({FieldKind.text, FieldKind.textarea, FieldKind.unknown})
 _AI_LABEL = re.compile(r"\bai\b|artificial intelligence|\bllms?\b|chatgpt|copilot|generative", re.IGNORECASE)
 _HUMAN_LABEL = re.compile(_ATTEST_LABEL.pattern + "|" + _AI_LABEL.pattern, re.IGNORECASE)
 # "What AI tools are you using?" is a factual prose question (writer + review), not an AI-use attestation (ADR-0033).
@@ -86,6 +166,8 @@ class PlanOut(BaseModel):
     client_tasks: list[dict[str, Any]] = Field(default_factory=list)
     approval_id: str | None = None
     timings: dict[str, int] = Field(default_factory=dict)
+    skipped_voluntary: dict[str, str] = Field(default_factory=dict)   # key -> label (ADR-0040)
+    profile_gaps: list[dict[str, Any]] = Field(default_factory=list)  # per-country facts to ask the owner (ADR-0040)
 
     def compact(self) -> dict[str, Any]:
         d: dict[str, Any] = {"ref": self.plan.ref, "gate": self.plan.gate.decision.value}
@@ -100,11 +182,23 @@ class PlanOut(BaseModel):
             d["unresolved"] = self.plan.unresolved
         if self.client_tasks:
             d["client_tasks"] = self.client_tasks
+        if self.skipped_voluntary:
+            d["skipped_voluntary"] = self.skipped_voluntary
+        if self.profile_gaps:
+            d["profile_gaps"] = self.profile_gaps
         if self.approval_id:
             d["approval_id"] = self.approval_id
         if self.timings:
             d["t"] = self.timings
         return d
+
+
+# Per-task override of writing.mode (ADR-0045): batch runs plan with "deferred" without mutating settings.
+WRITE_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("jam_write_mode", default=None)
+
+
+def _write_mode(settings: Settings) -> str:
+    return WRITE_MODE.get() or settings.writing.mode
 
 
 Approver = Callable[[dict[str, Any]], Awaitable[bool | None]]   # True approve, False deny, None unavailable
@@ -119,6 +213,10 @@ class _Cached:
     expires: float
     adapter: Any = None
     summary: str = ""
+    gate: GateResult | None = None                                  # for draft_answers (ADR-0041)
+    plan_answers: list[Answer] = field(default_factory=list)
+    audit: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)            # ADR-0040 hints / gaps kept for draft_answers
 
 
 @dataclass
@@ -142,12 +240,17 @@ class ApplyEngine:
         self._drivers: dict[str, BrowserDriver | None] = {}
         self._plans: dict[str, _Cached] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._otp_locks: dict[str, asyncio.Lock] = {}   # ADR-0048: one unattended code flow per sender domain
         self.control = control
         self.approvals = approvals or ApprovalBook(":memory:", ttl_s=settings.apply.approval_ttl_s)
         self._browser_sem = asyncio.Semaphore(max(1, settings.concurrency.browser_workers))
         self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
+        self._plan_sem_deferred = asyncio.Semaphore(max(1, settings.apply.plan_workers_deferred))
         self.timings: dict[str, dict[str, int]] = {}
         self._exemplar: str | None = None
+        self.persona: Any = None      # PersonaPolicy (ADR-0047); set by the factory
+        self.gaps: Any = None         # ProfileDB gap collector; set by the factory
+        self._reviewed: set[str] = set()     # digests of (ref, key, text) client prose that passed review (ADR-0044)
 
     # ---------------------------------------------------------------- helpers
     def _default_driver(self, name: str) -> BrowserDriver:
@@ -195,8 +298,11 @@ class ApplyEngine:
         return _Ctx(adapter, posting, form, summarize_posting(posting.description, self.s.apply.context_chars))
 
     def _stop_hits(self, form: ApplicationForm) -> list[str]:
-        phrases = [p.lower() for p in self.s.policy.stop_phrases]
-        return [f.label for f in form.fields if any(p in f.label.lower() for p in phrases)]
+        """Labels of fields whose label or options contain a stop phrase as whole words (ADR-0040)."""
+        from ..policy.gates import stop_phrase_hit
+        phrases = list(self.s.policy.stop_phrases)
+        return [f.label for f in form.fields
+                if any(stop_phrase_hit(t, phrases) for t in (f.label, *f.options))]
 
     async def _gate(self, ctx: _Ctx) -> GateResult:
         ref = ctx.form.ref
@@ -218,17 +324,39 @@ class ApplyEngine:
 
     # ------------------------------------------------------------------- plan
     async def plan(self, ref: str) -> PlanOut:
-        async with self._plan_sem:
+        # deferred prose makes planning fetch + mapping + one small batched call, so more may run at once (ADR-0045)
+        sem = self._plan_sem_deferred if _write_mode(self.s) == "deferred" else self._plan_sem
+        async with sem:
             ctx = await self._context(ref)
             return await self._plan_ctx(ref, ctx)
 
+    @contextmanager
+    def _llm_timings(self, ref: str):
+        """Collect the router's queue-wait / generation ms for this plan into timings (ADR-0041)."""
+        sink: dict[str, int] = {}
+        tok = LLM_TIMINGS.set(sink)
+        try:
+            yield
+        finally:
+            LLM_TIMINGS.reset(tok)
+            d = self.timings.setdefault(ref, {})
+            for k, v in sink.items():
+                d[k] = d.get(k, 0) + v
+
     async def _plan_ctx(self, ref: str, ctx: _Ctx) -> PlanOut:
+        from ..persona import posting_scope
+        with self._llm_timings(ref), posting_scope(ctx.posting.company, ctx.posting.title, ctx.summary):
+            out = await self._plan_inner(ref, ctx)
+        out.timings = dict(self.timings.get(ref, {}))
+        return out
+
+    async def _plan_inner(self, ref: str, ctx: _Ctx) -> PlanOut:
         gate = await self._gate(ctx)
         if gate.decision != Decision.submit:
             return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
         audit: dict[str, Any] = {}
         sal_answers: list[Answer] = []
-        sal_decision = compute_ask(self.s.policy, ctx.posting)
+        sal_decision = self._salary(ctx.posting)
         rest: list[FormField] = []
         for f in ctx.form.fields:
             v = format_ask(f, sal_decision.ask) if sal_decision and is_salary_field(f) else None
@@ -243,10 +371,18 @@ class ApplyEngine:
                                 min_score=self.s.apply.option_min_score,
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
-                                company_aliases=self._company_aliases(ctx.posting.company))
+                                company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona,
+                                job_country=job_country(ctx.posting.location, ctx.posting.countries,
+                                                        ctx.posting.locations))
         answers = sal_answers + list(mapped.answers)
-        short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
-        long_ = [f for f in mapped.unresolved if f not in short]
+        # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
+        voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
+        pending = [f for f in mapped.unresolved if f.key not in voluntary]
+        owner_only = [f for f in pending if never_llm(f)]        # legal status / place: never a model (ADR-0040)
+        pending = [f for f in pending if f not in owner_only]
+        # ADR-0040: the short-answer model only sees allowlisted questions; _llm_allowed is defence in depth
+        short = [f for f in pending if self._is_short(f) and llm_safe_short(f) and self._llm_allowed(f)]
+        long_ = [f for f in pending if f not in short]
         tasks: list[dict[str, Any]] = []
         if self.router is not None:
             # one batched short-field call and the prose pipeline run concurrently
@@ -259,6 +395,17 @@ class ApplyEngine:
             tasks += wtasks
         else:
             long_ += short
+        long_ += owner_only
+        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
+                              profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
+
+    def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
+                  tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,
+                  voluntary: dict[str, str] | None = None,
+                  profile_gaps: list[dict[str, Any]] | None = None, no_gap_keys: set[str] | None = None) -> PlanOut:
+        """Cache the plan, issue the server-held approval, and list unresolved fields as client_tasks.
+        Only `answers` are ever approved/submitted; drafts inside client_tasks never are (ADR-0041)."""
+        hints = hints or {}
         unresolved_keys: list[str] = []
         have = {t["key"] for t in tasks}
         for f in long_:
@@ -267,18 +414,51 @@ class ApplyEngine:
             if not f.required and not (f.kind == FieldKind.textarea and self.s.apply.write_optional):
                 continue
             unresolved_keys.append(f.key)
-            tasks.append(self._task(f, ctx))
+            tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
+        # ADR-0040 x ADR-0047: a per-country authorization gap is recorded with its country
+        # ("authorization.CA.requires_sponsorship"), never as the unscoped home-country key
+        country_gaps = [g for g in (profile_gaps or []) if g.get("key") in unresolved_keys]
+        scoped = {g["key"] for g in country_gaps} | set(no_gap_keys or ())   # unconfirmed country: no key at all
+        self._record_gaps(ref, ctx, answers, [k for k in unresolved_keys if k not in scoped], country_gaps)
         planned = {a.key: a.value for a in answers}
         self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
-                                   time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary)
+                                   time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary,
+                                   gate, list(answers), audit,
+                                   {"hints": hints, "voluntary": voluntary, "profile_gaps": profile_gaps,
+                                    "no_gap_keys": no_gap_keys})
         _, files = self._split(ctx.form, planned)
         aid = self.approvals.issue(ref, self._url(ctx), ctx.posting.company, ctx.posting.title, planned, files)
         self.approvals.set_state(ref, "planned", company=ctx.posting.company, title=ctx.posting.title,
                                  approval_id=aid, url=self._url(ctx), only_from=("planned", "approved", "failed", "handoff"))
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
-                       client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}))
+                       client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}),
+                       skipped_voluntary=voluntary or {}, profile_gaps=list(profile_gaps or []))
+
+    def _salary(self, posting: Posting):
+        """Persona salary policy when wired (ADR-0047); otherwise the deterministic rule from PolicyCfg."""
+        if self.persona is None:
+            return compute_ask(self.s.policy, posting)
+        exp = getattr(getattr(getattr(self.profile, "p", None), "salary", None), "expected", None)
+        return self.persona.salary(self.s.policy, posting, exp)
+
+    def _record_gaps(self, ref: str, ctx: _Ctx, answers: list[Answer], unresolved: list[str],
+                     country_gaps: list[dict[str, Any]] | None = None) -> None:
+        """Record unresolved fields and default-used answers as profile gaps; must never break planning."""
+        if self.gaps is None:
+            return
+        try:
+            from ..persona.collector import collect_gaps
+            collect_gaps(self.gaps, self.persona, self.profile, ref=ref, posting=ctx.posting,
+                         fields=ctx.form.fields, answers=answers, unresolved=unresolved)
+            labels = {f.key: (f.label, f.required) for f in ctx.form.fields}
+            for g in country_gaps or []:
+                label, required = labels.get(g["key"], ("", False))
+                self.gaps.record_hit(f"authorization.{g['country']}.{g['fact']}", label, ref=ref, kind="unresolved",
+                                     blocked=bool(required), company=ctx.posting.company, title=ctx.posting.title)
+        except Exception:  # noqa: BLE001, S110
+            pass
 
     def _company_aliases(self, company: str) -> list[str]:
         """dedupe.company_aliases names that are the same employer as the posting company (ADR-0038)."""
@@ -321,7 +501,8 @@ class ApplyEngine:
         return True
 
     def _llm_allowed(self, f: FormField) -> bool:
-        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label)
+        return not (canonical_key(f.label) in _SENSITIVE_KEYS or _SENSITIVE_LABEL.search(f.label) or eeo_class(f.label)[0]
+                    or never_llm(f)
                     or self._needs_human(f) or _NO_FABRICATE_LABEL.search(f.label)
                     or geo_kind(f) or f.kind == FieldKind.file)
 
@@ -427,24 +608,30 @@ class ApplyEngine:
         s = str(value).strip()
         return s if not f.max_length or len(s) <= f.max_length else None
 
-    async def _write_long(self, fields: list[FormField], ctx: _Ctx):
-        """Prose only for required (or opted-in) long text; fields written concurrently."""
+    async def _write_long(self, fields: list[FormField], ctx: _Ctx, *, deferred: bool | None = None):
+        """Prose only for required (or opted-in) long text; fields written concurrently under ONE wall-clock
+        budget (writing.timeout_s) shared by writer and reviewer rounds. In deferred mode nothing is drafted:
+        prose fields are listed for draft_answers (ADR-0041)."""
         written: list[Answer] = []
         rest: list[FormField] = []
         tasks: list[dict[str, Any]] = []
-        if not fields or self.router is None or not self.s.writing.enabled:
+        w = self.s.writing
+        if not fields or self.router is None or not w.enabled:
             return written, list(fields), tasks
-        if self._exemplar is None:
-            self._exemplar = load_exemplar(self.s.writing.style_exemplar)
-        avail = getattr(self.router, "available", None)
         todo: list[FormField] = []
         for f in fields:
             wanted = f.required or self.s.apply.write_optional or "cover" in normalize(f.label)
             if (self._is_prose_question(f) and wanted and self._llm_allowed(f)
-                    and not ("cover" in normalize(f.label) and self.s.writing.cover_letter_policy == "never")):
+                    and not ("cover" in normalize(f.label) and w.cover_letter_policy == "never")):
                 todo.append(f)
             else:
                 rest.append(f)
+        if deferred if deferred is not None else _write_mode(self.s) == "deferred":
+            tasks += [self._task(f, ctx, {"deferred": True}) for f in todo]   # no model call at all
+            return written, rest, tasks
+        if self._exemplar is None:
+            self._exemplar = load_exemplar(w.style_exemplar)
+        avail = getattr(self.router, "available", None)
         if todo and avail is not None:
             try:
                 if not await avail("narrative"):
@@ -452,18 +639,34 @@ class ApplyEngine:
             except Exception:  # noqa: BLE001
                 return written, rest + todo, tasks
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + w.timeout_s if w.timeout_s and w.timeout_s > 0 else None
+        progress = {f.key: WriteProgress() for f in todo}
+
         async def one(f: FormField):
             cover = "cover" in normalize(f.label)
-            return await write_text(
-                self.router, self.s.writing, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
+            coro = write_text(
+                self.router, w, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
                 company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
                 facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
-                resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None))
+                resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None),
+                progress=progress[f.key])
+            if deadline is None:
+                return await coro
+            async with asyncio.timeout_at(deadline):   # cancels the in-flight LLM call (and its HTTP request)
+                return await coro
 
         with self._stage(ctx.form.ref, "write"):
             results = await bounded_gather((one(f) for f in todo), self.s.concurrency.global_limit)
         for f, res in zip(todo, results, strict=True):
-            if isinstance(res, BaseException):
+            if isinstance(res, TimeoutError):
+                p = progress[f.key]
+                extra: dict[str, Any] = {"timed_out": True, "stage": p.stage or "queued"}
+                if p.draft:   # partial draft for the client to finish; never planned as an answer
+                    extra |= {"draft": p.draft, "review": review_rubric(
+                        w, company=ctx.posting.company, title=ctx.posting.title, facts=self.profile.facts(f.label, 12))}
+                tasks.append(self._task(f, ctx, extra))
+            elif isinstance(res, BaseException):
                 rest.append(f)
             elif res.status == "pass":
                 written.append(Answer(key=f.key, value=res.text, source="llm:narrative"))
@@ -474,6 +677,28 @@ class ApplyEngine:
                                                  "violations": [v.line() for v in res.violations][:6],
                                                  "scorecard": res.scorecard}))
         return written, rest, tasks
+
+    async def draft(self, ref: str) -> PlanOut:
+        """draft_answers: run writer + reviewer for the prose fields a (deferred) plan left open, under the same
+        writing.timeout_s budget, and re-issue the approval over the grown answer set (ADR-0041)."""
+        cached = self._cached(ref)
+        if cached is None or cached.adapter is None or cached.gate is None:
+            out = await self.plan(ref)
+            if out.plan.gate.decision != Decision.submit:
+                return out
+            cached = self._cached(ref)
+            if cached is None or cached.gate is None:
+                return out
+        ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)
+        open_ = [f for f in ctx.form.fields if f.key in cached.unresolved]
+        from ..persona import posting_scope
+        with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
+                ctx.posting.company, ctx.posting.title, ctx.summary):
+            written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
+        out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit,
+                             **cached.extra)
+        out.timings = dict(self.timings.get(ref, {}))
+        return out
 
     # ----------------------------------------------------------------- submit
     def _cached(self, ref: str) -> _Cached | None:
@@ -533,6 +758,11 @@ class ApplyEngine:
             self.approvals.approve(rec.approval_id, "agent")
             return rec.approval_id, "", "agent"
         if rec.status != "approved":                    # human mode: needs a separate human channel
+            from .. import consent  # one human consent per window (ADR-0048)
+            c = consent.use(self.s, "approve_submissions", f"ref={ref} approval={rec.approval_id[:8]}")
+            if c is not None:
+                self.approvals.approve(rec.approval_id, f"consent:{c.id}")
+                return rec.approval_id, "", f"consent:{c.id}"
             from ..grants import try_use  # human-signed time-limited grant (ADR-0027)
             g = try_use(self.s, "approve_submissions", f"ref={ref} approval={rec.approval_id[:8]}")
             if g is not None:
@@ -583,6 +813,155 @@ class ApplyEngine:
         reasons = res.get("reasons") if isinstance(res, dict) else getattr(res, "reasons", None)
         return f"control: {v}" + (f" ({'; '.join(map(str, reasons))[:120]})" if reasons else "")
 
+    def _client_prose_review_on(self) -> bool:
+        """Agent mode (and auto-approve, which is agent-only): nobody but the client sees its prose before an
+        approval covers it, so it gets the writer path's review. Human mode: a human approves (ADR-0044)."""
+        return self.s.apply.approval_mode == "agent" and self.s.writing.review_client_prose
+
+    def _digest(self, ref: str, key: str, text: str) -> str:
+        return hashlib.sha256(f"{ref}\0{key}\0{text}".encode()).hexdigest()
+
+    async def _review_client_prose(self, ctx: _Ctx, eff: dict[str, Any],
+                                   base: dict[str, Any]) -> list[dict[str, Any]]:
+        """Review free-text answers the client supplied (not identical to a server-written/approved answer) under
+        writing.timeout_s. Returns needs_review client_tasks for every field that did not pass; [] when all pass.
+        Fails closed: a timeout or reviewer error is a failure (ADR-0044)."""
+        if not self._client_prose_review_on():
+            return []
+        ref = ctx.form.ref
+        fields = {f.key: f for f in ctx.form.fields}
+        failed: list[dict[str, Any]] = []
+        todo: list[tuple[FormField, str]] = []
+        for k, v in eff.items():
+            if base.get(k) == v and k in base:
+                continue                                         # server-written or already approved
+            f = fields.get(k)
+            if f is None:                                        # not a form field: never carried to the adapter
+                if v not in (None, ""):
+                    failed.append({"key": k, "needs_review": True, "violations": ["[field] not a field of this form"]})
+                continue
+            if v is None or v is False or v == "":
+                continue                                         # nothing filled / declined
+            if not (isinstance(v, str | bool | int | float)
+                    or (isinstance(v, list | tuple) and all(isinstance(x, str) for x in v))):
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    f"[type] answer must be a string, bool, number or list of strings, got {type(v).__name__}"]}))
+                continue
+            if self._needs_human(f) or _CONSENT_LABEL.search(f.label) or contact_permission_channels(
+                    f.label, choice=f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)):
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    "[attestation] attestation/consent field: only a profile answer or a human may set it"]}))
+                continue
+            texts = [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)] \
+                if isinstance(v, list | tuple) else []
+            bad = next((b for b in (self._text_guard(x, x in f.options) for x in texts) if b), None)
+            if bad:                                              # never reaches the reviewer or the form
+                failed.append(self._task(f, ctx, {"needs_review": True, "draft": str(v)[:2000], "violations": [bad]}))
+                continue
+            if f.kind not in _FREE_TEXT_KINDS or self._deterministic(f, v):
+                continue
+            if not isinstance(v, str):                           # lists, dicts, ...: never coerced into free text
+                failed.append(self._task(f, ctx, {"needs_review": True, "violations": [
+                    f"[type] free-text answer must be a string, got {type(v).__name__}"]}))
+                continue
+            if not v.strip():
+                continue
+            if self._digest(ref, k, v) not in self._reviewed:
+                todo.append((f, v))
+        if not todo:
+            self._audit_rejected(ref, failed)
+            return failed
+        w = self.s.writing
+        if self._exemplar is None:
+            self._exemplar = load_exemplar(w.style_exemplar)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + w.timeout_s if w.timeout_s and w.timeout_s > 0 else None
+        resume = getattr(self.profile, "resume_facts", None)
+        corpus = getattr(self.profile, "corpus", None)
+
+        async def one(f: FormField, text: str):
+            coro = review_text(
+                self.router, w, text, kind="cover_letter" if "cover" in normalize(f.label) else "free_text",
+                label=f.label, company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
+                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
+                resume=resume, corpus=corpus)
+            if deadline is None:
+                return await coro
+            async with asyncio.timeout_at(deadline):
+                return await coro
+
+        with self._llm_timings(ref), self._stage(ref, "review_client"):
+            results = await bounded_gather((one(f, v) for f, v in todo), self.s.concurrency.global_limit)
+        for (f, text), res in zip(todo, results, strict=True):
+            if isinstance(res, TimeoutError):
+                why, card, rubric = [f"[timeout] review exceeded writing.timeout_s={w.timeout_s:g}s (fail closed)"], {}, ""
+            elif isinstance(res, BaseException):
+                why, card, rubric = [f"[error] reviewer failed: {type(res).__name__} (fail closed)"], {}, ""
+            elif res.status == "pass":
+                self._reviewed.add(self._digest(ref, f.key, text))
+                continue
+            else:
+                why, card, rubric = [v.line() for v in res.violations][:6], res.scorecard, res.rubric
+            extra: dict[str, Any] = {"needs_review": True, "draft": text, "violations": why}
+            if rubric:
+                extra["review"] = rubric
+            if card:
+                extra["scorecard"] = card
+            failed.append(self._task(f, ctx, extra))
+        self._audit_rejected(ref, failed)
+        return failed
+
+    def _audit_rejected(self, ref: str, failed: list[dict[str, Any]]) -> None:
+        if failed:
+            self.approvals.audit("client_prose_rejected", ref=ref, actor="review",
+                                 detail=",".join(t["key"] for t in failed)[:200])
+
+    def _deterministic(self, f: FormField, v: Any) -> bool:
+        """Exact values that need no prose review: the profile's own value for a recognised key, a URL, a number,
+        a date, or an option of the field's fixed set (ADR-0044)."""
+        if v is None:
+            return True                                          # nothing is filled
+        if isinstance(v, bool):
+            return bool(f.options) and str(v) in f.options
+        if isinstance(v, int | float):
+            return True
+        if not isinstance(v, str):
+            return False
+        t = v.strip()
+        if f.options and t in f.options:
+            return True
+        if self._is_prose_question(f):
+            return False                                         # a URL or number in a "Why..." box is still prose
+        key = canonical_key(f.label)
+        if key is not None:
+            with contextlib.suppress(Exception):
+                pv = self.profile.lookup(key)
+                if pv is not None and str(pv).strip() == t:
+                    return True
+        return bool(_EXACT_VALUE.fullmatch(t))
+
+    def _text_guard(self, text: str, option: bool = False) -> str | None:
+        """Deterministic checks on every client string before any reviewer call (ADR-0044). Deny by default: any
+        code point outside the prose allowlist is `[charset]` (skipped only for an exact option of the field's
+        fixed set, which is form text, not client text). Then stop phrases, attestation/no-AI/consent wording and
+        reviewer-addressed text are scanned on the normalised views from `checks.scan_forms`."""
+        bad = checks.charset_violations(text)
+        if bad and not option:
+            return f"[charset] characters outside the allowlist {bad[:4]}"
+        forms = checks.scan_forms(text)
+        for t in forms:
+            low = t.lower()
+            for p in self.s.policy.stop_phrases:
+                if p.strip() and re.search(rf"(?<!\w){re.escape(p.lower())}(?!\w)", low):
+                    return f"[attestation] attestation/consent text in an answer: {p!r}"
+            m = _ATTEST_TEXT.search(t)
+            if m:
+                return f"[attestation] attestation/consent text in an answer: {m.group(0)!r}"
+        m = _INJECT_TEXT.search(forms[0])
+        if m:
+            return f"[injection] text addressed to the reviewer: {m.group(0)!r}"
+        return None
+
     async def submit(self, ref: str, answers: dict[str, Any] | None = None, approval_id: str | None = None,
                      dry_run: bool | None = None, approver: Approver | None = None) -> SubmitResult:
         try:
@@ -611,14 +990,22 @@ class ApplyEngine:
                         return SubmitResult(ref=ref, status="error",
                                             detail=f"answer '{k}' differs from the approved plan; re-plan")
                 eff = {**cached.answers, **supplied}
+                base = cached.answers
             elif dry or self.s.apply.auto_approve_active:
                 plan = await self._plan_ctx(ref, ctx)
                 if plan.plan.gate.decision != Decision.submit:
                     return SubmitResult(ref=ref, status="duplicate" if "duplicate" in plan.plan.gate.reasons
                                         else "needs_human", detail="; ".join(plan.plan.gate.reasons)[:200])
-                eff = {**{a.key: a.value for a in plan.plan.answers}, **supplied}
+                base = {a.key: a.value for a in plan.plan.answers}
+                eff = {**base, **supplied}
             else:
                 eff = supplied                      # stateless: must hash-match the server-held record
+                rec, _ = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
+                base = eff if rec is not None and self.approvals.matches(rec, eff, self._split(ctx.form, eff)[1]) else {}
+            failed = await self._review_client_prose(ctx, eff, base)
+            if failed:
+                return SubmitResult(ref=ref, status="needs_review", client_tasks=failed,
+                                    detail=f"client prose failed review: {[t['key'] for t in failed][:8]}")
             hits = self._stop_hits(ctx.form)
             if hits:
                 return SubmitResult(ref=ref, status="needs_human", detail=f"attestation field: {hits[0][:60]}")
@@ -634,7 +1021,7 @@ class ApplyEngine:
                 if err:
                     return SubmitResult(ref=ref, status="needs_human" if err.startswith("awaiting") else "error",
                                         detail=err)
-            async with self._lock(ctx.posting.company):
+            async with self._lock(ctx.posting.company), self._otp_guard(ref, ctx.posting.platform, dry):
                 why = None
                 if hasattr(self.store, "seen_why"):
                     why = await self.store.seen_why(ctx.posting.company, ctx.posting.title,
@@ -652,6 +1039,7 @@ class ApplyEngine:
                     ok, st = self.approvals.begin_submit(ref, approval_id)   # durable BEFORE the click
                     if not ok:
                         return self._state_block(ref) or SubmitResult(ref=ref, status="needs_human", detail=st)
+                clicked_at = datetime.now(UTC)
                 try:
                     with self._stage(ref, "submit"):
                         result = await self._dispatch(ctx, eff, dry)
@@ -677,6 +1065,8 @@ class ApplyEngine:
                                             url=ctx.posting.apply_url or ctx.posting.url)
                 if result.status == "submitted":
                     self._plans.pop(ref, None)
+                if not dry and result.status == "awaiting_code" and result.pending_id:
+                    result = await self._unattended_code(result, ctx.posting.platform, clicked_at)
                 return result
         except ComponentMissing:
             raise
@@ -723,10 +1113,13 @@ class ApplyEngine:
         if (err := drv.pending_check(pending_id, code)):             # format only; costs no attempt
             return SubmitResult(ref=ref, status="awaiting_code", pending_id=pending_id,
                                 detail=f"invalid code format: {err}. Not entered; ask the user to re-check it.")
-        if not self.approvals.set_state(ref, "submitting", detail="verification code entered by the user",
-                                        only_from=("awaiting_code",)):
+        return await self._enter_code(drv, pending_id, ref, code, "user", "verification code entered by the user")
+
+    async def _enter_code(self, drv: Any, pending_id: str, ref: str, code: str, actor: str,
+                          why: str) -> SubmitResult:
+        if not self.approvals.set_state(ref, "submitting", detail=why, only_from=("awaiting_code",)):
             return SubmitResult(ref=ref, status="error", detail="submission is not awaiting a code")
-        self.approvals.audit("code_provided", ref=ref, actor="user", detail="code entered (value not recorded)")
+        self.approvals.audit("code_provided", ref=ref, actor=actor, detail="code entered (value not recorded)")
         try:
             res = await drv.provide_code(pending_id, code)
         except BaseException:
@@ -735,6 +1128,74 @@ class ApplyEngine:
         if res is None:
             res = SubmitResult(ref=ref, status="error", detail="unknown or expired pending_id")
         return await self._apply_code_result(res)
+
+    def _sender_domain(self, ref: str, platform: str | None) -> str | None:
+        doms = self.s.verification.sender_domains
+        return doms.get(ref.split(":")[0]) or doms.get(str(platform or "").lower())
+
+    def _otp_guard(self, ref: str, platform: str | None, dry: bool):
+        """Inside an otp_unattended window, one submission per mail sender domain is between its click and its code
+        at a time, so the newest message from that sender can only belong to this application (ADR-0048)."""
+        if dry:
+            return contextlib.nullcontext()
+        domain = self._sender_domain(ref, platform)
+        if not domain:
+            return contextlib.nullcontext()
+        from .. import consent
+        if consent.active(self.s, "otp_unattended") is None:
+            return contextlib.nullcontext()
+        return self._otp_locks.setdefault(domain.lower(), asyncio.Lock())
+
+    async def _unattended_code(self, res: SubmitResult, platform: str, clicked_at: datetime) -> SubmitResult:
+        """otp_unattended (ADR-0048). Outside a consent window: unchanged (the human / otp_assist path). Inside: read
+        the newest code mail from the expected sender, enter it once, continue confirmation detection; no usable
+        mail -> `unknown`, never retried. The code is never logged, stored, audited or returned."""
+        from .. import consent
+        from ..consent.otp import fetch_code
+
+        pid, ref = res.pending_id or "", res.ref
+        c = consent.use(self.s, "otp_unattended", f"ref={ref}")
+        if c is None:
+            return res
+        if not any(i.strip() for i in self.s.verification.trusted_authserv_ids):   # fail closed: human path
+            self.approvals.audit("code_unattended_off", ref=ref, actor=f"consent:{c.id}",
+                                 detail="verification.trusted_authserv_ids is empty")
+            return res.model_copy(update={"detail": f"{res.detail or ''}; otp: needs_human ({OTP_SETUP_HINT})"[:500]})
+        drv = next((d for d in self._code_drivers() if d.pending_info(pid)), None)
+        if drv is None:
+            return res
+        actor = f"consent:{c.id}"
+
+        async def give_up(why: str) -> SubmitResult:
+            self.approvals.audit("code_unattended_failed", ref=ref, actor=actor, detail=why[:120])
+            r = await drv.abandon_pending(pid, f"unattended code: {why}")
+            if r is None:
+                return res
+            out = await self._apply_code_result(r)                   # handoff -> state `unknown` (blocking)
+            return out.model_copy(update={"status": "roadblock", "pending_id": None,
+                                          "detail": f"unknown (never retried): {out.detail or ''}"[:400]})
+
+        domain = self._sender_domain(ref, platform)
+        if not getattr(self.s, "_otp_mail_trusted", False):
+            return await give_up("mail settings are not from the trusted user config (sender domains / mail source)")
+        if not domain:
+            return await give_up("no expected sender domain for this platform (verification.sender_domains)")
+        try:
+            got = await fetch_code(self.s, sender_domain=domain, clicked_at=clicked_at)
+        except Exception as e:  # noqa: BLE001 - message dropped: it could quote mail content
+            return await give_up(f"mail read failed ({type(e).__name__})")
+        if got.code is None:
+            return await give_up(got.detail or got.status)
+        if drv.pending_check(pid, got.code.reveal()):                # format mismatch: never typed
+            return await give_up("the mailed code does not fit the page's code format")
+        try:
+            return await self._enter_code(drv, pid, ref, got.code.reveal(), actor,
+                                          f"verification code entered unattended ({actor})")
+        except Exception as e:  # noqa: BLE001 - state already `unknown`; no exception text (no code) escapes
+            return SubmitResult(ref=ref, status="roadblock",
+                                detail=f"unknown (never retried): code entry failed ({type(e).__name__})")
+        finally:
+            got.code = None
 
     async def resolve_submission(self, ref: str, outcome: str = "", note: str = "",
                                  actor: str = "agent", evidence: str = "") -> dict[str, Any]:
@@ -787,11 +1248,16 @@ class ApplyEngine:
             if drv is None:
                 continue
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
+            if g := self.profile.lookup("gender_if_required"):   # the driver fills required EEO selects only
+                demo["demographic:gender"] = g
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
+            # DOM-only context for the driver (ADR-0039): phone-widget country, opt-in privacy-notice acknowledgement.
+            dom = {"contact:country": self.profile.lookup("country") or "",
+                   "pref:acknowledge_privacy_notices": self.profile.lookup("acknowledge_privacy_notices") is True}
             async with self._browser_sem:
                 ctx.meta["dispatched"] = True
-                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu}, files, dry_run=dry)
+                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu, **dom}, files, dry_run=dry)
             if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
                 return last
         return last or SubmitResult(ref=ctx.form.ref, status="needs_human",
@@ -816,13 +1282,14 @@ class ApplyEngine:
             if out.plan.unresolved:
                 human = any(t.get("needs_human") for t in out.client_tasks)
                 return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,
-                        "client_tasks": out.client_tasks, "approval_id": out.approval_id, "t": out.timings}
+                        "client_tasks": out.client_tasks, "approval_id": out.approval_id, "t": out.timings,
+                        **({"skipped_voluntary": out.skipped_voluntary} if out.skipped_voluntary else {})}
             if not dry and not self.s.apply.auto_approve_active:
                 return {"ref": ref, "status": "awaiting_approval", "approval_id": out.approval_id, "t": out.timings}
             async with browser_cap:
                 r = await self.submit(ref, {}, out.approval_id, dry)
             row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail, "pending_id": r.pending_id,
-                   "t": self.timings.get(ref, {})}
+                   "t": self.timings.get(ref, {}), "skipped_voluntary": out.skipped_voluntary}
             return {k: v for k, v in row.items() if v}
 
         # every ref starts at once; the pools above (plan_sem, browser_cap/_browser_sem) do the limiting

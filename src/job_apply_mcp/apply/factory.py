@@ -73,5 +73,21 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
     from .approvals import ApprovalBook
     book = ApprovalBook(settings.paths.data_dir, ttl_s=settings.apply.approval_ttl_s,
                        reconcile_delays_min=settings.ingest.reconcile_delays_min)
-    return ApplyEngine(settings, approvals=book, resolve_adapter=resolve_adapter or adapter_resolver(settings), profile=profile,
-                       router=router, gates=gates, store=store, driver_factory=driver_factory, control=control)
+    engine = ApplyEngine(settings, approvals=book, resolve_adapter=resolve_adapter or adapter_resolver(settings),
+                         profile=profile, router=router, gates=gates, store=store, driver_factory=driver_factory,
+                         control=control)
+    wire_persona(engine, settings)
+    return engine
+
+
+def wire_persona(engine: ApplyEngine, settings: Settings) -> None:
+    """Attach the persona policy and the gap collector (ADR-0047). Skipped for fake profiles and when disabled."""
+    inner = getattr(engine.profile, "p", None)
+    if not settings.persona.enabled or inner is None or not hasattr(inner, "persona"):
+        return
+    from ..persona import PersonaPolicy
+    from ..persona.gaps import shared
+    db = shared(settings.paths.data_dir)
+    pol = PersonaPolicy(inner.persona, db, getattr(engine.profile, "resume_projects", None))
+    engine.persona, engine.gaps = pol, db
+    engine.profile.persona = pol

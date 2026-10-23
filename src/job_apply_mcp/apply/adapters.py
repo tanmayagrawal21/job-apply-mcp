@@ -38,6 +38,7 @@ class ProfileView:
         self.settings = settings
         self._fs: Any = None
         self._corpus: list[str] | None = None
+        self.persona: Any = None      # PersonaPolicy (ADR-0047); None = behave exactly as before
 
     # -- resume-first facts (ADR-0023) ------------------------------------------------------------
     @property
@@ -101,15 +102,31 @@ class ProfileView:
     _TRI: ClassVar[dict[bool, str]] = {True: "Yes", False: "No"}
 
     def _experience_spans(self) -> list[tuple[str, str]]:
-        """Resume experience entries win (ADR-0023); the profile's work list is the fallback."""
+        """Resume experience entries win (ADR-0023); the profile's work list is the fallback. With a persona, only
+        the roles its experience_counting policy counts (ADR-0047)."""
         res = [(f.start, "" if f.current else f.end) for f in self.resume_facts
                if f.section == "experience" and f.start]
-        return res or [(w.start, w.end) for w in self.p.work if w.start]
+        if self.persona is None:
+            return res or [(w.start, w.end) for w in self.p.work if w.start]
+        from ..persona import Role
+        kinds = {(w.company.lower(), w.start): w.kind for w in self.p.work}
+        roles = [Role(f.start, "" if f.current else f.end, f.title, f.org, kinds.get((f.org.lower(), f.start), ""))
+                 for f in self.resume_facts if f.section == "experience" and f.start]
+        roles = roles or [Role(w.start, w.end, w.title, w.company, w.kind) for w in self.p.work if w.start]
+        return self.persona.counted_spans(roles)
+
+    def resume_projects(self) -> list[Any]:
+        from ..persona import Project
+        return [Project(name=f.title or f.org, summary="; ".join(f.bullets[:2]))
+                for f in self.resume_facts if f.section == "projects" and (f.title or f.org)]
 
     def _structured(self, key: str) -> bool | None:
         a, pr = self.p.authorization, self.p.preferences
-        return {"work_authorized": a.work_authorized, "requires_sponsorship": a.requires_sponsorship,
-                "us_citizen": a.citizen, "willing_to_relocate": pr.willing_to_relocate,
+        home = a.facts_for(a.home_country) if a.home_country else None   # ADR-0050: flat keys need a home country
+        return {"work_authorized": home and home.work_authorized,
+                "requires_sponsorship": home and home.requires_sponsorship,
+                # ADR-0040: US citizenship comes from the US facts (flat `citizen` only when home_country is US)
+                "us_citizen": a.facts_for("US").citizen, "willing_to_relocate": pr.willing_to_relocate,
                 "relocation_support": pr.needs_relocation_support, "open_to_hybrid": pr.open_to_hybrid,
                 "open_to_onsite": pr.open_to_onsite,
                 "acknowledge_privacy_notices": pr.acknowledge_privacy_notices}.get(key)
@@ -134,6 +151,22 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key == "derived:region":                 # ADR-0040: state/region for the continental-US rule
+            return self.p.contact.region or None
+        if key == "home_country":
+            return self.p.authorization.home_country.upper() or None   # ADR-0050: no US default
+        if key.startswith("auth:"):                 # ADR-0040: "auth:<ISO-2>:<fact>" per-country authorization facts
+            _, cc, fact = key.split(":", 2)
+            a = self.p.authorization
+            facts = a.facts_for(cc)
+            v = getattr(facts, fact, None)
+            if v is None and fact == "citizen" and (c := self._citizenship_country()):
+                from .places import country_iso
+                iso = country_iso(c)
+                v = (iso == cc.upper()) if iso else None
+            if v is None and self.persona is not None:   # ADR-0047: the owner's answer to the recorded per-country gap
+                return self.persona.stored(f"authorization.{cc.upper()}.{fact}")   # an explicit profile fact wins
+            return None if v is None else self._TRI[v]
         if key == "citizenship_country":
             return self._citizenship_country()
         if key.startswith("gpa:"):
@@ -167,14 +200,32 @@ class ProfileView:
             st = self._structured(key)
             if st is not None:
                 return self._TRI[st]
+            if key in ("work_authorized", "requires_sponsorship"):
+                return None                        # ADR-0050: never a flat [answers] pattern
             for q in self._ANSWER_PHRASES.get(key, ()):
                 if (v := self.p.answer_for(q)) is not None:
                     return v
         return None
 
     def lookup(self, key: str) -> Any | None:
+        if key.startswith("structured:"):   # ADR-0050: the [authorization]/[preferences] value only, never [answers]
+            st = self._structured(key[11:])
+            return None if st is None else self._TRI[st]
+        if key.startswith("optin:"):      # ADR-0050: only the owner's exact [answers] key, never a stored/persona answer
+            want = key.lower()
+            return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
+        v = self._lookup(key)
+        if self.persona is not None and (v is None or v == "") and " " not in key:   # canonical keys only
+            s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile
+            if s is not None:
+                return s
+        return v
+
+    def _lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
-                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:"))):
+                    "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:",
+                                                                        "derived:", "auth:"))
+                or key == "home_country"):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v
@@ -190,7 +241,8 @@ class ProfileView:
             "school": e.school if e else None, "degree": e.degree if e else None,
             "discipline": e.field if e else None, "graduation": e.end if e else None,
             "lat": c.lat, "lon": c.lon, "sexual_orientation": d.sexual_orientation,
-            "gender": d.gender, "hispanic": d.race_ethnicity, "race": d.race_ethnicity,
+            "gender": d.gender, "gender_if_required": d.gender_if_required, "hispanic": d.hispanic_latino,
+            "race": d.race_ethnicity,
             "veteran": d.veteran_status, "disability": d.disability_status, "pronouns": d.pronouns,
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),
@@ -207,10 +259,15 @@ class ProfileView:
     def facts(self, topic: str = "", limit: int = 12) -> list[str]:
         """Only the precedence-resolved fact set (ADR-0023): never raw letters or unresolved profile text."""
         rows = list(self.fact_set.lines)
+        lead: list[str] = []
+        if self.persona is not None:
+            from ..persona.keys import is_exceptional_label
+            if is_exceptional_label(topic) and (proj := self.persona.exceptional()) is not None:
+                lead = [f"EXCEPTIONAL WORK (use this project): {proj.name}" + (f": {proj.summary}" if proj.summary else "")][:1]
         words = set(re.findall(r"[a-z]{4,}", topic.lower()))
         rows.sort(key=lambda r: (r.startswith("TIMELINE"), -len(words & set(re.findall(r"[a-z]{4,}", r.lower())))))
         keep = [r for r in rows if not r.startswith("TIMELINE")][:limit]
-        return [r[:300] for r in keep]
+        return [r[:300] for r in lead + keep][:max(limit, len(lead))]
 
 
 class PolicyGates:
@@ -222,7 +279,9 @@ class PolicyGates:
         self.cfg = settings.policy
 
     async def evaluate(self, posting: Posting, form: ApplicationForm) -> GateResult:
-        return self._eval(posting, self.cfg, " ".join(f.label for f in form.fields))
+        # one line per field (label and its options) so a phrase never spans two fields (ADR-0040)
+        lines = [" | ".join([f.label, *f.options]).replace("\n", ". ") for f in form.fields]
+        return self._eval(posting, self.cfg, "\n".join(lines))
 
 
 class RouterView:

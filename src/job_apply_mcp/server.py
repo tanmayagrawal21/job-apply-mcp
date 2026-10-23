@@ -43,6 +43,11 @@ def _out(obj: Any) -> str:
     return _output.out(obj, svc().settings.response_budget_chars)
 
 
+async def _ask_start(ctx: Context) -> None:
+    from .persona.tools import ask_at_start
+    await ask_at_start(ctx, svc)
+
+
 @mcp.tool()
 async def search_jobs(ctx: Context, query: str = "", boards: list[str] | None = None,
                       platforms: list[str] | None = None, location: str = "", since_days: int = 7, limit: int = 25,
@@ -76,10 +81,24 @@ async def get_form(ref_or_url: str) -> str:
 
 
 @mcp.tool()
-async def plan_application(ref_or_url: str) -> str:
+async def plan_application(ctx: Context, ref_or_url: str, cursor: int = 0) -> str:
     """Run policy gates + duplicate check, fill answers from the profile and local LLMs, and list unresolved fields.
-    Unresolved free-text fields come back as `client_tasks` for the calling agent to write."""
-    return _out(await svc().plan(ref_or_url))
+    Unresolved free-text fields come back as `client_tasks` for the calling agent to write. `src` names the source
+    of every answer that is not "profile". A result too large for one response is paged: it carries `next` and
+    `total`; call again with `cursor=next` to get the next page of the SAME plan (from memory, no re-plan) until
+    `next` is null. Pages keep the shape (answers/src stay dicts) so they merge. The first call of a session may
+    ask the user the top open profile questions (elicitation) before planning."""
+    if not cursor:
+        await _ask_start(ctx)
+    return _out(await svc().plan(ref_or_url, cursor))
+
+
+@mcp.tool()
+async def draft_answers(ref_or_url: str, cursor: int = 0) -> str:
+    """Draft the prose fields a plan left open (writing.mode="deferred", or ones that timed out): local writer +
+    reviewer under writing.timeout_s. Returns the same shape as plan_application with a fresh approval_id, paged
+    the same way (`cursor=next` pages the last draft from memory)."""
+    return _out(await svc().draft(ref_or_url, cursor))
 
 
 class _Confirm(BaseModel):
@@ -174,8 +193,11 @@ if _agent_mode():   # in approval_mode="human" resolving is CLI-only: the tool i
 
 
 @mcp.tool()
-async def apply_batch(refs: list[str], dry_run: bool | None = None, max_parallel: int | None = None) -> str:
-    """Plan + submit many applications concurrently. Returns one compact status row per ref."""
+async def apply_batch(ctx: Context, refs: list[str], dry_run: bool | None = None,
+                      max_parallel: int | None = None) -> str:
+    """Plan + submit many applications concurrently. Returns one compact status row per ref. Open profile questions
+    are asked once, before the batch starts (never mid-batch)."""
+    await _ask_start(ctx)
     return _out(await svc().apply_batch(refs, dry_run=dry_run, max_parallel=max_parallel))
 
 
@@ -243,9 +265,21 @@ _register_facts(mcp, lambda: svc().settings)
 from .grants.tools import register as _register_grants
 
 _register_grants(mcp, lambda: svc().settings)
+from .consent.tools import register as _register_consent
+
+_register_consent(mcp, lambda: svc().settings)
+from .accounts.tools import register as _register_vault
+
+_register_vault(mcp, lambda: svc().settings)
 from .ingest.tools import register as _register_ingest
 
 _register_ingest(mcp, svc)
+from .intake.tools import register as _register_intake
+
+_register_intake(mcp, svc)
+from .persona.tools import register as _register_persona
+
+_register_persona(mcp, svc)
 
 
 def main() -> None:

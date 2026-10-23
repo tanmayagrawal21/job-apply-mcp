@@ -16,31 +16,36 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .. import consent
 from ..config import Settings
 from ..core import registry
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
+from ..core.secrets import redact
 from .geo import location_queries, pick_location
 from .mapper import (
     _DEMOGRAPHIC_LABEL,
     DEMOGRAPHIC_KEYS,
     best_option,
     canonical_key,
-    decline_option,
     degree_queries,
     discipline_queries,
-    exact_option,
     normalize,
     pick_degree,
     pick_school,
+    privacy_ack_value,
 )
 from .verification import VerificationMixin
+
+log = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ pure helpers (unit-tested offline)
 
@@ -79,6 +84,24 @@ def detect_ats(url: str, ref: str = "") -> str | None:
         return "lever"
     if host.endswith("ashbyhq.com") or ref.startswith("ashby:"):
         return "ashby"
+    return None
+
+
+# Applicant-tracking systems whose apply flow needs a candidate account (ADR-0046).
+_ACCOUNT_ATS = ("myworkdayjobs.com", "myworkdaysite.com", "icims.com", "successfactors.com", "successfactors.eu",
+                "taleo.net")
+
+
+def account_ats(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in _ACCOUNT_ATS)
+
+
+def _email_answer(form: ApplicationForm, answers: dict[str, Any]) -> str | None:
+    for f in form.fields:
+        v = answers.get(f.key)
+        if isinstance(v, str) and "@" in v and (canonical_key(f.label) == "email" or "email" in f.key.lower()):
+            return v.strip()
     return None
 
 
@@ -244,6 +267,68 @@ def _bare_url(u: str) -> str:
     return re.sub(r"^(https?://)?(www\.)?", "", u.strip().lower()).rstrip("/")
 
 
+# Choice groups and EEO / self-ID selects use EXACT option matching (ADR-0039): case, punctuation and whitespace are
+# normalised, then the texts must be equal. The ONLY other accepted equivalence is this explicit decline table, so
+# "Decline to self-identify" can select "I don't wish to answer". No substring, no fuzzy score: Female never selects
+# Male, Woman never Man, Asian never Asian Indian. No exact match -> the field stays blank.
+_DECLINE_SYNONYMS = frozenset(normalize(x) for x in (
+    "decline", "decline to answer", "decline to self identify", "decline to self-identify", "decline to identify",
+    "decline to state", "i decline to answer", "i decline to self identify", "i decline to self-identify",
+    "i decline to identify", "i don't wish to answer", "i do not wish to answer", "i don't want to answer",
+    "i do not want to answer", "prefer not to say", "prefer not to answer", "i prefer not to say",
+    "i prefer not to answer", "i choose not to disclose", "choose not to disclose", "i wish not to answer",
+    "i don't wish to self identify", "i do not wish to self identify", "i don't wish to self-identify",
+    "i do not wish to self-identify"))
+# Options the driver never ticks unless the planned field ITSELF is about them.
+_CONSENT_WORDS = re.compile(r"consent|\bsms\b|text messag|whats ?app|marketing|newsletter|promotion|opt[ -]?in\b", re.IGNORECASE)
+
+
+def exact_choice(value: Any, options: list[str]) -> str | None:
+    """The option equal to `value` after normalisation, or (for a decline value) the single decline-table option."""
+    nv = normalize(str(value or ""))
+    if not nv:
+        return None
+    for o in options:
+        if normalize(o) == nv:
+            return o
+    return exact_decline(options) if nv in _DECLINE_SYNONYMS else None
+
+
+def exact_decline(options: list[str]) -> str | None:
+    """The single option in the explicit decline table; none or several -> None."""
+    hits = [o for o in options if normalize(o) in _DECLINE_SYNONYMS]
+    return hits[0] if len(hits) == 1 else None
+
+
+_COUNTRY_ALIASES = {"us": "United States", "usa": "United States", "u s": "United States", "u s a": "United States",
+                    "united states of america": "United States", "america": "United States",
+                    "uk": "United Kingdom", "gb": "United Kingdom", "great britain": "United Kingdom",
+                    "england": "United Kingdom", "uae": "United Arab Emirates"}
+
+
+def phone_country_name(country: str) -> str:
+    """The profile's country as phone widgets list it ('' when none is configured: the widget is left alone)."""
+    c = (country or "").strip()
+    return _COUNTRY_ALIASES.get(normalize(c), c)
+
+
+def same_country(name: str, shown: str) -> bool:
+    """`shown` (a chip or a flag title such as 'United States: +1') IS `name`, exactly (dial code removed)."""
+    return country_option(name, [shown.strip()]) is not None
+
+
+def country_option(name: str, options: list[str]) -> str | None:
+    """The option that IS `name` once a trailing dial code ('+1', '(+44)') is removed; never a near miss
+    (no 'United States Minor Outlying Islands' for 'United States')."""
+    want = normalize(name)
+    if not want:
+        return None
+    for o in options:
+        if normalize(re.sub(r"\(?\+\d[\d\s-]*\)?\s*$", "", o)) == want:
+            return o
+    return None
+
+
 # ---- evidence + network signal (pure, unit-tested)
 
 _ERR_WORDS = re.compile(r"error|invalid|failed|required|captcha|spam|denied|not allowed", re.IGNORECASE)
@@ -324,41 +409,255 @@ _MARK_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-scope]').forEach
   c.setAttribute('data-jam-scope', '1'); return true; }"""
 _COUNTRY_JS = """() => { const ids = ['country', 'phone-country', 'phone_country'];
   for (const i of ids) { const e = document.getElementById(i); if (e && e.offsetParent !== null) return i; } return ''; }"""
-_EMPTY_REQUIRED_JS = """() => {
-  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
-  const clean = t => (t || '').replace(/\\*/g, '').replace(/\\s+/g, ' ').trim();
+# The field's own container, for read-backs that must never match ANOTHER field's value (ADR-0039).
+_COMMIT_SCOPE_JS = """e => { document.querySelectorAll('[data-jam-commit]').forEach(x => x.removeAttribute('data-jam-commit'));
+  const ctl = e.closest('[class*=select__control]');
+  let c = ctl ? (ctl.closest('[class*=select-shell], [class*=select__container]') || ctl.parentElement || ctl)
+              : e.closest('[data-field-path], fieldset, [role=group], [role=radiogroup], .field-wrapper, .application-question');
+  if (!c) c = e.parentElement; if (!c) return false;
+  c.setAttribute('data-jam-commit', '1'); return true; }"""
+# Server-rendered forms (Greenhouse job-boards is Remix) show inputs before the JS app hydrates; typing or clicking
+# before that is silently lost (ADR-0039). Ready = document complete and, on an SSR page, the first form control
+# carries React's own property keys.
+_HYDRATED_JS = """() => { if (document.readyState !== 'complete') return false;
+  const ssr = !!(window.__remixContext || window.__reactRouterContext || window.__NEXT_DATA__ || document.querySelector('[data-reactroot]'));
+  if (!ssr) return true;
+  const e = document.querySelector('form input:not([type=hidden]), form textarea, form select');
+  return !!e && Object.keys(e).some(k => k.startsWith('__react')); }"""
+_CHOICE = "input[type=checkbox], input[type=radio]"
+_IS_GROUP_JS = """e => !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tagName)
+  && !!e.querySelector('input[type=checkbox], input[type=radio]')"""
+# A choice group's members THAT BELONG TO THE FIELD (ADR-0039): when some member's name/id carries the field key, only
+# those count (a wrapper may also hold another question or an SMS consent block); consent / SMS / marketing options are
+# dropped unless the planned field's own label is about consent. Returns index, option text, value and checked state.
+_MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
+  const CONS = /consent|\\bsms\\b|text messag|whats ?app|marketing|newsletter|promotion|opt[ -]?in\\b/i;
+  let rows = els.map((e, i) => ({i, name: e.name || '', id: e.id || '', value: e.value || '', checked: !!e.checked,
+    text: ((e.labels && e.labels[0] ? e.labels[0].innerText : '') || (e.closest('label') || {}).innerText
+           || e.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim()}));
+  if (key) { const own = rows.filter(r => r.name === key || r.name.endsWith('_' + key) || r.id === key
+      || r.id.startsWith(key + '_') || r.id.includes('_' + key + '-labeled-'));
+    if (own.length) rows = own; }
+  if (!CONS.test(fl)) rows = rows.filter(r => !CONS.test(r.text) && !CONS.test(r.name) && !CONS.test(r.value));
+  return rows; }"""
+# Every visible required control that is still empty (ADR-0039). Text inputs / react-selects: required markup or the
+# API marks them required. Radio/checkbox groups and sets (wrapped or not; unnamed boxes grouped by field container)
+# and native selects follow the INVERTED rule: nothing selected -> gap, unless the API form marks that exact field
+# required:false. Only an explicit allowlist (marketing / SMS opt-ins, job-alert widgets) is exempt, and is logged. A group is a
+# fieldset / role=group / role=radiogroup / consent block holding choice inputs; it is required when the group or a
+# member says so (required, aria-required) or its legend/heading carries an asterisk or a "required" class; an
+# unanswered consent radio group always counts. Custom-drawn boxes hide the real input, so visibility is the group's.
+_EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || [])], REQK = new Set(a.req || []);
+  const vis = e => !!e && !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
+  const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
   const labelOf = e => { let t = '';
     const lb = e.getAttribute('aria-labelledby'); if (lb) t = lb.split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
     if (!t && e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
     if (!t) { const l = e.closest('label'); if (l) t = (l.querySelector('.application-label') || l).textContent.split('✱')[0]; }
     if (!t) t = e.getAttribute('aria-label') || e.name || e.id || ''; return t; };
-  const req = e => e.required || e.getAttribute('aria-required') === 'true' || /\\*\\s*$/.test(labelOf(e).trim());
-  const out = [], seen = new Set();
+  const req = e => e.required || e.getAttribute('aria-required') === 'true' || /\\*\\s*$/.test(labelOf(e).trim())
+    || REQK.has(e.id) || REQK.has(e.name);
+  const CH = 'input[type=checkbox], input[type=radio]';
+  const GS = 'fieldset, [role=group], [role=radiogroup], [class*=consentRadioGroup i], [class*=consent-radio i]';
+  // Explicit allowlist of groups that are not application questions (left empty on purpose; logged by the caller).
+  // Exempt ONLY a field whose OWN label/legend states a consent intent (never a bare word, never container text),
+  // and ONLY when no required markup and no API required:true applies (control review 4).
+  // FAIL CLOSED (control review 6): an opt-in is exempt only if the WHOLE label (trimmed, ^...$) is one of a few short
+  // templates: fixed lead-in + consent verb + "to receive" + channel + an optional short tail ("about this/my
+  // application", "about future/new jobs/roles/opportunities", "from <company>") + an optional period; or a bare
+  // job-alert / newsletter / talent-community sign-up. Any second clause (and / or / ; / ? / a further sentence) or
+  // any attestation, legal or eligibility term anywhere in the label (or a policy stop phrase) disqualifies it.
+  const LEAD = '(?:(?:please )?(?:check|select|tick) (?:yes|no|yes or no|the box)(?: to indicate)?(?: (?:your|if you|that you))?|yes,?|i|we|you)? ?';
+  const VERB = "(?:agree(?:ment)?|consent(?:ing)?|opt(?:ing)?[ -]?in|subscrib(?:e|ing)|sign(?:ing)? (?:me )?up|would like|'d like|wish|want)";
+  const CHAN = '(?:(?:sms|text|text message|e-?mail|marketing) (?:messages?|updates|e-?mails?|communications?|alerts|notifications)|text messages?|sms|e-?mails?|marketing e-?mails?|marketing communications?|updates|job alerts?|newsletters?)';
+  const TAIL = "(?: (?:about (?:this|my|your) application|about (?:future|new) (?:jobs|roles|opportunities)|from [a-z0-9&'. -]{1,40}))?";
+  const CONSENT_RE = [
+    new RegExp('^' + LEAD + VERB + ' to receiv(?:e|ing) ' + CHAN + TAIL + '\\\\.?$'),
+    /^(?:please )?(?:create (?:a )?job alert|(?:send me|get|receive) job alerts?|subscribe to (?:our |the )?(?:newsletter|mailing list)|join (?:our )?talent (?:community|network))(?: for (?:similar|new) (?:roles|jobs|opportunities))?\\.?$/];
+  const NOT_OPTIN = /\\b(certif\\w*|confirm\\w*|attest\\w*|true|accura\\w*|authori[sz]\\w*|eligib\\w*|18|age|background|arbitrat\\w*|relocat\\w*|sponsor\\w*|visa|criminal|legal|terms|waive\\w*|dispute\\w*|signature|clearance|citizen\\w*|ssn|social security|monitor\\w*|drug\\w*|nda|non-disclosure)\\b/;
+  const STOP = (a.stop || []).map(x => String(x).toLowerCase().trim()).filter(Boolean);
+  const CONSENT = { test: raw => { const t = (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    if (!t || NOT_OPTIN.test(t) || STOP.some(p => t.includes(p))) return false;
+    if (/\\band\\b|\\bor\\b|;|\\?|[.!]\\s*\\S/.test(t.replace('yes or no', ''))) return false;      // a second clause anywhere
+    return CONSENT_RE.some(r => r.test(t)); } };
+  const REQ_ATTR = n => n.getAttribute('aria-required') === 'true' || n.hasAttribute('required')
+    || (n.hasAttribute('data-required') && n.getAttribute('data-required') !== 'false') || /(^|[\\s_-])required([\\s_-]|$)/i.test(String(n.className || ''));
+  const markedRequired = (members, container, headEl, text) => {
+    if (members.some(m => m.required || m.getAttribute('aria-required') === 'true')) return true;
+    if (members.some(m => (m.getAttribute('aria-describedby') || '').split(' ').some(i => i && /\\brequired\\b/i.test((document.getElementById(i) || {}).textContent || '')))) return true;
+    if (/[*✱]/.test(text || '') || /\\brequired\\b/i.test(text || '')) return true;
+    if (headEl) { if (REQ_ATTR(headEl) || headEl.querySelector('[class*=required i]')) return true;
+      for (const pe of ['::after', '::before']) { const c = getComputedStyle(headEl, pe).content; if (c && /[*✱]/.test(c)) return true; } }
+    for (let n = container, d = 0; n && n !== document.body && n.tagName !== 'FORM' && d < 5; n = n.parentElement, d++) {
+      if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;
+      if (REQ_ATTR(n)) return true; }
+    return false; };
+  const apiRequired = xs => xs.filter(Boolean).some(x => [...REQK].some(k => keyMatch(x, k)));
+  const keyMatch = (x, k) => x === k || x.endsWith('_' + k) || x.startsWith(k + '_') || x.includes('_' + k + '-labeled-');
+  const apiOptional = xs => xs.filter(Boolean).some(x => OPTK.includes(x));      // EXACT name/id only
+  const optText = m => clean((m.labels && m.labels[0] ? m.labels[0].innerText : '') || (m.closest('label') || {}).innerText || m.value || '');
+  const HEAD = 'legend, label, h1, h2, h3, h4, h5, h6, strong, b, .application-label, [class*=label i], [class*=question i], [class*=title i]';
+  const HELP = 'small, [class*=help i], [class*=desc i], [class*=hint i], [class*=instruction i], [class*=subtitle i]';
+  const out = [], seen = new Set(), done = new Set();
+  document.querySelectorAll('[data-jam-group]').forEach(x => x.removeAttribute('data-jam-group'));
+  let gi = 0;
+  // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
+  // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
+  const emit = (members, container, text, idCands, consent, headEl) => {
+    if (members.some(m => m.checked)) return;
+    const names = members.flatMap(m => [m.name, m.id]);
+    if (apiOptional(idCands.concat(names))) return;
+    const opts = members.map(optText).slice(0, 12);
+    const exempt = !apiRequired(idCands.concat(names)) && !markedRequired(members, container, headEl, text)
+      && CONSENT.test(clean(text));
+    const id = idCands.find(Boolean) || '';
+    const sk = 'c:' + id + ':' + gi + ':' + names.join(','); if (seen.has(sk)) return; seen.add(sk);
+    let gid = '';
+    if (container && [...container.querySelectorAll(CH)].filter(x => !x.disabled).length === members.length) {
+      container.setAttribute('data-jam-group', String(gi)); gid = String(gi); gi++; }
+    out.push({id, label: (clean(text) || 'unlabelled choice set ' + id).slice(0, 80), text: clean(text).slice(0, 1500),
+              rs: false, group: gid, kind: members[0].type, consent: !!consent, opts, exempt});
+  };
+  for (const g of document.querySelectorAll(GS)) {
+    const members = [...g.querySelectorAll(CH)].filter(m => m.closest(GS) === g && !m.disabled);
+    if (!members.length || !vis(g)) continue;
+    members.forEach(m => done.add(m));
+    const ids = new Set(members.map(m => m.id).filter(Boolean));
+    let head = null; const lb = g.getAttribute('aria-labelledby');
+    if (lb) head = document.getElementById(lb.split(' ')[0]);
+    head = head || g.querySelector(':scope > legend') || g.querySelector('[class*=question-title], .application-label')
+      || [...g.querySelectorAll('label')].find(l => !l.querySelector(CH) && !ids.has(l.htmlFor));
+    const consent = members.every(m => m.type === 'radio') && (/consent/i.test(g.className + ' ' + members.map(m => m.name).join(' ')));
+    let text = head ? head.textContent : (g.getAttribute('aria-label') || '');
+    if (consent && !clean(text)) { const d = g.parentElement && g.parentElement.querySelector('[class*=consent i]:not(input)');
+      text = d && d !== g ? d.textContent : members.map(m => (m.closest('label') || {}).textContent || '').join(' / '); }
+    const fp = g.closest('[data-field-path]');
+    emit(members, g, text, [g.id, fp && !consent && fp.getAttribute('data-field-path'), members[0].name], consent, head);
+  }
+  // Sets outside any group container: named members share a name; UNNAMED boxes are grouped by their nearest
+  // common field container (never one set per box).
+  const FC = '[data-field-path], .field-wrapper, .application-question, .form-group, .form-field, [class*=question i], [class*=field-entry i]';
+  const fieldOf = e => e.closest(FC) || (e.closest('ul, ol') || {}).parentElement
+    || (e.parentElement && e.parentElement.parentElement) || e;
+  const sets = new Map();
+  for (const e of document.querySelectorAll(CH)) { if (done.has(e) || e.disabled) continue;
+    const k = e.name ? e.type + ':' + e.name : fieldOf(e);
+    if (!sets.has(k)) sets.set(k, []); sets.get(k).push(e); }
+  for (const [k, members] of sets) {
+    members.forEach(m => done.add(m));
+    if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement))) continue;
+    const ids = new Set(members.map(m => m.id).filter(Boolean));
+    const optLabel = n => { const l = n && n.closest && n.closest('label'); return !!(l && (l.querySelector(CH) || ids.has(l.htmlFor))); };
+    let c = members[0].parentElement; while (c && !members.every(m => c.contains(m))) c = c.parentElement;
+    let wrap = c;
+    for (let n = c, d = 0; n && n !== document.body && n.tagName !== 'FORM' && d < 6; n = n.parentElement, d++) {
+      if ([...n.querySelectorAll(CH)].some(x => !members.includes(x))) break;
+      wrap = n; }
+    // question text: nearest preceding heading-like element inside the wrapper (help text skipped), else nearest text
+    let text = '', any = '', hel = null, anyEl = null;
+    const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    tw.currentNode = members[0];
+    for (let n = tw.previousNode(); n; n = tw.previousNode()) {
+      const el = n.parentElement; const t = (n.textContent || '').trim();
+      if (!t || !el || el.closest('script, style, noscript') || optLabel(el)) continue;
+      if (!wrap || !wrap.contains(n)) break;
+      if (/^[(\\[]?\\s*(required|\\*|✱)\\s*[)\\]]?$/i.test(t)) continue;           // a bare marker / badge, not the question
+      const blk = el.closest(HEAD); if (blk && wrap.contains(blk) && !el.closest(HELP)) { text = blk.textContent; hel = blk; break; }
+      if (!any && !el.closest(HELP)) { any = (clean(t).length < 3 && el.parentElement ? el.parentElement.textContent : t); anyEl = el; } }
+    if (!text) { text = any; hel = anyEl; }
+    if (!text && members.length === 1) text = labelOf(members[0]);
+    const fp = members[0].closest('[data-field-path]');
+    emit(members, c, text, [fp && fp.getAttribute('data-field-path'), (typeof k === 'string' ? members[0].name : '') || (c && c.id)], false, hel);
+  }
+  // the application form = the <form> holding the API field keys (Ashby has none: whole page)
+  const KEYS = new Set(a.keys || []);
+  const appForm = [...document.querySelectorAll('form')].find(f => [...f.elements].some(x => KEYS.has(x.id) || KEYS.has(x.name)));
   for (const e of document.querySelectorAll('input, textarea, select')) {
+    if (done.has(e)) continue;
+    if (appForm && e.form && e.form !== appForm) continue;             // another form (e.g. a job-alert sign-up)
     const type = (e.type || '').toLowerCase();
-    if (['hidden', 'submit', 'button', 'file', 'search'].includes(type) || e.disabled || e.readOnly) continue;
+    if (['hidden', 'submit', 'button', 'file', 'search', 'checkbox', 'radio'].includes(type) || e.disabled || e.readOnly) continue;
     if (e.closest('.iti__dropdown-content') || e.getAttribute('aria-hidden') === 'true') continue;
-    if (!vis(e) && !(e.getAttribute('role') === 'combobox')) continue;
     const rs = e.getAttribute('role') === 'combobox' && e.closest('[class*=select__control]');
     if (!vis(e) && !rs) continue;
-    if (!req(e)) continue;
-    let empty = false, grp = '';
+    const native = e.tagName === 'SELECT';
+    // native selects follow the inverted rule too: empty -> gap unless the API marks the field required:false
+    if (!(native ? (req(e) || !apiOptional([e.id, e.name])) : req(e))) continue;
+    let empty = false;
     if (rs) { const sh = e.closest('[class*=select__control]').parentElement;
       empty = !sh.querySelector('[class*=select__single-value], [class*=select__multi-value]'); }
-    else if (type === 'checkbox' || type === 'radio') {       // a required GROUP needs one checked member
-      const same = [...document.querySelectorAll('input[type=' + type + ']')].filter(x => x.name === e.name);
-      empty = !same.some(x => x.checked); grp = e.name;
-      const q = e.closest('.application-question, fieldset, [role=group]');
-      const h = q && q.querySelector('.application-label, legend, [class*=label]');
-      if (h) grp = clean(h.textContent.split('✱')[0]) || grp; }
-    else if (e.tagName === 'SELECT') empty = !e.value;
+    else if (native) empty = !e.value;
     else empty = !(e.value || '').trim();
     if (!empty) continue;
-    const lab = grp || clean(labelOf(e)) || e.id; const sk = grp ? e.name : (e.id || lab); if (seen.has(sk)) continue; seen.add(sk);
-    out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs});
+    const lab = clean(labelOf(e)) || e.id; const sk = e.id || lab; if (seen.has(sk)) continue; seen.add(sk);
+    out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs,
+              exempt: native && !req(e) && !apiRequired([e.id, e.name]) && CONSENT.test(lab)});
+  }
+  return out.slice(0, 40); }"""
+# Native constraint check of the APPLICATION form only (control review 3): form.checkValidity(); never
+# reportValidity, never submit. Native constraints are required markup, so nothing here is ever exempt.
+_VALIDITY_JS = """(a) => { a = a || {}; const keys = new Set(a.keys || []);
+  const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
+  const labelOf = e => { let t = ''; if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
+    if (!t) { const l = e.closest('label'); if (l) t = l.textContent; }
+    return clean(t || e.getAttribute('aria-label') || e.name || e.id || ''); };
+  const bad = [], exempt = [];
+  for (const f of document.querySelectorAll('form')) {
+    const els = [...f.elements];
+    if (!els.some(e => keys.has(e.id) || keys.has(e.name))) continue;          // only the application form
+    const constrained = els.some(e => e.required || e.pattern || e.min || e.max || e.minLength > 0
+      || ['email', 'url', 'number', 'tel'].includes((e.type || '').toLowerCase()));
+    if (!constrained || f.checkValidity()) continue;                            // checkValidity only: no UI, no submit
+    // a checkbox GROUP whose members each carry `required` (Greenhouse) is satisfied by one ticked member
+    const grpOk = e => e.type === 'checkbox' && e.name && !!f.querySelector('input[type=checkbox][name="' + CSS.escape(e.name) + '"]:checked');
+    const raw = els.filter(e => e.willValidate && !e.validity.valid);
+    const inv = raw.filter(e => !(e.validity.valueMissing && grpOk(e)));
+    for (const e of inv) bad.push(labelOf(e).slice(0, 80) || 'invalid field');   // constrained -> required wins
+    if (!raw.length) bad.push('form failed native validation');
+  }
+  return {bad: [...new Set(bad)].slice(0, 20), exempt: [...new Set(exempt)].slice(0, 20)}; }"""
+# Visible, still-empty selects (react-select comboboxes and native <select>), required or not, with their labels.
+# Used only for DOM-only voluntary self-identification questions (_fill_demographics).
+_DOM_SELECTS_JS = """(a) => { const OPTK = (a && a.opt) || [];
+  const apiOpt = xs => xs.filter(Boolean).some(x => OPTK.includes(x));
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
+  const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
+  const labelOf = e => { let t = '';
+    const lb = e.getAttribute('aria-labelledby'); if (lb) t = lb.split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
+    if (!t && e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
+    if (!t) t = e.getAttribute('aria-label') || ''; return t; };
+  const out = [];
+  for (const e of document.querySelectorAll('input[role=combobox], select')) {
+    if (!e.id || e.disabled || e.closest('.iti__dropdown-content')) continue;
+    const ctl = e.tagName === 'INPUT' && e.closest('[class*=select__control]');
+    if (e.tagName === 'INPUT' && !ctl) continue;
+    if (!vis(ctl || e)) continue;
+    const empty = ctl ? !ctl.parentElement.querySelector('[class*=select__single-value], [class*=select__multi-value]') : !e.value;
+    if (!empty) continue;
+    const raw = labelOf(e);
+    const required = e.required || e.getAttribute('aria-required') === 'true' || /[*✱]\\s*$/.test(raw.trim())
+      || (e.tagName === 'SELECT' && !apiOpt([e.id, e.name]));          // native: inverted rule (ADR-0039)
+    out.push({id: e.id, label: clean(raw).slice(0, 120), required, native: e.tagName === 'SELECT'});
   }
   return out.slice(0, 40); }"""
 _SUBMIT_NAME = re.compile(r"^\s*(submit( application)?|send application|apply( now)?)\s*$", re.IGNORECASE)
+
+
+def captcha_attempt_ok(policy: str, widgets: list, state: dict[str, Any], consent_ok: Callable[[], bool]) -> bool:
+    """Click Submit once through a captcha widget? Only when every widget is passive/invisible AND (the trusted
+    config says `attempt` OR a consent window covers captcha_attempt). A visible or unsafe challenge: never; the
+    consent is not even consulted (ADR-0036, ADR-0048)."""
+    passive = bool(widgets) and not state.get("visible", True) and not state.get("unsafe", True)
+    return passive and (policy == "attempt" or consent_ok())
+
+
+def _consent_captcha(settings, ref: str) -> bool:
+    """captcha_attempt under an active consent window (ADR-0048). Any error -> False (handoff)."""
+    try:
+        from ..consent import use
+        return use(settings, "captcha_attempt", f"ref={ref} passive widget only") is not None
+    except Exception:
+        return False
 
 
 class PlaywrightDriver(VerificationMixin):
@@ -373,6 +672,8 @@ class PlaywrightDriver(VerificationMixin):
         self._handoff_pages: set[int] = set()
         self._net: dict[int, list[dict[str, Any]]] = {}
         self._tasks: dict[int, list[asyncio.Task]] = {}
+        self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
+        self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
 
     # -- lifecycle ------------------------------------------------------------------------------
     async def _context(self):
@@ -414,8 +715,10 @@ class PlaywrightDriver(VerificationMixin):
         ref = form.ref
         ats_name = detect_ats(apply_url, ref)
         if ats_name is None:
-            return SubmitResult(ref=ref, status="needs_human", via="browser",
-                                detail="unsupported_site: no deterministic filler for this host")
+            detail = "unsupported_site: no deterministic filler for this host"
+            if account_ats(apply_url):           # sign in (vault, consent-gated) so a human continues logged in
+                detail += "; " + await self.ensure_login(apply_url, _email_answer(form, answers), dry_run=dry_run)
+            return SubmitResult(ref=ref, status="needs_human", via="browser", detail=detail)
         ats = ATS[ats_name]
         ctx = await self._context()
         page = await ctx.new_page()
@@ -426,6 +729,8 @@ class PlaywrightDriver(VerificationMixin):
         except Exception as e:
             return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
         finally:
+            self._api_keys.pop(id(page), None)
+            self._exempt.pop(id(page), None)
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
@@ -441,18 +746,40 @@ class PlaywrightDriver(VerificationMixin):
                                          timeout=self.b.timeout_s * 1000)
         except Exception:
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail="form did not render")
+        await self._await_hydration(page)
         scope = await self._form_text(page)
-        if (blk := detect_blocker(scope)) in ("captcha", "verification", "login"):
+        blk = detect_blocker(scope)
+        creds = consent.active(self.s, "credentials")       # ADR-0046: without consent, behavior is unchanged
+        if creds and (blk == "login" or (blk is None and await self._password_visible(page))):
+            out = await self._login_wall(page, url, _email_answer(form, answers), dry_run)
+            if out.status not in ("logged_in", "created"):
+                return SubmitResult(ref=ref, status="roadblock", via="browser", detail=out.detail())
+            await page.goto(url, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_selector("form input, form textarea, form select, input[type=file]",
+                                             state="attached", timeout=self.b.timeout_s * 1000)
+            except Exception:
+                return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                    detail=f"{out.detail()}; form did not render after sign-in")
+            scope = await self._form_text(page)
+            blk = detect_blocker(scope)
+            if blk is None and await self._password_visible(page):
+                blk = "login"
+        if blk in ("captcha", "verification", "login"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} before filling")
         if (hit := stop_phrase_hit(scope, self.s.policy.stop_phrases)):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"attestation: '{hit}'")
 
+        self._api_keys[id(page)] = {"req": [f.key for f in form.fields if f.required and f.kind != FieldKind.file],
+                                    "opt": [f.key for f in form.fields if not f.required],
+                                    "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases)}
         steps = fill_order(form, answers, files)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
         failed: list[str] = []
         has_phone = any(canonical_key(f.label) == "phone" or "phone" in normalize(f.label) for f, _ in texty)
-        if has_phone and not await self._ensure_phone_country(page):
+        country = phone_country_name(str(answers.get("contact:country") or ""))
+        if has_phone and not await self._ensure_phone_country(page, country):
             failed.append("phone_country")
         for f, v in texty:
             if not await self._fill(page, ats, f, v):
@@ -468,7 +795,7 @@ class PlaywrightDriver(VerificationMixin):
                         failed.append(f.key)
         bad = await self._verify(page, texty, ats)
         if bad:                                     # uploads/parsers can wipe fields: one refill pass
-            if "phone_country" in failed and await self._ensure_phone_country(page):
+            if "phone_country" in failed and await self._ensure_phone_country(page, country):
                 failed.remove("phone_country")
             for f, v in texty:
                 if f.key in bad:
@@ -482,8 +809,9 @@ class PlaywrightDriver(VerificationMixin):
             ev = await self._save_evidence(page, ref, "fill-failed", extra={"fields": problems[:20]})
             return SubmitResult(ref=ref, status="needs_human", via="browser",
                                 detail=f"could not fill/verify: {problems[:8]}{ev}")
-        await self._fill_demographics(page, answers)
+        demo_bad = await self._fill_demographics(page, answers)
         await self._fill_education(page, answers)
+        await self._fill_privacy_groups(page, answers)
         empty = await self._empty_required(page)
         if empty:                                   # late re-renders (resume parse) can wipe a field: refill once
             ids = {e["id"] for e in empty}
@@ -491,6 +819,10 @@ class PlaywrightDriver(VerificationMixin):
                 if f.key in ids:
                     await self._fill(page, ats, f, v)
             empty = await self._empty_required(page)
+        empty += [{"id": "", "label": f"{lab} (self-ID read-back mismatch)"} for lab in demo_bad]
+        known = {e["label"] for e in empty}
+        empty += [{"id": "", "label": f"{lab} (native validation)"} for lab in await self._native_invalid(page)
+                  if lab not in known]
         if empty:                                   # never submit (or call a dry run complete) with required gaps
             labels = [e["label"] for e in empty]
             ev = await self._save_evidence(page, ref, "incomplete", extra={"required_empty": labels})
@@ -509,8 +841,8 @@ class PlaywrightDriver(VerificationMixin):
             if widgets or state["unsafe"] or ats.name == "ashby":
                 # captcha_policy="attempt" (ADR-0036): only a passive/invisible widget and NO visible challenge may be
                 # clicked through, once, exactly like a person would. Anything else stays a human handoff.
-                if (self.b.captcha_policy == "attempt" and widgets and not state["visible"]
-                        and not state["unsafe"]):
+                # An active consent window with captcha_attempt (ADR-0048) applies the same rule; nothing else changes.
+                if captcha_attempt_ok(self.b.captcha_policy, widgets, state, lambda: _consent_captcha(self.s, ref)):
                     attempt = True
                 else:      # never evade/solve bot checks: a human makes the final click
                     ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets, "unsafe": state["unsafe"]})
@@ -523,12 +855,51 @@ class PlaywrightDriver(VerificationMixin):
                                         detail=f"form filled and verified in the open browser tab; a human must click "
                                                f"Submit (captcha-protected){ev}")
         if dry_run:
-            ev = await self._save_evidence(page, ref, "dry-run")
+            ev = await self._save_evidence(page, ref, "dry-run", extra={"exempt_optin": self._exempt.get(id(page), [])})
             return SubmitResult(ref=ref, status="dry_run", via="browser",
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
         return await self._submit(page, ats, ref, attempt=attempt)
 
     # -- evidence / network ---------------------------------------------------------------------
+    # -- login walls (ADR-0046) ------------------------------------------------------------------
+    @staticmethod
+    async def _password_visible(page) -> bool:
+        try:
+            loc = page.locator("input[type=password]")
+            return any([await loc.nth(i).is_visible() for i in range(min(await loc.count(), 5))])
+        except Exception:
+            return False
+
+    async def _login_wall(self, page, url: str, email: str | None, dry_run: bool):
+        """Vault login / account creation for this page's exact host. Secrets go keychain -> Locator.fill only;
+        the returned outcome (and so the SubmitResult detail) never contains one."""
+        from ..accounts.browser_ops import PlaywrightLoginOps
+        from ..accounts.runtime import manager_for
+
+        async def captcha() -> bool:
+            st = await self._captcha_state(page)
+            return bool(st["visible"] or st["unsafe"])
+
+        start = page.url or url
+        return await manager_for(self.s).handle_wall(PlaywrightLoginOps(page, captcha, expected_host=start), start,
+                                                     email=email, dry_run=dry_run)
+
+    async def ensure_login(self, url: str, email: str | None = None, *, dry_run: bool = True) -> str:
+        """Open `url`; if it shows a login wall, handle it. Returns a short, secret-free status line."""
+        ctx = await self._context()
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1500)
+            if not await self._password_visible(page) and detect_blocker(await page.locator("body").inner_text()) != "login":
+                return "no login wall"
+            return (await self._login_wall(page, url, email, dry_run)).detail()
+        except Exception as e:
+            return f"login check failed ({type(e).__name__})"
+        finally:
+            if not self.b.keep_pages_open:
+                await page.close()
+
     def _attach_recorder(self, page, ats: AtsProfile) -> None:
         recs: list[dict[str, Any]] = []
         tasks: list[asyncio.Task] = []
@@ -685,7 +1056,7 @@ class PlaywrightDriver(VerificationMixin):
                     "captcha_widgets": await self._captcha_widgets(page),
                     "submit_buttons": await self._button_summary(page),
                     "text": trim(text, self.b.evidence_text_chars), **(extra or {})}
-            (d / f"{tag}.json").write_text(json.dumps(meta, indent=1))
+            (d / f"{tag}.json").write_text(redact(json.dumps(meta, indent=1)))   # ADR-0046 defense in depth
             home = str(Path.home())
             shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
             return f" evidence={shown}"
@@ -693,6 +1064,45 @@ class PlaywrightDriver(VerificationMixin):
             return ""
 
     # -- field operations -----------------------------------------------------------------------
+    async def _await_hydration(self, page) -> bool:
+        """Wait (cap browser.hydrate_wait_s) until a server-rendered form is live; input typed or clicked before
+        hydration is silently dropped by React (relativity fill failures, ADR-0039). False = cap reached; the run
+        continues and the read-back / required-field scan still judge the result."""
+        deadline = time.monotonic() + max(0.0, self.b.hydrate_wait_s)
+        while True:
+            try:
+                if await page.evaluate(_HYDRATED_JS):
+                    return True
+            except Exception:
+                pass                                   # navigation in progress: poll again
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.2)
+
+    async def _fill_privacy_groups(self, page, answers: dict[str, Any]) -> None:
+        """Required radio/checkbox groups that exist only in the DOM (not in the job API), e.g. Ashby's consent block
+        under the phone field. Answered ONLY when the owner opted in (pref:acknowledge_privacy_notices) AND the group
+        is a plain privacy-notice acknowledgement with exactly one affirmative option (ADR-0034 rules, options
+        included). Anything else (SMS / marketing consent, terms, attestations) stays empty -> `incomplete`."""
+        if answers.get("pref:acknowledge_privacy_notices") is not True:
+            return
+        for row in await self._empty_required(page):
+            if not row.get("group"):
+                continue
+            # the FULL question text is judged (the 80-char label could cut off an excluded topic such as SMS)
+            ff = FormField(key=row["id"] or "dom-group", label=row.get("text") or row["label"], kind=FieldKind.select,
+                           options=[o for o in row.get("opts") or [] if o])
+            if _CONSENT_WORDS.search(ff.label) or any(_CONSENT_WORDS.search(o) for o in ff.options):
+                continue                           # consent / SMS / marketing: never ticked for a DOM-only group
+            want = privacy_ack_value(ff, self.s.policy.stop_phrases)
+            if want is None:
+                continue
+            try:
+                await self._check_in_group(page.locator(f'[data-jam-group="{row["group"]}"]').first, str(want),
+                                           ff.model_copy(update={"key": ""}))
+            except Exception:
+                pass
+
     async def _form_text(self, page) -> str:
         loc = page.locator("form")
         try:
@@ -705,6 +1115,11 @@ class PlaywrightDriver(VerificationMixin):
     async def _locate(self, page, f: FormField):
         key = f.key
         cands = [page.locator(f'[id="{key}"]'), page.locator(f'[name="{key}"]')]
+        # Ashby wraps each question in [data-field-path=<key>]; radio/checkbox members carry entry-scoped names
+        # (or the option text), so the group container is the only stable handle (ADR-0039).
+        fp = f'[data-field-path="{key}"]'
+        own = (f'label[for="{key}"], input[name="{key}"], input[name$="_{key}"], input[id*="_{key}-labeled-"]')
+        cands += [page.locator(f"{fp} :is(fieldset, [role=radiogroup], [role=group]):has({own})")]
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
         cands.append(page.get_by_label(re.compile(rf"^\s*{re.escape(label)}\s*\*?\s*$", re.IGNORECASE)))
         cands.append(page.get_by_label(re.compile(re.escape(label), re.IGNORECASE)))
@@ -765,21 +1180,9 @@ class PlaywrightDriver(VerificationMixin):
             return False
 
     async def _choose_input(self, page, f: FormField, value: str) -> bool:
-        """Radio / checkbox group sharing one name (Lever custom questions): click the member whose value or label
-        best matches `value`, then read the state back."""
-        group = page.locator(f'input[name="{f.key}"]')
-        vals = await group.evaluate_all("els => els.map(e => e.value)")
-        labels = await group.evaluate_all("els => els.map(e => (e.closest('label') || {}).innerText || e.value)")
-        pick = best_option(value, [v for v in vals if v]) or best_option(value, [t.strip() for t in labels if t])
-        if pick is None:
-            return False
-        idx = next((i for i, (v, t) in enumerate(zip(vals, labels)) if pick in (v, t.strip())), None)
-        if idx is None:
-            return False
-        box = group.nth(idx)
-        if not await box.is_checked():
-            await box.click()                       # real click: programmatic check does not register
-        return bool(await box.is_checked())
+        """Radio / checkbox group sharing one name (Lever custom questions): tick the member whose option text or value
+        EXACTLY matches `value`, then read the state back."""
+        return await self._tick_member(page.locator(f'input[name="{f.key}"]'), page, value, f)
 
     @staticmethod
     async def _checked_values(page, key: str) -> list[str]:
@@ -798,8 +1201,8 @@ class PlaywrightDriver(VerificationMixin):
                 except Exception:
                     continue
             return False
-        if tag == "FIELDSET":                                   # checkbox / radio group (Greenhouse multi_value_*)
-            return await self._check_in_group(loc, value)
+        if await self._is_group(loc):            # checkbox / radio group (Greenhouse multi_value_*, Ashby fieldsets)
+            return await self._check_in_group(loc, value, f)
         marked = False
         try:
             marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
@@ -807,8 +1210,11 @@ class PlaywrightDriver(VerificationMixin):
             pass
         scope = page.locator("[data-jam-scope]") if marked else page
         opts = scope.locator(_MENU_SCOPED if marked else _MENU_OPTS)
-        async_lookup = f.kind == FieldKind.location or not f.options
-        snapped = best_option(value, f.options) if f.options else None
+        # EEO / self-ID questions: exact option matching only, never a substring or fuzzy snap (ADR-0039)
+        eeo = canonical_key(f.label) in DEMOGRAPHIC_KEYS or bool(_DEMOGRAPHIC_LABEL.search(f.label))
+        match = exact_choice if eeo else best_option
+        async_lookup = (f.kind == FieldKind.location or not f.options) and not eeo
+        snapped = match(value, f.options) if f.options else None
         flt = value if async_lookup else (snapped or value)
         if f.kind == FieldKind.location:                        # geocoder: "City, ST" often returns nothing
             pick = await self._geo_pick(page, loc, opts, value)
@@ -834,7 +1240,7 @@ class PlaywrightDriver(VerificationMixin):
                     await self._close_menu(page)
                     return False
             texts = [t.strip() for t in await opts.all_inner_texts()]
-            pick = best_option(value, texts) if texts else None
+            pick = match(value, texts) if texts else None
             if pick is None and async_lookup and texts:
                 pick = texts[0]
         if pick is None:
@@ -848,7 +1254,7 @@ class PlaywrightDriver(VerificationMixin):
             return False
         if f.kind == FieldKind.multiselect:
             await page.keyboard.press("Escape")
-        committed = await self._committed(page, scope if marked else None, pick)
+        committed = await self._committed(page, loc, pick)
         if not committed:
             await self._close_menu(page)
         return committed
@@ -873,20 +1279,45 @@ class PlaywrightDriver(VerificationMixin):
         return None
 
     @staticmethod
-    async def _check_in_group(group, value: str) -> bool:
-        """Tick the box whose label snaps to `value` (best_option: never a different answer), then read it back."""
-        boxes = group.locator("input[type=checkbox], input[type=radio]")
-        labels = [t.strip() for t in await group.locator("label").all_inner_texts()]
-        pick = best_option(value, labels) if labels else None
-        if pick is None:
+    async def _is_group(loc) -> bool:
+        """A container (fieldset, role=group, Ashby field entry ...) whose answer is a ticked radio / checkbox."""
+        try:
+            return bool(loc is not None and await loc.evaluate(_IS_GROUP_JS))
+        except Exception:
             return False
-        for i in range(await boxes.count()):
-            box = boxes.nth(i)
-            text = (await box.evaluate("e => (e.labels && e.labels[0] ? e.labels[0].innerText : '')")).strip()
-            if text == pick:
-                if not await box.is_checked():
-                    await box.check(timeout=3000)
-                return await box.is_checked()
+
+    @staticmethod
+    async def _members(boxes, f: FormField | None) -> list[dict[str, Any]]:
+        return list(await boxes.evaluate_all(_MEMBERS_JS, [f.key if f else "", f.label if f else ""]))
+
+    async def _check_in_group(self, group, value: str, f: FormField | None = None) -> bool:
+        return await self._tick_member(group.locator(_CHOICE), group, value, f)
+
+    async def _tick_member(self, boxes, scope, value: str, f: FormField | None) -> bool:
+        """Tick the field's member whose option text (else value attribute) EXACTLY equals `value` (exact_choice:
+        normalised equality or the explicit decline table; never a substring or fuzzy match), then read it back.
+        Custom-drawn boxes cover the real input, so the click falls back to the option's label."""
+        rows = await self._members(boxes, f)
+        pick = exact_choice(value, [r["text"] for r in rows if r["text"]])
+        row = next((r for r in rows if pick is not None and r["text"] == pick), None)
+        if row is None:
+            nv = normalize(str(value))
+            row = next((r for r in rows if r["value"] not in ("", "on") and normalize(r["value"]) == nv), None)
+        if row is None:
+            return False
+        box = boxes.nth(row["i"])
+        if await box.is_checked():
+            return True
+        bid = await box.get_attribute("id")
+        label = scope.locator(f'label[for="{bid}"]') if bid else box.locator("xpath=ancestor::label[1]")
+        for act in (lambda: box.check(timeout=2000), lambda: label.first.click(timeout=2000),
+                    lambda: box.check(force=True, timeout=2000)):
+            try:
+                await act()
+            except Exception:
+                pass
+            if await box.is_checked():
+                return True
         return False
 
     async def _is_empty(self, page, f: FormField) -> bool:
@@ -900,9 +1331,9 @@ class PlaywrightDriver(VerificationMixin):
                 await loc.evaluate(_MARK_SCOPE_JS)
                 chips = await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).count()
                 return chips == 0 and not (await loc.input_value()).strip()
+            if await self._is_group(loc):
+                return not any(r["checked"] for r in await self._members(loc.locator(_CHOICE), f))
             kind = await loc.evaluate("e => (e.type || e.tagName).toLowerCase()")
-            if kind == "fieldset":
-                return await loc.locator("input:checked").count() == 0
             if kind in ("checkbox", "radio"):
                 name = await loc.get_attribute("name")
                 if not name:
@@ -922,11 +1353,14 @@ class PlaywrightDriver(VerificationMixin):
             pass
 
     @staticmethod
-    async def _committed(page, scope, pick: str) -> bool:
-        """The choice is only real once it shows as the select's single-value / multi-value chip."""
+    async def _committed(page, loc, pick: str) -> bool:
+        """The choice is only real once it shows as THIS select's single-value / multi-value chip. The read-back is
+        always scoped to the field's own container; no container -> not committed (never another select's chip)."""
         for _ in range(8):
             try:
-                root = scope if scope is not None else page
+                if loc is None or not await loc.evaluate(_COMMIT_SCOPE_JS):
+                    return False
+                root = page.locator("[data-jam-commit]")
                 got = [normalize(t) for t in await root.locator(_SELECT_VALUES).all_inner_texts()]
                 np = normalize(pick)
                 if any(g and (g == np or g in np or np in g) for g in got):
@@ -937,40 +1371,114 @@ class PlaywrightDriver(VerificationMixin):
         return False
 
     async def _empty_required(self, page) -> list[dict[str, Any]]:
-        """Every visible required control (asterisk label / aria-required / required) that is still empty."""
+        """Every visible required control (asterisk label / aria-required / required) that is still empty. Fields the
+        API form marks required count too. A scan that fails is itself reported (never an empty, 'verified' list)."""
         try:
-            return list(await page.evaluate(_EMPTY_REQUIRED_JS))
-        except Exception:
-            return []
+            rows = list(await page.evaluate(_EMPTY_REQUIRED_JS, self._api_keys.get(id(page), {})))
+        except Exception as e:
+            return [{"id": "", "label": f"required-field scan failed ({type(e).__name__})", "rs": False}]
+        ex = [r["label"] for r in rows if r.get("exempt")]
+        if ex:
+            self._note_exempt(page, ex)
+        return [r for r in rows if not r.get("exempt")]
 
-    async def _fill_demographics(self, page, answers: dict[str, Any]) -> None:
-        """EEO selects that exist only in the DOM (not in the job API): choose the profile's value, else the
-        decline / 'I don't wish to answer' option. Never invents a demographic; no decline option -> left empty."""
-        for row in await self._empty_required(page):
-            lab = row["label"]
+    def _note_exempt(self, page, labels: list[str]) -> None:
+        cur = self._exempt.setdefault(id(page), [])
+        new = [x for x in labels if x not in cur]
+        if new:
+            cur.extend(new)
+            log.info("left empty on purpose (opt-in / job-alert allowlist): %s", new)
+
+    async def _native_invalid(self, page) -> list[str]:
+        """form.checkValidity() on the application form (only when it has native constraints). Never reportValidity,
+        never submit. A failing check is itself reported."""
+        try:
+            res = await page.evaluate(_VALIDITY_JS, {"keys": self._api_keys.get(id(page), {}).get("keys", [])})
+        except Exception as e:
+            return [f"native validity check failed ({type(e).__name__})"]
+        if res.get("exempt"):
+            self._note_exempt(page, list(res["exempt"]))
+        return list(res.get("bad") or [])
+
+    async def _fill_demographics(self, page, answers: dict[str, Any]) -> list[str]:
+        """Voluntary EEO / self-ID selects that exist only in the DOM (not in the job API; planned fields are left to
+        the plan). EXACT matching only (exact_choice: normalised equality or the explicit decline table; never a
+        substring or fuzzy match, so Female never selects Male). The profile's [demographics] value is used when an
+        option equals it; a profile value with no equal option leaves the select BLANK (a required one then makes the
+        run `incomplete`). With no profile value: a REQUIRED select gets the decline-table option, an OPTIONAL one
+        stays blank. Every pick is read back from this field and compared EXACTLY; on a mismatch the select is
+        blanked, and a required one (or one that cannot be blanked) is returned as a problem -> `incomplete`."""
+        bad: list[str] = []
+        try:
+            rows = list(await page.evaluate(_DOM_SELECTS_JS, self._api_keys.get(id(page), {})))
+        except Exception:
+            return bad
+        for row in rows:
+            lab, el_id = row["label"], row["id"]
             ck = canonical_key(lab)
-            if not (row["rs"] and row["id"] and (ck in DEMOGRAPHIC_KEYS or _DEMOGRAPHIC_LABEL.search(lab))):
+            if not el_id or el_id in answers or not (ck in DEMOGRAPHIC_KEYS or _DEMOGRAPHIC_LABEL.search(lab)):
                 continue
-            want = str(answers.get(f"demographic:{ck}") or "decline")
-            loc = page.locator(f'[id="{row["id"]}"]').first
+            prof = str(answers.get(f"demographic:{ck}") or "").strip() if ck in DEMOGRAPHIC_KEYS else ""
+            if not prof and not row["required"]:
+                continue                                   # optional, nothing in the profile: stay blank
+            declined = not prof or normalize(prof) in _DECLINE_SYNONYMS
+
+            def choose(texts: list[str], prof=prof, declined=declined) -> str | None:
+                texts = [t for t in texts if t and normalize(t) not in ("select", "")]
+                return exact_decline(texts) if declined else exact_choice(prof, texts)
+            loc = page.locator(f'[id="{el_id}"]').first
             try:
                 await loc.scroll_into_view_if_needed()
+                if row["native"]:
+                    texts = [t.strip() for t in await loc.locator("option").all_inner_texts()]
+                    pick = choose(texts)
+                    if pick is None:
+                        continue
+                    await loc.select_option(label=pick, timeout=2000)
+                    got = await loc.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].text : ''")
+                    if normalize(got) != normalize(pick):              # exact read-back failed: blank it
+                        try:
+                            await loc.select_option(value="", timeout=2000)
+                        except Exception:
+                            pass
+                        blank = not (await loc.evaluate("e => e.value || ''"))
+                        if row["required"] or not blank:
+                            bad.append(lab)
+                    continue
                 marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
                 opts = (page.locator("[data-jam-scope]") if marked else page).locator(_MENU_SCOPED)
                 await loc.click()
                 await opts.first.wait_for(state="visible", timeout=2500)
                 texts = [t.strip() for t in await opts.all_inner_texts()]
-                low = normalize(want)
-                pick = decline_option(texts) if low.startswith("decline") or low == "prefer not to say" else (
-                    exact_option(want, texts) or decline_option(texts))
+                pick = choose(texts)
                 if pick is None:
                     await self._close_menu(page)
                     continue
                 await opts.nth(texts.index(pick)).click(timeout=3000)
-                if not await self._committed(page, page.locator("[data-jam-scope]") if marked else None, pick):
-                    await self._close_menu(page)
+                await self._close_menu(page)
+                shown: list[str] = []
+                for _ in range(8):                                     # exact read-back from THIS select only
+                    if await loc.evaluate(_COMMIT_SCOPE_JS):
+                        shown = [t.strip() for t in await page.locator("[data-jam-commit]").locator(_SELECT_VALUES)
+                                 .all_inner_texts()]
+                    if shown:
+                        break
+                    await asyncio.sleep(0.15)
+                if [normalize(t) for t in shown] != [normalize(pick)]:
+                    clear = page.locator("[data-jam-commit] [class*=select__clear-indicator]")
+                    try:
+                        if await clear.count():
+                            await clear.first.click(timeout=2000)
+                    except Exception:
+                        pass
+                    left = await page.locator("[data-jam-commit]").locator(_SELECT_VALUES).count()
+                    if row["required"] or left:
+                        bad.append(lab)
             except Exception:
                 await self._close_menu(page)
+                if row["required"]:
+                    bad.append(lab)
+        return bad
 
     async def _rs_pick(self, page, el_id: str, queries: list[str], choose) -> str | None:
         """Type each query into the react-select `el_id`, let `choose(option_texts)` pick, CLICK it and confirm
@@ -999,7 +1507,7 @@ class PlaywrightDriver(VerificationMixin):
                 if pick is None or pick not in texts:
                     continue
                 await opts.nth(texts.index(pick)).click(timeout=3000)
-                if await self._committed(page, scope, pick):
+                if await self._committed(page, loc, pick):
                     return pick
             except Exception:
                 pass
@@ -1059,47 +1567,50 @@ class PlaywrightDriver(VerificationMixin):
             if not await has_value(el_id):
                 await self._rs_pick(page, el_id, [name], lambda t, n=name: next((o for o in t if normalize(o) == normalize(n)), None))
 
-    async def _ensure_phone_country(self, page) -> bool:
-        """Intl-tel widgets reset the number when the country changes: pick United States (+1) BEFORE typing the phone."""
+    async def _ensure_phone_country(self, page, country: str) -> bool:
+        """Intl-tel widgets reset the number when the country changes: pick the PROFILE's country BEFORE typing the
+        phone. No configured country -> the widget is left as the site set it (a required empty one is reported by
+        the required-field scan); the tool never guesses a country (ADR-0039)."""
+        if not country:
+            return True
         try:
             cid = await page.evaluate(_COUNTRY_JS)
         except Exception:
             cid = ""
         if cid:
             loc = page.locator(f'[id="{cid}"]').first
-            try:
-                marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
-                if marked:
-                    cur = " ".join(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).all_inner_texts())
-                    if "united states" in cur.lower() or "+1" in cur:
-                        return True
-            except Exception:
-                pass
-            ff = FormField(key=cid, label="Country", kind=FieldKind.select)
-            for _ in range(2):
-                if await self._choose(page, ff, loc, "United States"):
-                    return True
-                await asyncio.sleep(0.5)
-                try:                                  # the pick may have landed even if the first read-back raced
-                    cur = " ".join(await page.locator("[data-jam-scope]").locator(_SELECT_VALUES).all_inner_texts())
-                    if "united states" in cur.lower() or "+1" in cur:
-                        return True
+
+            async def current() -> list[str]:
+                try:
+                    if await loc.evaluate(_COMMIT_SCOPE_JS):
+                        return list(await page.locator("[data-jam-commit]").locator(_SELECT_VALUES).all_inner_texts())
                 except Exception:
                     pass
+                return []
+            if any(same_country(country, t) for t in await current()):    # exact, never a substring
+                return True
+            for _ in range(2):
+                if await self._rs_pick(page, cid, [country], lambda t: country_option(country, t)):
+                    return True
+                await asyncio.sleep(0.5)
             return False
         flag = page.locator(".iti__selected-country, .iti__selected-flag, .iti__flag-container button").first
         try:
             if not await flag.count():
                 return True                     # no country widget on this form
-            title = ((await flag.get_attribute("title")) or "") + (await flag.inner_text())
-            if "united states" in title.lower() or "+1" in title:
+            if same_country(country, (await flag.get_attribute("title")) or ""):     # exact, never a substring
                 return True
             await flag.click()
-            us = page.locator("li.iti__country[data-country-code=us], [role=option]:has-text('United States')").first
-            await us.wait_for(state="visible", timeout=3000)
-            await us.click()
-            title = ((await flag.get_attribute("title")) or "") + (await flag.inner_text())
-            return "united states" in title.lower() or "+1" in title
+            items = page.locator("li.iti__country, .iti__country-list [role=option]")
+            await items.first.wait_for(state="visible", timeout=3000)
+            names = list(await items.evaluate_all(
+                "els => els.map(e => ((e.querySelector('.iti__country-name') || e).textContent || '').trim())"))
+            pick = country_option(country, names)
+            if pick is None:
+                await self._close_menu(page)
+                return False
+            await items.nth(names.index(pick)).click()
+            return same_country(country, (await flag.get_attribute("title")) or "")
         except Exception:
             await self._close_menu(page)
             return False
@@ -1255,7 +1766,7 @@ class PlaywrightDriver(VerificationMixin):
                 loc = await self._locate(page, f)
                 if loc is not None and await self._is_choice_input(loc):
                     got = [normalize(x) for x in await self._checked_values(page, f.key)]
-                    want = [normalize(str((best_option(o, f.options) if f.options else None) or o))
+                    want = [normalize(str((exact_choice(o, f.options) if f.options else None) or o))
                             for o in (v if isinstance(v, list) else [v])]
                     if not got or any(w not in got for w in want):
                         bad.append(f.key)
@@ -1266,11 +1777,13 @@ class PlaywrightDriver(VerificationMixin):
                         if not got or (f.options and not best_option(v if isinstance(v, str) else v[0], [got])):
                             bad.append(f.key)
                         continue
-                    if loc is not None and (await loc.evaluate("e => e.tagName")).upper() == "FIELDSET":
-                        ticked = [normalize(t) for t in await loc.evaluate(
-                            "e => [...e.querySelectorAll('input:checked')].map(i => i.labels && i.labels[0] ? i.labels[0].innerText : '')")]
-                        if any(normalize(str(one)) not in " | ".join(ticked) and not best_option(one, ticked)
-                               for one in (v if isinstance(v, list) else [v])):
+                    if await self._is_group(loc):
+                        rows = [r for r in await self._members(loc.locator(_CHOICE), f) if r["checked"]]
+                        ticked = [r["text"] for r in rows if r["text"]]
+                        vals = {normalize(r["value"]) for r in rows if r["value"] not in ("", "on")}
+                        # every wanted option must be ticked (exact); an empty group is never "verified"
+                        if not rows or any(exact_choice(one, ticked) is None and normalize(str(one)) not in vals
+                                           for one in (v if isinstance(v, list) else [v])):
                             bad.append(f.key)
                         continue
                 except Exception:

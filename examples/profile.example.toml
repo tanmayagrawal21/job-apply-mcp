@@ -40,12 +40,17 @@ summary = "Built dashboards and automated weekly reporting."
 Python = 3
 
 [authorization]
+# home_country = "US"           # ISO-2 or name; the flat keys below describe this country. Unset: derived from
+                               # [contact].country; if that is not a known country, the flat keys apply nowhere
 work_authorized = true
 requires_sponsorship = false
 citizen = true
 # citizenship = "Canada"        # country of citizenship (optional); "Citizenship Status" never picks a citizen option unless US
-# The facts above describe the United States. For another country add an [answers] pattern naming it, e.g.
-# "right to work in the uk" = "No"   (otherwise such questions stay unresolved; ADR-0038)
+# Per-country facts (ADR-0040): one table per ISO-2 country. A question about a country with no facts stays
+# unresolved and is listed in the plan as a profile gap.
+# [authorization.CA]
+# work_authorized = false
+# requires_sponsorship = true
 
 [preferences]
 willing_to_relocate = true
@@ -70,6 +75,8 @@ open_to_hybrid = true
 # Demographic / EEO questions. Every field defaults to declining; override only if you choose to.
 [demographics]
 gender = "Decline to self-identify"
+# gender_if_required = ""          # optional: used only when the gender question is required
+hispanic_latino = "Decline to self-identify"   # or the exact option text, e.g. "No"
 race_ethnicity = "Decline to self-identify"
 veteran_status = "Decline to self-identify"
 disability_status = "Decline to self-identify"
@@ -78,3 +85,21 @@ disability_status = "Decline to self-identify"
 expected = 80000
 text = "Open to discussion based on the full scope of the role."
 currency = "USD"
+
+# ADR-0047: policies the tool applies for you. Each accepts a table (below) or a plain note.
+[persona.experience_counting]
+mode = "full_time_only"          # or "include_internships" / "all"
+# count_from = "2019-01"         # ignore roles that started earlier
+
+[persona.salary_policy]
+mode = "midpoint"                # of the posted range, never below the floor
+floor = 90000
+fixed = 100000                   # entered when a posting shows no range
+
+[persona.exceptional_work]
+projects = [
+  {name = "Fleet scheduler", summary = "Dispatch optimizer for 40 warehouse robots.", keywords = ["robots", "scheduling"]},
+]
+
+[persona.answers]
+ai_tools = "An AI coding assistant for boilerplate; I review every line."

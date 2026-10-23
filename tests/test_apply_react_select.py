@@ -26,7 +26,7 @@ function rs(id, opts, o) { o = o || {};
       opts.filter(t => t.toLowerCase().includes(q)).forEach((t, i) => { const d = document.createElement('div');
         d.className = 'select__option' + (i === 0 ? ' select__option--is-focused' : ''); d.setAttribute('role', 'option'); d.textContent = t;
         d.onmouseenter = () => d.classList.add('select__option--is-focused');
-        d.onclick = () => { if (o.multi) { chosen.push(t); } else { chosen = [t]; }
+        d.onclick = () => { if (o.broken) { close(); return; } if (o.multi) { chosen.push(t); } else { chosen = [t]; }
           vc.querySelectorAll('.select__single-value,.select__multi-value').forEach(x => x.remove());
           chosen.forEach(c => { const e = document.createElement('div'); e.className = o.multi ? 'select__multi-value' : 'select__single-value';
             e.innerHTML = o.multi ? '<span class="select__multi-value__label"></span>' : ''; (o.multi ? e.firstChild : e).textContent = c; vc.insertBefore(e, inp); });
@@ -127,7 +127,8 @@ GH_FORM = ApplicationForm(ref="greenhouse:acme:1", fields=[
               options=["Springfield", "Shelbyville", "Capital City"]),
     FormField(key="candidate-location", label="Location (City)", kind=FieldKind.location)])
 GH_ANS = {"first_name": "Alex", "phone": "555-0101", "question_1": "No", "question_2": True,
-          "question_3": ["Springfield", "Capital City"], "candidate-location": "Springfield, Illinois"}
+          "question_3": ["Springfield", "Capital City"], "candidate-location": "Springfield, Illinois",
+          "contact:country": "USA"}
 
 
 async def test_react_select_options_are_committed_and_country_precedes_phone(drv):
@@ -138,6 +139,54 @@ async def test_react_select_options_are_committed_and_country_precedes_phone(drv
     last = json.loads([p for p in posts if p[0] == "/state"][-1][1])
     assert "United States +1" in last["vals"] and last["vals"].count("Yes") == 1 and "No" in last["vals"]
     assert {"Springfield", "Capital City"} <= set(last["vals"]) and last["phone"] == "555-0101"
+
+
+@pytest.mark.parametrize("country,expect", [("Canada", "Canada +1"), ("India", "India +91"), ("", None)])
+async def test_phone_country_comes_from_the_profile(drv, country, expect):
+    srv, posts = _serve(GH_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:1", fields=GH_FORM.fields[:2])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/1", form,
+                                    {"first_name": "Alex", "phone": "555-0101", "contact:country": country}, {},
+                                    dry_run=True)
+    assert res.status == "dry_run", res.detail
+    last = json.loads([p for p in posts if p[0] == "/state"][-1][1])
+    countries = [v for v in last["vals"] if "+" in v]
+    assert countries == ([expect] if expect else [])          # no profile country: the widget is never guessed
+    assert last["phone"] == "555-0101"
+
+
+def test_country_helpers():
+    from job_apply_mcp.apply.browser_playwright import country_option, phone_country_name
+    assert phone_country_name("USA") == phone_country_name("U.S.") == "United States"
+    assert phone_country_name("Canada") == "Canada" and phone_country_name("") == ""
+    opts = ["United States Minor Outlying Islands +1", "United States +1", "India (+91)"]
+    assert country_option("United States", opts) == "United States +1"
+    assert country_option("India", opts) == "India (+91)"
+    assert country_option("Springfield", opts) is None
+
+
+TWO_HTML = """<html><body><form id=f>
+<label for=question_1>First question</label><div id=question_1_wrap></div>
+<label for=question_2>Second question</label><div id=question_2_wrap></div>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('question_1', ['Yes', 'No']); rs('question_2', ['Yes', 'No'], {broken: true});
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+async def test_commit_readback_is_scoped_to_the_field(drv):
+    """question_1 already shows 'Yes'; question_2's option click never commits. Its read-back must not be
+    satisfied by question_1's chip."""
+    srv, _ = _serve(TWO_HTML)
+    ctx = await drv._context()
+    page = await ctx.new_page()
+    await page.goto(f"http://127.0.0.1:{srv.server_port}/")
+    q1 = FormField(key="question_1", label="First question", kind=FieldKind.select, options=["Yes", "No"])
+    q2 = FormField(key="question_2", label="Second question", kind=FieldKind.select, options=["Yes", "No"])
+    assert await drv._choose(page, q1, await drv._locate(page, q1), "Yes")
+    assert not await drv._choose(page, q2, await drv._locate(page, q2), "Yes")
+    assert not await drv._committed(page, None, "Yes")        # no container: never committed
+    await page.close()
 
 
 async def test_lever_urls_typed_for_real(drv):
@@ -177,6 +226,90 @@ async def test_incomplete_reports_required_gaps_and_declines_eeo(drv):
     assert "shim" not in res.detail
     vals = json.loads([p for p in posts if p[0] == "/state"][-1][1])
     assert vals == ["I don't wish to answer", "I don't wish to answer"]
+
+
+SELFID_HTML = """<html><body><form id=f>
+<label for=first_name>First Name *</label><input id=first_name name=first_name required>
+<label for=gender>Gender</label><div id=gender_wrap></div>
+<label for=race>Race</label><div id=race_wrap></div>
+<label for=hispanic_ethnicity>Are you Hispanic/Latino?</label><div id=hispanic_ethnicity_wrap></div>
+<label for=veteran_status>Veteran Status *</label><div id=veteran_status_wrap></div>
+<label for=disability_status>Disability Status</label><select id=disability_status><option value="">Select...</option>
+<option>Yes, I have a disability</option><option>No, I do not have a disability</option><option>I do not want to answer</option></select>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+const D = "I don't wish to answer";
+rs('gender', ['Male', 'Female', 'Non-binary', D]); rs('race', ['Asian', 'White', 'Two or More Races', D]);
+rs('hispanic_ethnicity', ['Yes', 'No', D]); rs('veteran_status', ['I am a protected veteran', 'I am not a protected veteran', D]);
+document.getElementById('veteran_status').setAttribute('aria-required', 'true');
+function report() { const o = {}; ['gender', 'race', 'hispanic_ethnicity', 'veteran_status'].forEach(i => {
+    const v = document.querySelector('#' + i + '_wrap .select__single-value'); o[i] = v ? v.textContent : ''; });
+  const d = document.getElementById('disability_status'); o.disability_status = d.value ? d.selectedOptions[0].text : '';
+  fetch('/state', {method: 'POST', body: JSON.stringify(o)}); }
+new MutationObserver(report).observe(document.body, {subtree: true, childList: true});
+document.getElementById('disability_status').addEventListener('change', report); report();
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+async def test_dom_only_self_id_uses_profile_or_decline_and_never_invents(drv):
+    srv, posts = _serve(SELFID_HTML)
+    form = ApplicationForm(ref="greenhouse:acme:5", fields=[
+        FormField(key="first_name", label="First Name *", kind=FieldKind.text, required=True)])
+    ans = {"first_name": "Alex", "demographic:gender": "Female", "demographic:disability": "No",
+           "demographic:hispanic": "Martian"}           # not an offered option -> decline, never a guess
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/5", form, ans, {}, dry_run=True)
+    # the native Disability select is DOM-only (no API required:false) and "No" has no equal option: left blank,
+    # and under the inverted rule a blank DOM-only native select is a gap
+    assert res.status == "incomplete" and "Disability Status" in res.detail, res.detail
+    st = json.loads([p for p in posts if p[0] == "/state"][-1][1])
+    assert st == {"gender": "Female",                                   # profile value, exact option
+                  "race": "",                                           # optional, no profile value: blank
+                  "hispanic_ethnicity": "",                             # no equal option: blank, never decline/guess
+                  "veteran_status": "I don't wish to answer",           # required, no profile value: decline table
+                  "disability_status": ""}                              # "No" is not "No, I do not have ...": blank
+
+
+SELFID_PAIR_HTML = """<html><body><form id=f>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<label for=gender>__LABEL__</label><div id=gender_wrap></div>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('gender', __OPTS__);
+if (__REQ__) document.getElementById('gender').setAttribute('aria-required', 'true');
+function report() { const v = document.querySelector('#gender_wrap .select__single-value');
+  fetch('/state', {method: 'POST', body: v ? v.textContent : ''}); }
+new MutationObserver(report).observe(document.body, {subtree: true, childList: true}); report();
+</script></body></html>""".replace("__RS__", RS_JS)
+
+
+@pytest.mark.parametrize("label,profile,opts", [
+    ("Gender", "Female", ["Male", "Non-binary", "I don't wish to answer"]),
+    ("Gender identity", "Woman", ["Man", "Non-binary", "I don't wish to answer"]),
+    ("Race", "Asian", ["Asian Indian", "White", "I don't wish to answer"]),
+])
+@pytest.mark.parametrize("required", [False, True])
+async def test_self_id_near_miss_is_never_selected(drv, label, profile, opts, required):
+    """Female must never select Male, Woman never Man, Asian never Asian Indian: blank, and `incomplete` if required."""
+    html = (SELFID_PAIR_HTML.replace("__LABEL__", label).replace("__OPTS__", json.dumps(opts))
+            .replace("__REQ__", "true" if required else "false"))
+    srv, posts = _serve(html)
+    key = "race" if label == "Race" else "gender"
+    form = ApplicationForm(ref="greenhouse:acme:6", fields=[FormField(key="first_name", label="First Name", kind=FieldKind.text)])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/6", form,
+                                    {"first_name": "Alex", f"demographic:{key}": profile}, {}, dry_run=True)
+    assert [p for p in posts if p[0] == "/state"][-1][1] == ""
+    assert res.status == ("incomplete" if required else "dry_run"), res.detail
+
+
+def test_exact_choice_never_substring():
+    from job_apply_mcp.apply.browser_playwright import exact_choice
+    assert exact_choice("Female", ["Male", "Female"]) == "Female"
+    assert exact_choice("Female", ["Male", "Non-binary"]) is None
+    assert exact_choice("Woman", ["Man", "Transgender man"]) is None
+    assert exact_choice("Asian", ["Asian Indian", "Asian American"]) is None
+    assert exact_choice("asian ", ["ASIAN"]) == "ASIAN"
+    assert exact_choice("Decline to self-identify", ["Male", "I don't wish to answer"]) == "I don't wish to answer"
+    assert exact_choice("No", ["No, I do not have a disability"]) is None
 
 
 def test_located_in_us_maps_from_country():

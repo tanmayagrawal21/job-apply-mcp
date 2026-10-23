@@ -1,0 +1,20 @@
+From: avery.tester@example.com
+To: Avery Tester <avery.tester@example.com>
+Subject: Fwd: Platform Engineer
+Date: Tue, 13 Oct 2026 18:30:00 +0000
+Message-ID: <links-002@fixture.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+See link below.
+
+--b1
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Saw this:
+<a href="https://jobs.ashbyhq.com/initech/9f8e7d6c?utm_medium=email&amp;src=mail">Apply here</a>
+<img src="https://cdn.example.org/logo.png"></p></body></html>
+--b1--

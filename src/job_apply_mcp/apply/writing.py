@@ -5,7 +5,6 @@ Lint runs first so cheap regex checks reject bad drafts before any reviewer toke
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -45,6 +44,15 @@ class WritingResult:
     rounds: int = 0
     rubric: str = ""                 # for client review: what the calling agent must check
     scorecard: dict[str, Any] = field(default_factory=dict)   # compact quality scorecard (ADR-0023)
+
+
+@dataclass
+class WriteProgress:
+    """Live state of one write_text call, so a caller that cancels it at a deadline keeps the partial draft
+    (ADR-0041). `stage` is the step in flight: writer | review | revise | done."""
+    draft: str = ""
+    stage: str = ""
+    rounds: int = 0
 
 
 def summarize_posting(description: str | None, limit: int = 900) -> str:
@@ -145,12 +153,12 @@ def review_rubric(cfg: WritingCfg, *, company: str, title: str, facts: list[str]
     return ("Review sentence by sentence. Fail on: claims not supported by the facts; any gap, deficiency or "
             "'would need to learn' statement; enthusiasm, personal-feeling or flattery phrases "
             f"(lexicon: {', '.join(cfg.banned_phrases[:12])}); contractions; wrong company/role names "
-            f"(expected {company!r} / {title!r}); length; style mismatch. Rules: " + " ".join(cfg.rules) +
+            f"(expected {company!r} / {title!r}); length; style mismatch. " + checks.ATTEST_CLAUSE + " Rules: " + " ".join(cfg.rules) +
             " Facts: " + " | ".join(facts))
 
 
 def _reviewer_prompt(draft: str, rubric: str) -> str:
-    return (f"{rubric}\n\nDRAFT:\n{draft}\n\nReturn JSON "
+    return (f"{rubric}\n\n{quality.fence(draft)}\n\nReturn JSON "
             '{"pass": bool, "violations": [str], "corrected": str} where corrected is a fixed draft '
             "(identical to the draft when pass is true).")
 
@@ -160,8 +168,15 @@ def _parse_review(raw: str) -> tuple[bool, list[str], str]:
     if not m:
         return False, ["reviewer returned no JSON"], ""
     try:
-        d = json.loads(m.group(0))
-        return bool(d.get("pass")), [str(x) for x in d.get("violations", [])], str(d.get("corrected") or "")
+        d = quality.loads_strict(m.group(0))
+        raw_v = d.get("violations", [])
+        if not isinstance(raw_v, list):
+            return False, ["reviewer violations is not a list"], ""
+        issues = [str(x) for x in raw_v]
+        ok = quality.strict_verdict(d.get("pass")) and not issues   # a pass that lists violations is a fail
+        if not ok and not issues:
+            issues = [f"reviewer verdict not a strict pass: {d.get('pass')!r}"[:120]]
+        return ok, issues, str(d.get("corrected") or "")
     except (ValueError, TypeError):
         return False, ["reviewer returned invalid JSON"], ""
 
@@ -169,8 +184,11 @@ def _parse_review(raw: str) -> tuple[bool, list[str], str]:
 async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: str, company: str, title: str,
                      summary: str, facts: list[str], max_len: int | None = None,
                      exemplar: str = "", resume: list[Fact] | None = None, corpus: list[str] | None = None,
-                     today: date | None = None) -> WritingResult:
+                     today: date | None = None, progress: WriteProgress | None = None) -> WritingResult:
     """kind: 'cover_letter' | 'free_text'. Returns pass / needs_review (client reviews) / needs_human.
+
+    `progress` (optional) is updated after every writer/reviewer step; the caller owns the time budget and may
+    cancel this coroutine at any await, keeping `progress.draft` as a partial draft (ADR-0041).
 
     `facts` must come from the precedence-resolved fact set (profile/facts.py); `resume` drives temporal checks
     and tense guidance; `corpus` (the user's own letters) is the quality baseline (writing/quality.py)."""
@@ -181,14 +199,18 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
     gate = cfg.quality_gate and kind == "cover_letter" and bool(refs)
     rubric = review_rubric(cfg, company=company, title=title, facts=facts) + (
         quality.client_rubric(refs, cfg) if gate else "")
+    prog = progress if progress is not None else WriteProgress()
+    prog.stage = "writer"
     draft = (await router.complete(
         _writer_prompt(kind=kind, label=label, company=company, title=title, summary=summary, facts=facts,
                        cfg=cfg, exemplar=exemplar, max_len=max_len, timeline=timeline),
         task_class="narrative", max_tokens=1200)).strip()
+    prog.draft = draft
     violations: list[Violation] = []
     card: dict[str, Any] = {}
     grounding = " ".join(facts)
     for rnd in range(1, max(1, cfg.max_rounds) + 1):
+        prog.rounds = rnd
         violations = lint(draft, cfg, company=company, max_len=max_len, exemplar=exemplar, resume=resume, today=today)
         if gate and not violations:
             card = quality.scorecard(draft, cfg, corpus=refs, grounding=grounding, posting=summary)
@@ -196,6 +218,7 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
         if not violations and cfg.reviewer == "client":
             return WritingResult("needs_review", draft, [], rnd, rubric, card)
         if not violations:  # router reviewer
+            prog.stage = "review"
             raw = await router.complete(
                 quality.rubric_prompt(draft, refs, company, title, facts, cfg) if gate else _reviewer_prompt(draft, rubric),
                 task_class="review", max_tokens=1500)
@@ -208,9 +231,58 @@ async def write_text(router: RouterLike, cfg: WritingCfg, *, kind: str, label: s
                 return WritingResult("pass", draft, [], rnd, "", card)
             violations = [Violation("model", i) for i in issues] or [Violation("model", "reviewer failed draft")]
             if corrected and corrected != draft:
-                draft = corrected
+                draft = prog.draft = corrected
                 continue
         if rnd < cfg.max_rounds:
+            prog.stage = "revise"
             draft = (await router.complete(_revise_prompt(draft, violations, max_len),
                                            task_class="narrative", max_tokens=1200)).strip()
+            prog.draft = draft
+    prog.stage = "done"
     return WritingResult("needs_human", draft, violations, cfg.max_rounds, rubric, card)
+
+
+async def review_text(router: RouterLike | None, cfg: WritingCfg, text: str, *, kind: str, label: str,
+                      company: str, title: str, summary: str, facts: list[str], max_len: int | None = None,
+                      exemplar: str = "", resume: list[Fact] | None = None, corpus: list[str] | None = None,
+                      today: date | None = None) -> WritingResult:
+    """Review prose the server did not write (client-supplied answers in agent mode, ADR-0044) with the writer
+    path's checks: lint (banned phrases, gap statements, contractions, placeholders, temporal), fact consistency
+    against the resume, the quality gate (cover letters with a style corpus) and the strict reviewer
+    (task_class="review", even when writing.reviewer="client": the client cannot review its own text).
+
+    Never rewrites the text. Returns "pass", or "needs_review" with the violations. Fails closed: no router,
+    an unavailable reviewer, an error or unparsable output is a violation. The caller owns the time budget."""
+    today = today or today_local()
+    refs = corpus or []
+    gate = cfg.quality_gate and kind == "cover_letter" and bool(refs)
+    rubric = review_rubric(cfg, company=company, title=title, facts=facts) + (
+        quality.client_rubric(refs, cfg) if gate else "")
+    violations = lint(text, cfg, company=company, max_len=max_len, exemplar=exemplar, resume=resume, today=today)
+    flagged = {v.sentence for v in violations if v.kind == "temporal"}
+    violations += [Violation(k, d, s) for k, d, s in checks.fact_conflicts(text, resume or [], today)
+                   if s not in flagged]
+    card: dict[str, Any] = {}
+    if gate and not violations:
+        card = quality.scorecard(text, cfg, corpus=refs, grounding=" ".join(facts), posting=summary)
+        violations = [Violation("quality", f) for f in card["fails"]]
+    if violations:
+        return WritingResult("needs_review", text, violations, 1, rubric, card)
+    if router is None:
+        return WritingResult("needs_review", text, [Violation("model", "no strict reviewer available")], 1, rubric)
+    avail = getattr(router, "available", None)
+    if avail is not None and not await avail("review"):
+        return WritingResult("needs_review", text, [Violation("model", "strict reviewer unavailable")], 1, rubric)
+    raw = await router.complete(
+        quality.rubric_prompt(text, refs, company, title, facts, cfg) if gate else _reviewer_prompt(text, rubric),
+        task_class="review", max_tokens=1500)
+    if gate:
+        ok, scores, issues, _ = quality.parse_rubric(raw, cfg)
+        card["rubric"] = scores
+    else:
+        ok, issues, _ = _parse_review(raw)
+    if ok:
+        return WritingResult("pass", text, [], 1, "", card)
+    return WritingResult("needs_review", text,
+                         [Violation("model", i) for i in issues] or [Violation("model", "reviewer failed the text")],
+                         1, rubric, card)

@@ -48,3 +48,89 @@ def test_flag_text_combined():
                     "Graduating in 2027. No sponsorship.")
     assert set(f) == {"phd_only", "citizenship", "years", "academic", "grad_window", "no_sponsorship"}
     assert t.flag_text("A friendly place to work.") == {}
+
+
+_GUARD_SAMPLES = [
+    "We are unable to provide visa sponsorship. Can't sponsor. WILL NOT SPONSOR. Without the need for sponsorship.",
+    "Sponsorship is not available. No visa sponsorship. Not eligible for sponsorship. Does not offer sponsorship.",
+    "Interns on CPT are ineligible. STEM OPT not supported. Not open to J-1 holders. I-983 forms: not signed.",
+    "Must be a U.S. citizen. US citizenship is required. Active clearance, TS/SCI, ITAR and export-control rules apply.",
+    "Graduating between Dec 2025 and June 2027. Class of 2026. 2027 new grads welcome. graduates of 2026.",
+    "PhD required. Currently pursuing a PhD. New PhD Graduate. PhD students and PhD candidates. New PhD.",
+    "Springfield University, a college town with a school of medicine and a research institute.",
+    "5+ years of experience; minimum of 3 years. Pay $95k-$120k or USD 40 - 60 per hour; CAD 70,000 to 90,000.",
+    "Nothing relevant here at all, just a role description about teamwork.", "",
+]
+
+
+# Characters re.IGNORECASE matches to ASCII letters although str.lower() does not map them there.
+_CONFUSABLE = {"i": ["\u0131", "\u0130"], "s": ["\u017f"], "k": ["\u212a"]}
+
+
+def _variants(text: str, rng) -> list[str]:
+    """The text, upper-cased, with each confusable substituted everywhere, all at once, and at random positions."""
+    out = [text, text.upper()]
+    for a, subs in _CONFUSABLE.items():
+        for c in subs:
+            out.append(text.replace(a, c).replace(a.upper(), c))
+    every = text
+    for a, subs in _CONFUSABLE.items():
+        every = every.replace(a, subs[0]).replace(a.upper(), subs[-1])
+    out.append(every)
+    for _ in range(12):
+        out.append("".join(rng.choice(_CONFUSABLE[ch.lower()] + [ch]) if ch.lower() in _CONFUSABLE else ch
+                           for ch in text))
+    return out
+
+
+def _plain_flags(tf, text: str) -> dict:
+    plain = {k: h for k, p in tf._PATTERNS.items() if (h := tf._hits(p, text, 3, 140))}
+    if h := tf._hits(tf._YEARS, text, 3, 140):
+        plain["years"] = h
+    return plain
+
+
+def test_guarded_flags_equal_unguarded_flags_including_confusables(monkeypatch):
+    """ADR-0043 property: the substring prefilter and first-character guards may only skip work. For every flag
+    pattern, flag_text (guarded) must equal the plain unguarded _PATTERNS, including on text with characters that
+    re.IGNORECASE folds onto ASCII letters (\u0131, \u0130, \u017f, \u212a)."""
+    import html as _html
+    import random
+
+    import platform_fixtures as fx
+
+    from job_apply_mcp.platforms import textflags as tf
+
+    base = _GUARD_SAMPLES + [
+        "Must be a U.S. c\u0131t\u0131zen", "We do not offer visa \u017fponsorship", "TS/\u017fCI required",
+        tf.html_to_text(fx.GH_DESC), _html.unescape(fx.GH_DESC), fx.LEVER_LIST[0]["descriptionPlain"],
+        fx.ASHBY_BOARD["jobs"][0]["descriptionPlain"]]
+    rng = random.Random(43)
+    texts = [v for t in base for v in _variants(t, rng)]
+    for text in texts:
+        assert tf.flag_text(text) == _plain_flags(tf, text), text
+    assert "citizenship" in tf.flag_text("Must be a U.S. c\u0131t\u0131zen")
+    assert "no_sponsorship" in tf.flag_text("We do not offer visa \u017fponsorship")
+    assert "citizenship" in tf.flag_text("TS/\u017fCI required")
+    assert "citizenship" in tf.flag_text("MUST BE A U.S. C\u0130T\u0130ZEN")
+    guarded = [tf.extract_salary(x) for x in texts]
+    monkeypatch.setattr(tf, "_may", lambda kind, low: True)   # prefilter off: the plain regex path
+    assert [tf.extract_salary(x) for x in texts] == guarded
+    assert any(g is not None for g in guarded)
+
+
+def test_fold_table_covers_every_ignorecase_alias_of_needle_characters():
+    """Scan all of Unicode: any character that re.IGNORECASE matches to a character used in a prefilter needle must
+    become that character under textflags._low, otherwise the prefilter could skip a real match."""
+    import re
+
+    from job_apply_mcp.platforms import textflags as tf
+
+    needle_chars = {ch for words in tf._NEEDS.values() for w in words for ch in w}
+    union = re.compile("[" + re.escape("".join(sorted(needle_chars))) + "]", re.IGNORECASE)
+    for cp in range(0x110000):
+        c = chr(cp)
+        if 0xD800 <= cp <= 0xDFFF or not union.fullmatch(c):
+            continue
+        targets = [n for n in needle_chars if re.fullmatch(re.escape(n), c, re.IGNORECASE)]
+        assert tf._low(c) in targets, (hex(cp), targets)

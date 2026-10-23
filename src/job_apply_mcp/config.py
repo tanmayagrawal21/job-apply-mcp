@@ -39,7 +39,7 @@ def _default_host_limits() -> dict[str, HostLimitCfg]:
 
 
 class ConcurrencyCfg(BaseModel):
-    global_limit: int = 32          # max concurrent outbound tasks (board fan-out)
+    global_limit: int = 48          # max concurrent outbound tasks (board fan-out); >= the per-host caps summed
     per_host: int = 4               # max concurrent requests per host
     min_interval_s: float = 0.25    # polite spacing per host
     hosts: dict[str, HostLimitCfg] = Field(default_factory=_default_host_limits)   # per-host overrides of the two knobs above
@@ -128,6 +128,8 @@ class LLMCfg(BaseModel):
         "review": "You review application drafts for specificity, accuracy and tone.",
     })
     heavy_parallel: int = 1         # concurrent calls to `heavy` local models (one big model resident on 16 GB)
+    # Task classes whose LOCAL calls always share the heavy semaphore, whatever the tier's `heavy` flag (ADR-0041).
+    heavy_classes: list[str] = Field(default_factory=lambda: ["narrative", "review"])
     providers: dict[str, dict[str, Any]] = Field(default_factory=lambda: {
         "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
@@ -228,6 +230,22 @@ class GrantsCfg(BaseModel):
     max_uses_cap: int = 1000                      # upper bound for --max-uses
     otp_window_min: int = 10                      # otp_assist reads only a message newer than this
     use_keyring: bool = True                      # store the HMAC secret in the OS keychain when available; only the user config file may disable it
+    # consent window (ADR-0048): `job-apply-mcp consent --for 24h|--per-run`; raising either cap is user-config only
+    consent_max_duration_s: int = 7 * 86400       # longest window `consent --for` will issue (a week)
+    consent_per_run_max_s: int = GRANT_MAX_DURATION_S   # a --per-run consent also expires after this
+    otp_unattended_wait_s: int = 180              # otp_unattended: how long to wait for the code mail before `unknown`
+    otp_poll_s: int = 15                          # otp_unattended: mail poll interval while waiting
+
+
+class AccountsCfg(BaseModel):
+    """ATS logins and accounts from the OS-keychain vault (ADR-0046). Every use also needs an open consent window
+    (`consent.active(settings, "credentials")`). Secrets are never in config: only `job-apply-mcp vault add` writes
+    them, into the keychain."""
+
+    max_login_attempts: int = Field(2, ge=1, le=2)  # per host per run; a lockout or wrong password stops the host
+    auto_create: bool = False           # USER CONFIG FILE ONLY: create an ATS account when no vault entry exists
+    signup_email: str = ""              # username for new accounts; "" = the email answer of the application form
+    password_length: int = Field(24, ge=20, le=64)
 
 
 class PathsCfg(BaseModel):
@@ -287,6 +305,7 @@ class ApplyCfg(BaseModel):
     plan_ttl_s: int = 1800              # how long a plan (and its token) stays valid
     context_chars: int = 900            # cap on the posting summary inside client_tasks
     plan_workers: int = 4               # concurrent planners; separate from browser_workers (pipelining)
+    plan_workers_deferred: int = 16     # concurrent planners when prose is deferred (no narrative calls; ADR-0045)
     write_optional: bool = False        # also write optional long free-text fields (default: skip them)
     option_min_score: float = 0.78      # fuzzy option snap threshold; below it the field stays unresolved
     top_languages: int = 3              # "select the languages you are most proficient in": at most this many (ADR-0030)
@@ -303,6 +322,7 @@ class BrowserCfg(BaseModel):
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
     timeout_s: float = 30.0
     upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)
+    hydrate_wait_s: float = 10.0        # server-rendered forms: wait for the JS app to take over before typing (ADR-0039)
     confirmation_wait_s: float = 10.0
     evidence: bool = True               # screenshot + text + errors + submit responses under <data_dir>/evidence/<ref-hash>/
     evidence_text_chars: int = 20000    # cap on saved visible page text
@@ -332,6 +352,7 @@ class VerificationCfg(BaseModel):
     min_length: int = 4                 # format bounds when the page's input declares none
     max_length: int = 12
     typing_delay_ms: int = 60           # real keystroke cadence when entering the code
+    trusted_authserv_ids: list[str] = Field(default_factory=list)   # otp_unattended: Authentication-Results ids of YOUR mail server(s); empty = unattended codes OFF; trusted user config only (ADR-0048)
 
 
 class WritingCfg(BaseModel):
@@ -351,6 +372,13 @@ class WritingCfg(BaseModel):
     paragraphs_max: int = 6
     max_rounds: int = 3
     reviewer: str = "client"            # "client" = review is a client_task; "router" = task_class="review"
+    # Hard wall-clock budget (seconds) for ALL prose fields of one plan: writer and reviewer rounds together.
+    # Unfinished fields come back as client_tasks marked `timed_out` with any partial draft (ADR-0041). <=0 = off.
+    timeout_s: float = 90.0
+    # "inline": plan_application drafts prose. "deferred": plan lists prose as client_tasks and the separate
+    # draft_answers tool runs writer + reviewer later, so batch planning stays fast (ADR-0041).
+    mode: Literal["inline", "deferred"] = "inline"
+    review_client_prose: bool = True    # agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044)
     rules: list[str] = Field(default_factory=lambda: [
         "Formal register; no contractions.",
         "Every factual claim must map to a provided profile fact.",
@@ -376,6 +404,7 @@ class PlatformsCfg(BaseModel):
     <api_key_env_prefix>_<PLATFORM>_<BOARD> (e.g. JOB_APPLY_KEY_GREENHOUSE_ACMECO)."""
     cache_ttl_s: int = 900                  # on-disk HTTP cache freshness; stale entries are revalidated by ETag
     cache_prune_days: int = 7               # cache files untouched for this long are deleted at startup
+    memo_boards: int = 4096                 # boards whose finished postings stay in memory between searches (ADR-0043)
     timeout_s: float = 20.0
     retries: int = 2                        # idempotent requests only; form submissions are never retried
     backoff_s: float = 0.5
@@ -448,6 +477,7 @@ class SearchCfg(BaseModel):
     location_order: list[str] = Field(default_factory=list)  # preferred location substrings, best first
     rank_candidates: int = 40            # description-fetch + full scoring for the top N by the cheap pre-score
     description_concurrency: int = 6     # bounded parallel description fetches (also capped by the host limiter)
+    board_timeout_s: float = 60.0        # one board's fetch+parse budget; a slower board is reported in errors (ADR-0043)
     min_score: float = 0.0               # drop rows scoring below this (0-100); 0 keeps everything with a query hit
     weights: dict[str, float] = Field(default_factory=lambda: {
         "query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency": 1.0})
@@ -469,7 +499,65 @@ class DedupeCfg(BaseModel):
     title_threshold: float = Field(0.6, ge=0.0, le=1.0)    # token-Jaccard for the company+title fallback
 
 
+class IntakeMailCfg(BaseModel):
+    """Job links the user emailed (ADR-0045). Read-only: the mailbox is never modified."""
+    enabled: bool = True
+    source: str | None = None           # mbox | imap | client; None -> ingest.source
+    path: str | None = None             # mbox file or .eml directory; None -> ingest.path
+    sender: str = "self"                # "self" or one of your own full addresses (self_address / self_aliases)
+    recipient: str = "self"             # "self" or one of your own full addresses (self_address / self_aliases)
+    self_address: str = ""              # "" -> the profile's contact email, else $<ingest.imap.user_env>
+    self_aliases: list[str] = Field(default_factory=list)   # your other full addresses that count as "self"
+    query: str = ""                     # case-insensitive text the subject or body must contain (IMAP: TEXT)
+    label: str = ""                     # IMAP folder / Gmail label to EXAMINE; mbox: X-Gmail-Labels header (config only)
+    since_days: int = 14
+    since: str | None = None            # YYYY-MM-DD; wins over since_days
+    max_messages: int = 200
+    max_links_per_message: int = 20
+    peek_bytes: int = 65536             # IMAP BODY.PEEK partial fetch size
+    job_url_patterns: list[str] = Field(default_factory=lambda: [
+        r"/jobs?(/|$|\?)", r"/careers?(/|$|\?)", r"/positions?/", r"/openings?/", r"/vacanc", r"/requisitions?/",
+        r"/job-?postings?/", r"/apply(/|$|\?)", r"[?&](gh_jid|jobid|job_id|jid|reqid|req_id)="])
+    ignore_url_patterns: list[str] = Field(default_factory=lambda: [
+        r"unsubscribe", r"/preferences", r"\.(png|jpe?g|gif|svg|css|js)(\?|$)", r"/privacy", r"/terms"])
+
+
+class IntakeDiscoveryCfg(BaseModel):
+    query: str = ""
+    boards: list[str] = Field(default_factory=list)
+    platforms: list[str] = Field(default_factory=list)
+    location: str = ""
+    since_days: int = 7
+
+
+class IntakeCfg(BaseModel):
+    """run_applications (ADR-0045): explicit links, emailed links and discovery through one pipeline."""
+    sources: list[str] = Field(default_factory=lambda: ["links", "mail", "discovery"])
+    max_applications: int = Field(10, ge=1)     # default per run; the caller or run_size feedback may change it
+    max_applications_cap: int = Field(50, ge=1)  # upper bound for any per-run value
+    plan_factor: float = Field(3.0, ge=1.0)     # candidates planned per run = ceil(max_applications * plan_factor)
+    submit_parallel: int = Field(4, ge=1)       # global concurrent submits; always at most 1 per host
+    writing_mode: Literal["inline", "deferred"] = "deferred"   # batch runs never block on prose
+    report_rows: int = 20                       # rows per category in compact reports
+    salary_max_multiple: float = Field(3.0, ge=0)   # feedback never raises an ask above this x the largest configured salary value (0 = off)
+    mail: IntakeMailCfg = Field(default_factory=IntakeMailCfg)
+    discovery: IntakeDiscoveryCfg = Field(default_factory=IntakeDiscoveryCfg)
+
+
+class PersonaCfg(BaseModel):
+    """Profile builder (ADR-0047): gap collection, stored answers and interactive questions."""
+    enabled: bool = True              # record gaps and apply stored answers/persona policies
+    ask_on_start: bool = True         # ask the top gaps once, at the start of a session, if the client can elicit
+    ask_limit: int = 5                # questions per interactive round
+    min_hits: int = 1                 # a gap must have been seen on this many applications to be asked
+
+
 class Settings(BaseModel):
+    # ADR-0048: False when the mail settings otp_unattended relies on (sender domains, mail source, IMAP server,
+    # trusted authserv ids) came from anything but the trusted user config. Fail closed: False until load_settings
+    # has verified them; programmatic Settings must opt in explicitly.
+    _otp_mail_trusted: bool = PrivateAttr(default=False)
+    persona: PersonaCfg = Field(default_factory=PersonaCfg)
     search: SearchCfg = Field(default_factory=SearchCfg)
     dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
     improve: ImproveCfg = Field(default_factory=ImproveCfg)
@@ -487,6 +575,8 @@ class Settings(BaseModel):
     tune: TuneCfg = Field(default_factory=TuneCfg)
     ingest: IngestCfg = Field(default_factory=IngestCfg)
     grants: GrantsCfg = Field(default_factory=GrantsCfg)
+    intake: IntakeCfg = Field(default_factory=IntakeCfg)
+    accounts: AccountsCfg = Field(default_factory=AccountsCfg)
     platforms_enabled: list[str] = Field(default_factory=lambda: ["greenhouse", "lever", "ashby",
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this
@@ -556,9 +646,19 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("grants", "max_uses_cap"): _raises,
     ("grants", "otp_window_min"): _raises,
     ("grants", "use_keyring"): _bool_off,
+    ("grants", "consent_max_duration_s"): _raises,          # ADR-0048
+    ("grants", "consent_per_run_max_s"): _raises,
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
+    ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
+    ("accounts", "auto_create"): _bool_on,                                                        # ADR-0046
+    ("accounts", "max_login_attempts"): _raises,
 }
+# Whose mail feeds automatic applications (ADR-0045): identity keys, so ANY change from the trusted baseline counts as
+# relaxing. Only the trusted user config may set them; a project file or JOB_APPLY__* cannot point "self" elsewhere.
+for _k in ("sender", "recipient", "self_address", "self_aliases"):
+    _RELAXES[("intake.mail", _k)] = lambda new, base: new != base
+_RELAXES[("ingest.imap", "user_env")] = lambda new, base: new != base   # fallback source of the "self" address
 
 # Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy
 # spelling and takes precedence when set, so it is guarded too.
@@ -594,7 +694,9 @@ def _stricter_cap(a: int, b: int) -> int:
 
 
 def _adapter(sect: str | None, key: str) -> TypeAdapter:
-    model: type[BaseModel] = Settings.model_fields[sect].annotation if sect else Settings  # type: ignore[assignment]
+    model: type[BaseModel] = Settings
+    for part in (sect.split(".") if sect else []):   # dotted sections: "intake.mail"
+        model = model.model_fields[part].annotation  # type: ignore[assignment]
     return TypeAdapter(model.model_fields[key].annotation)
 
 
@@ -607,8 +709,32 @@ def _typed(adapter: TypeAdapter, v: Any) -> Any:
         return _INVALID
 
 
+def _obj(s: Any, sect: str | None) -> Any:
+    for part in (sect.split(".") if sect else []):
+        s = getattr(s, part)
+    return s
+
+
+def _section(d: dict, sect: str | None) -> Any:
+    """The raw dict for a (dotted) section, or None."""
+    for part in (sect.split(".") if sect else []):
+        d = d.get(part) if isinstance(d, dict) else None
+    return d
+
+
+def _drop(d: dict, sect: str | None, key: str) -> dict:
+    """Copy of `d` without sect.key (dotted sections rebuilt along the path)."""
+    if not sect:
+        return {k: v for k, v in d.items() if k != key}
+    head, _, rest = sect.partition(".")
+    sub = d.get(head)
+    if not isinstance(sub, dict):
+        return d
+    return {**d, head: _drop(sub, rest or None, key)}
+
+
 def _get(s: Settings, sect: str | None, key: str) -> Any:
-    return getattr(getattr(s, sect) if sect else s, key)
+    return getattr(_obj(s, sect), key)
 
 
 def _quota_params(d: dict) -> dict:
@@ -631,7 +757,7 @@ def _relaxations(d: dict, base: Settings) -> tuple[list[tuple[str | None, str, A
     """Guarded keys in raw layer `d` whose typed value relaxes `base`: ([(sect, key, raw)], [(quota_key, raw)])."""
     hits = []
     for (sect, key), relaxes in _RELAXES.items():
-        tgt = d.get(sect) if sect else d
+        tgt = _section(d, sect)
         if isinstance(tgt, dict) and key in tgt:
             v = _typed(_adapter(sect, key), tgt[key])
             if v is not _INVALID and relaxes(v, _get(base, sect, key)):
@@ -697,10 +823,7 @@ def _restrict(d: dict, source: str, base: Settings | None = None) -> dict:
     for sect, key, raw in hits:
         log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
                     f"{sect}." if sect else "", key, raw, source)
-        if sect:
-            out[sect] = {k: v for k, v in out[sect].items() if k != key}
-        else:
-            out = {k: v for k, v in out.items() if k != key}
+        out = _drop(out, sect, key)
     return out
 
 
@@ -710,7 +833,7 @@ def _enforce(s: Settings, base: Settings) -> None:
         if relaxes(_get(s, sect, key), _get(base, sect, key)):
             log.error("%s%s=%r relaxed past the user config; reset to %r", f"{sect}." if sect else "", key,
                       _get(s, sect, key), _get(base, sect, key))
-            setattr(getattr(s, sect) if sect else s, key, _get(base, sect, key))
+            setattr(_obj(s, sect), key, _get(base, sect, key))
     q = s.control.params.get("quota")
     if isinstance(q, dict):
         for k in LEGACY_QUOTA_KEYS:
@@ -719,6 +842,12 @@ def _enforce(s: Settings, base: Settings) -> None:
                 if v is None or _loosens(v, _legacy_base(base, k)):
                     log.error("control.params.quota.%s=%r relaxed past the user config; reset", k, q[k])
                     q[k] = _legacy_base(base, k)
+
+
+def _mail_view(s: Settings) -> tuple:
+    """Everything otp_unattended trusts to pick the code mail (ADR-0048)."""
+    return (dict(s.verification.sender_domains), list(s.verification.trusted_authserv_ids), s.ingest.source,
+            s.ingest.path, s.ingest.imap.model_dump())
 
 
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
@@ -763,6 +892,10 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     data = _deep_merge(data, _restrict(edata, "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
     _enforce(s, base)
+    s._otp_mail_trusted = _mail_view(s) == _mail_view(base) and (trusted_user or _mail_view(base) == _mail_view(defaults))
+    if not s._otp_mail_trusted:
+        log.info("otp_unattended disabled: mail settings come from a project file, the environment or an untrusted "
+                 "user config (ADR-0048)")
     if trusted_user:     # log which settings the trusted user file relaxed relative to the built-in defaults
         hits, qhits = _relaxations(udata, defaults)
         for sect, key, raw in hits:

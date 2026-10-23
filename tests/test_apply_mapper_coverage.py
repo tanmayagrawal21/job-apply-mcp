@@ -24,15 +24,15 @@ def prof(**over) -> ProfileView:
         "skill_years": {"Python": 5, "aws": 2.5},
         "languages": ["Python", "Go", "Rust", "Haskell"],
         "skills": ["Python"],
-        "authorization": Authorization(work_authorized=True, requires_sponsorship=True, citizen=False),
+        "authorization": Authorization(home_country="US", work_authorized=True, requires_sponsorship=True, citizen=False),
         "preferences": Preferences(willing_to_relocate=True, open_to_hybrid=True),
     }
     base.update(over)
     return ProfileView(Profile(**base), Settings())
 
 
-def run(f, p=None, company="Acme Robotics"):
-    r = map_fields([f], p or prof(), company=company)
+def run(f, p=None, company="Acme Robotics", job_in_us=False):
+    r = map_fields([f], p or prof(), company=company, job_in_us=job_in_us)
     return ({a.key: a.value for a in r.answers}.get(f.key), [x.key for x in r.unresolved])
 
 
@@ -55,8 +55,10 @@ def test_authorized_yes(label):
     "Will you need visa sponsorship?",
     "Do you now or will you in the future require immigration sponsorship by the company for continued work-authorization?\n"])
 def test_sponsorship_yes_never_flips(label):
-    assert run(sel(label))[0] == "Yes"
-    assert run(sel(label), prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False)))[0] == "No"
+    assert run(sel(label), job_in_us=True)[0] == "Yes"
+    no = prof(authorization=Authorization(home_country="US", work_authorized=True, requires_sponsorship=False))
+    assert run(sel(label), no, job_in_us=True)[0] == "No"
+    assert run(sel(label))[0] is None          # ADR-0040: names no place and the job is not confirmed US
 
 
 @pytest.mark.parametrize("label", [
@@ -65,7 +67,7 @@ def test_sponsorship_yes_never_flips(label):
     "Can you work in the US and not require sponsorship?"])
 def test_negated_sponsorship_flips_correctly(label):
     assert run(sel(label))[0] == "No"          # requires sponsorship -> cannot work without it
-    ok = prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False))
+    ok = prof(authorization=Authorization(home_country="US", work_authorized=True, requires_sponsorship=False))
     assert run(sel(label), ok)[0] == "Yes"
 
 
@@ -74,14 +76,15 @@ def test_compound_two_part_question_is_unresolved():
 
 
 def test_sponsorship_unknown_stays_unresolved():
-    p = prof(authorization=Authorization())
+    p = prof(authorization=Authorization(home_country="US"))
     assert run(sel("Will you require visa sponsorship?"), p) == (None, ["q"])
 
 
-def test_authorization_falls_back_to_answers_patterns():
-    p = prof(authorization=Authorization(), answers={"eligible to work": "Yes", "require sponsorship": "Yes"})
-    assert run(sel("Are you eligible to work in the US?"), p)[0] == "Yes"
-    assert run(sel("Do you now or will you in the future require immigration sponsorship"), p)[0] == "Yes"
+def test_authorization_never_falls_back_to_answers_patterns():
+    # ADR-0050 (#70): flat [answers] patterns never answer authorization or sponsorship, even on a home-country job
+    p = prof(authorization=Authorization(home_country="US"), answers={"eligible to work": "Yes", "require sponsorship": "Yes"})
+    assert run(sel("Are you eligible to work in the US?"), p)[0] is None
+    assert run(sel("Do you now or will you in the future require immigration sponsorship"), p, job_in_us=True)[0] is None
 
 
 COUNTRY = ["I am a citizen of this country", "I have permission to work here but will require sponsorship",
@@ -93,17 +96,20 @@ def test_country_where_you_live_variant_snaps_to_consistent_option():
     assert run(sel("Your authorization to work in the country where you live. Please select", COUNTRY))[0] is None
     assert run(sel("Can you work here and not require sponsorship?"))[0] is None
     f = sel("Your authorization to work in the United States. Please select", COUNTRY)
-    assert run(f)[0] == COUNTRY[1]
-    no_spons = prof(authorization=Authorization(work_authorized=True, requires_sponsorship=False))
-    assert run(f, no_spons)[0] == COUNTRY[3]
-    assert run(f, prof(authorization=Authorization(work_authorized=True)))[0] is None
+    # ADR-0040: an option naming a citizenship status makes it a legal-status question -> owner, never a rule guess
+    assert run(f)[0] is None
+    g = sel("Your authorization to work in the United States. Please select", COUNTRY[1:])
+    assert run(g)[0] == COUNTRY[1]
+    no_spons = prof(authorization=Authorization(home_country="US", work_authorized=True, requires_sponsorship=False))
+    assert run(g, no_spons)[0] == COUNTRY[3]
+    assert run(g, prof(authorization=Authorization(home_country="US", work_authorized=True)))[0] is None
     assert pick_auth_option(COUNTRY, True, True, True) in (None, COUNTRY[0], COUNTRY[1])  # citizen option only if citizen
     assert pick_auth_option([COUNTRY[0], COUNTRY[2]], True, True, False) is None
 
 
 def test_us_citizen_never_yes_without_fact():
     assert run(sel("Are you a US citizen?"))[0] == "No"
-    assert run(sel("Are you a US citizen?"), prof(authorization=Authorization(work_authorized=True)))[0] is None
+    assert run(sel("Are you a US citizen?"), prof(authorization=Authorization(home_country="US", work_authorized=True)))[0] is None
     assert run(sel("Are you a US citizen or permanent resident?"))[0] is None
 
 

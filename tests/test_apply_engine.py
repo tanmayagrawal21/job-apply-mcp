@@ -65,7 +65,8 @@ async def test_low_confidence_invalid_and_sensitive_fields_never_answered_by_llm
     out = await e.plan(POSTING.ref)
     assert out.plan.answers == []                       # invalid option, low confidence, and sensitive: all rejected
     assert set(out.plan.unresolved) == {"a", "b", "c", "d"}
-    assert '"a"' not in r.calls[0][1] and '"c"' not in r.calls[0][1]
+    # ADR-0040: "Pick one" and "Nickname" are not on the short-answer allowlist, so no model call is made at all
+    assert not r.calls or ('"a"' not in r.calls[0][1] and '"c"' not in r.calls[0][1])
 
 
 async def test_prose_pipeline_used_for_long_text_when_available():
@@ -162,6 +163,25 @@ async def test_falls_back_to_browser_and_unsupported_site_fallback():
     r = await e.submit(POSTING.ref, {"q_why": "t"}, None, dry_run=False)
     assert r.status == "submitted" and r.via == "browser" and len(pw.calls) == 1 and len(agent.calls) == 1
     assert agent.calls[0][2] == {"resume": "/tmp/resume.pdf"}
+
+
+async def test_browser_driver_gets_dom_only_context(monkeypatch):
+    """ADR-0039: the driver learns the profile country (phone widget) and the privacy-ack opt-in, nothing more."""
+    monkeypatch.setitem(FakeProfile.VALUES, "country", "Canada")
+    monkeypatch.setitem(FakeProfile.VALUES, "acknowledge_privacy_notices", True)
+    ad = FakeAdapter(submit_status="needs_browser")
+    pw = FakeDriver(status="submitted")
+    e, _ = engine(adapter=ad, router=_full_router(), apply__auto_approve=True, writing__max_rounds=1,
+                  drivers={"playwright": pw})
+    await e.submit(POSTING.ref, {"q_why": "t"}, None, dry_run=False)
+    sent = pw.calls[0][1]
+    assert sent["contact:country"] == "Canada" and sent["pref:acknowledge_privacy_notices"] is True
+    monkeypatch.setitem(FakeProfile.VALUES, "acknowledge_privacy_notices", "yes")   # only a real True opts in
+    pw2 = FakeDriver(status="submitted")
+    e2, _ = engine(adapter=FakeAdapter(submit_status="needs_browser"), router=_full_router(), apply__auto_approve=True,
+                   writing__max_rounds=1, drivers={"playwright": pw2})
+    await e2.submit(POSTING.ref, {"q_why": "t"}, None, dry_run=False)
+    assert pw2.calls[0][1]["pref:acknowledge_privacy_notices"] is False
 
 
 async def test_no_driver_installed_is_needs_human():

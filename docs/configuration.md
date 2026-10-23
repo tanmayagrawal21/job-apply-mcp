@@ -4,7 +4,7 @@
 
 Settings load in this order, later wins: built-in defaults, the user file (`~/.config/job-apply-mcp/config.toml`, `%APPDATA%\job-apply-mcp\config.toml` on Windows, or `$JOB_APPLY_MCP_CONFIG`), `./job-apply-mcp.toml`, then environment variables `JOB_APPLY__SECTION__KEY=value` (double underscore nests, e.g. `JOB_APPLY__LLM__ALLOW_CLOUD=false`). Secrets (API keys, IMAP passwords) are only ever read from the environment.
 
-**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, raising `grants.*` caps, `grants.use_keyring=false`, `browser.captcha_handoff=false`, `browser.captcha_policy=attempt`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter than your user config (or the default where it is silent). Values are compared after type coercion, so `"false"` or `"0"` count the same as `false` / `0` (ADR-0037).
+**Trust model (ADR-0021):** security-relaxing values (`apply.approval_mode`, `apply.auto_approve`, `dry_run=false`, `control.apply_enabled=true`, `control.dev_mode=false`, raising `grants.*` caps, `grants.use_keyring=false`, `browser.captcha_handoff=false`, `browser.captcha_policy=attempt`, `writing.review_client_prose=false`) are honored only from the platform-default user config, owned by you and not group/world-writable. A file selected via `JOB_APPLY_MCP_CONFIG`, the project file and `JOB_APPLY__*` env can only make them stricter than your user config (or the default where it is silent). Values are compared after type coercion, so `"false"` or `"0"` count the same as `false` / `0` (ADR-0037).
 
 **Submission caps (ADR-0035):** `apply.daily_limit` (25), `apply.daily_limit_per_platform` (10) and `apply.run_limit` (10) cap LIVE submits (dry runs never count). **`0` means no limit and removes that safety cap.** The legacy `control.params.quota.per_day` / `per_platform_per_day` / `per_run` keys still work, win when set, and also take `0` for off. Lowering a cap is accepted from any source; raising it above the default or setting `0` is honored only from the trusted user config; a project or env value can never raise your own user-config cap (same rule as the trust model above). `control_status` (MCP) and `job-apply-mcp doctor` show limits, used in the last 24h and remaining.
 
@@ -17,6 +17,17 @@ Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to 
 | `platforms_enabled` | `list[str]` | `["greenhouse", "lever", "ashby", "smartrecruiters", "workday", "generic"]` |  |
 | `dry_run` | `bool` | `true` | safe default: nothing is submitted until the user flips this |
 | `response_budget_chars` | `int` | `4000` | tools truncate/paginate to stay under this |
+
+## `[persona]`
+
+Profile builder (ADR-0047): gap collection, stored answers and interactive questions.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | `bool` | `true` | record gaps and apply stored answers/persona policies |
+| `ask_on_start` | `bool` | `true` | ask the top gaps once, at the start of a session, if the client can elicit |
+| `ask_limit` | `int` | `5` | questions per interactive round |
+| `min_hits` | `int` | `1` | a gap must have been seen on this many applications to be asked |
 
 ## `[search]`
 
@@ -31,6 +42,7 @@ Relevance ranking for search_jobs (ADR-0022). Everything is deterministic unless
 | `location_order` | `list[str]` | `[]` | preferred location substrings, best first |
 | `rank_candidates` | `int` | `40` | description-fetch + full scoring for the top N by the cheap pre-score |
 | `description_concurrency` | `int` | `6` | bounded parallel description fetches (also capped by the host limiter) |
+| `board_timeout_s` | `float` | `60.0` | one board's fetch+parse budget; a slower board is reported in errors (ADR-0043) |
 | `min_score` | `float` | `0.0` | drop rows scoring below this (0-100); 0 keeps everything with a query hit |
 | `weights` | `dict[str, float]` | `{"query": 4.0, "skills": 2.0, "seniority": 1.0, "location": 1.0, "comp": 1.0, "recency"...` |  |
 | `recency_half_life_days` | `float` | `14.0` |  |
@@ -83,7 +95,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `global_limit` | `int` | `32` | max concurrent outbound tasks (board fan-out) |
+| `global_limit` | `int` | `48` | max concurrent outbound tasks (board fan-out); >= the per-host caps summed |
 | `per_host` | `int` | `4` | max concurrent requests per host |
 | `min_interval_s` | `float` | `0.25` | polite spacing per host |
 | `hosts` | `dict[str, HostLimitCfg]` | `{"boards-api.greenhouse.io": {"per_host": 16, "min_interval_s": 0.02}, "api.ashbyhq.com...` | per-host overrides of the two knobs above |
@@ -108,6 +120,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `warmup_tiers` | `list[str]` | `["small"]` | tiers/task tiers to preload |
 | `system_prefix` | `dict[str, str]` | `{"field": "You fill job application forms. Answer concisely and factually. No preamble....` |  |
 | `heavy_parallel` | `int` | `1` | concurrent calls to `heavy` local models (one big model resident on 16 GB) |
+| `heavy_classes` | `list[str]` | `["narrative", "review"]` |  |
 | `providers` | `dict[str, dict[str, Any]]` | `{"ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"}, "openai_compat"...` |  |
 
 ## `[policy]`
@@ -166,6 +179,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `plan_ttl_s` | `int` | `1800` | how long a plan (and its token) stays valid |
 | `context_chars` | `int` | `900` | cap on the posting summary inside client_tasks |
 | `plan_workers` | `int` | `4` | concurrent planners; separate from browser_workers (pipelining) |
+| `plan_workers_deferred` | `int` | `16` | concurrent planners when prose is deferred (no narrative calls; ADR-0045) |
 | `write_optional` | `bool` | `false` | also write optional long free-text fields (default: skip them) |
 | `option_min_score` | `float` | `0.78` | fuzzy option snap threshold; below it the field stays unresolved |
 | `top_languages` | `int` | `3` | "select the languages you are most proficient in": at most this many (ADR-0030) |
@@ -183,6 +197,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `channel` | `str \| None` | `none` | e.g. "chrome" to use the installed Chrome |
 | `timeout_s` | `float` | `30.0` |  |
 | `upload_settle_s` | `float` | `4.0` | wait after a resume upload (parsers re-render the form) |
+| `hydrate_wait_s` | `float` | `10.0` | server-rendered forms: wait for the JS app to take over before typing (ADR-0039) |
 | `confirmation_wait_s` | `float` | `10.0` |  |
 | `evidence` | `bool` | `true` | screenshot + text + errors + submit responses under <data_dir>/evidence/<ref-hash>/ |
 | `evidence_text_chars` | `int` | `20000` | cap on saved visible page text |
@@ -212,6 +227,7 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `min_length` | `int` | `4` | format bounds when the page's input declares none |
 | `max_length` | `int` | `12` |  |
 | `typing_delay_ms` | `int` | `60` | real keystroke cadence when entering the code |
+| `trusted_authserv_ids` | `list[str]` | `[]` | otp_unattended: Authentication-Results ids of YOUR mail server(s); empty = unattended codes OFF; trusted user config only (ADR-0048) |
 
 ## `[writing]`
 
@@ -232,6 +248,9 @@ Human-provided email/SMS verification codes after a submit click (ADR-0026). The
 | `paragraphs_max` | `int` | `6` |  |
 | `max_rounds` | `int` | `3` |  |
 | `reviewer` | `str` | `"client"` | "client" = review is a client_task; "router" = task_class="review" |
+| `timeout_s` | `float` | `90.0` |  |
+| `mode` | `Literal['inline', 'deferred']` | `"inline"` |  |
+| `review_client_prose` | `bool` | `true` | agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044) |
 | `rules` | `list[str]` | `["Formal register; no contractions.", "Every factual claim must map to a provided profi...` |  |
 | `banned_phrases` | `list[str]` | `["excited", "passionate", "thrilled", "delighted", "love to", "drew me", "drawn to", "w...` |  |
 | `gap_patterns` | `list[str]` | `["\\bI have not\\b", "\\bI haven't\\b", "\\bI lack\\b", "\\bI would need to learn\\b", ...` |  |
@@ -244,6 +263,7 @@ Platform adapter knobs (ADR-0007). API keys are never here: they come from the e
 |---|---|---|---|
 | `cache_ttl_s` | `int` | `900` | on-disk HTTP cache freshness; stale entries are revalidated by ETag |
 | `cache_prune_days` | `int` | `7` | cache files untouched for this long are deleted at startup |
+| `memo_boards` | `int` | `4096` | boards whose finished postings stay in memory between searches (ADR-0043) |
 | `timeout_s` | `float` | `20.0` |  |
 | `retries` | `int` | `2` | idempotent requests only; form submissions are never retried |
 | `backoff_s` | `float` | `0.5` |  |
@@ -340,6 +360,36 @@ Human-signed, time-limited grants (ADR-0027). Raising either cap is honored only
 | `max_uses_cap` | `int` | `1000` | upper bound for --max-uses |
 | `otp_window_min` | `int` | `10` | otp_assist reads only a message newer than this |
 | `use_keyring` | `bool` | `true` | store the HMAC secret in the OS keychain when available; only the user config file may disable it |
+| `consent_max_duration_s` | `int` | `604800` | longest window `consent --for` will issue (a week) |
+| `consent_per_run_max_s` | `int` | `43200` | a --per-run consent also expires after this |
+| `otp_unattended_wait_s` | `int` | `180` | otp_unattended: how long to wait for the code mail before `unknown` |
+| `otp_poll_s` | `int` | `15` | otp_unattended: mail poll interval while waiting |
+
+## `[intake]`
+
+run_applications (ADR-0045): explicit links, emailed links and discovery through one pipeline.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `sources` | `list[str]` | `["links", "mail", "discovery"]` |  |
+| `max_applications` | `int` | `10` | default per run; the caller or run_size feedback may change it |
+| `max_applications_cap` | `int` | `50` | upper bound for any per-run value |
+| `plan_factor` | `float` | `3.0` | candidates planned per run = ceil(max_applications * plan_factor) |
+| `submit_parallel` | `int` | `4` | global concurrent submits; always at most 1 per host |
+| `writing_mode` | `Literal['inline', 'deferred']` | `"deferred"` | batch runs never block on prose |
+| `report_rows` | `int` | `20` | rows per category in compact reports |
+| `salary_max_multiple` | `float` | `3.0` | feedback never raises an ask above this x the largest configured salary value (0 = off) |
+
+## `[accounts]`
+
+ATS logins and accounts from the OS-keychain vault (ADR-0046). Every use also needs an open consent window (`consent.active(settings, "credentials")`). Secrets are never in config: only `job-apply-mcp vault add` writes them, into the keychain.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_login_attempts` | `int` | `2` | per host per run; a lockout or wrong password stops the host |
+| `auto_create` | `bool` | `false` | USER CONFIG FILE ONLY: create an ATS account when no vault entry exists |
+| `signup_email` | `str` | `""` | username for new accounts; "" = the email answer of the application form |
+| `password_length` | `int` | `24` |  |
 
 ## `[search.sessions]`
 
@@ -436,6 +486,39 @@ Read-only IMAP (ADR-0016). Holds only *names* of environment variables / a keych
 | `senders` | `list[str]` | `[]` | extra FROM terms (union with subjects) |
 | `subjects` | `list[str]` | `["application", "applying", "applied"]` |  |
 | `max_messages` | `int` | `500` |  |
+
+## `[intake.mail]`
+
+Job links the user emailed (ADR-0045). Read-only: the mailbox is never modified.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | `bool` | `true` |  |
+| `source` | `str \| None` | `none` | mbox \| imap \| client; None -> ingest.source |
+| `path` | `str \| None` | `none` | mbox file or .eml directory; None -> ingest.path |
+| `sender` | `str` | `"self"` | "self" or one of your own full addresses (self_address / self_aliases) |
+| `recipient` | `str` | `"self"` | "self" or one of your own full addresses (self_address / self_aliases) |
+| `self_address` | `str` | `""` | "" -> the profile's contact email, else $<ingest.imap.user_env> |
+| `self_aliases` | `list[str]` | `[]` | your other full addresses that count as "self" |
+| `query` | `str` | `""` | case-insensitive text the subject or body must contain (IMAP: TEXT) |
+| `label` | `str` | `""` | IMAP folder / Gmail label to EXAMINE; mbox: X-Gmail-Labels header (config only) |
+| `since_days` | `int` | `14` |  |
+| `since` | `str \| None` | `none` | YYYY-MM-DD; wins over since_days |
+| `max_messages` | `int` | `200` |  |
+| `max_links_per_message` | `int` | `20` |  |
+| `peek_bytes` | `int` | `65536` | IMAP BODY.PEEK partial fetch size |
+| `job_url_patterns` | `list[str]` | `["/jobs?(/\|$\|\\?)", "/careers?(/\|$\|\\?)", "/positions?/", "/openings?/", "/vacanc", "/r...` |  |
+| `ignore_url_patterns` | `list[str]` | `["unsubscribe", "/preferences", "\\.(png\|jpe?g\|gif\|svg\|css\|js)(\\?\|$)", "/privacy", "/t...` |  |
+
+## `[intake.discovery]`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `query` | `str` | `""` |  |
+| `boards` | `list[str]` | `[]` |  |
+| `platforms` | `list[str]` | `[]` |  |
+| `location` | `str` | `""` |  |
+| `since_days` | `int` | `7` |  |
 
 ## Profile `[preferences]` (profile.toml)
 

@@ -17,6 +17,7 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 class OpenAICompatProvider:
     name = "openai_compat"
     supports_options = True
+    supports_timeout = True   # accepts a per-call timeout_s (ADR-0041)
 
     def __init__(self, base_url: str = "", api_key_env: str = "OPENAI_API_KEY", timeout_s: float = 120.0,
                  probe_timeout_s: float = 3.0, local: bool | None = None, extra_headers: dict | None = None, **_):
@@ -49,7 +50,7 @@ class OpenAICompatProvider:
 
     async def complete_ex(self, prompt: str, *, model: str, system: str | None = None, max_tokens: int = 512,
                           temperature: float = 0.2, json_schema: dict | None = None, think: bool = False,
-                          num_ctx: int | None = None) -> Completion:
+                          num_ctx: int | None = None, timeout_s: float | None = None) -> Completion:
         sys_txt = system
         if json_schema:
             hint = "Reply with only JSON matching this schema: " + json.dumps(json_schema, separators=(",", ":"))
@@ -59,7 +60,7 @@ class OpenAICompatProvider:
         msgs = ([{"role": "system", "content": sys_txt}] if sys_txt else []) + [{"role": "user", "content": prompt}]
         body: dict = {"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature}
         url = f"{self.base_url}/chat/completions"
-        async with httpx.AsyncClient(timeout=self.timeout_s) as c:
+        async with httpx.AsyncClient(timeout=timeout_s or self.timeout_s) as c:
             if json_schema:
                 strict = {"type": "json_schema", "json_schema": {"name": "out", "schema": json_schema}}
                 try:

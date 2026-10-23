@@ -46,12 +46,12 @@ def test_no_cards():
 
 
 def _view(**auth):
-    return ProfileView(Profile(authorization=Authorization(work_authorized=True, **auth),
+    return ProfileView(Profile(authorization=Authorization(home_country="US", work_authorized=True, **auth),
                                preferences=Preferences(willing_to_relocate=True)), Settings())
 
 
 def test_mapper_fills_standard_questions_and_defers_prose():
-    r = map_fields(parse_cards(page()), _view(requires_sponsorship=True), company="Springfield Robotics")
+    r = map_fields(parse_cards(page()), _view(requires_sponsorship=True), company="Springfield Robotics", job_in_us=True)
     got = {a.key: a.value for a in r.answers}
     assert got[key(2)] == "Yes" and got[key(3)] == "Yes"             # exact input names, option values as rendered
     assert key(0) in [u.key for u in r.unresolved]                    # prose is left for the client task
@@ -88,7 +88,7 @@ def test_saved_yesno_answer_never_lands_in_preferred_name_field():
     """Regression: saved answer 'referred' -> 'No' matched inside the word 'preferred'."""
     label = ("What is your preferred first name and last name? If your legal first and last name is your "
              "preferred name, you do not need to respond.")
-    prof = Profile(answers={"referred": "No"}, authorization=Authorization(work_authorized=True))
+    prof = Profile(answers={"referred": "No"}, authorization=Authorization(home_country="US", work_authorized=True))
     f = parse_cards(page())[0].model_copy(update={"label": label, "required": False})
     r = map_fields([f], ProfileView(prof, Settings()), company="Springfield Robotics")
     assert r.answers == []

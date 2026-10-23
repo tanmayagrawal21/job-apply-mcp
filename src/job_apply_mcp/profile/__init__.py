@@ -9,8 +9,11 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from ..persona.models import Persona
 
 DECLINE = "Decline to self-identify"
 
@@ -48,11 +51,14 @@ class Work(BaseModel):
     end: str = ""            # empty = current
     location: str = ""
     summary: str = ""
+    kind: str = ""           # full_time | internship | part_time | academic | volunteer | freelance ("" = inferred from title)
 
 
 class Demographics(BaseModel):
-    """Every field defaults to declining to answer."""
+    """Every field defaults to declining to answer. Values are matched to an option exactly (ADR-0040)."""
     gender: str = DECLINE
+    gender_if_required: str = ""        # used instead of `gender` when the gender question is required; "" = `gender`
+    hispanic_latino: str = DECLINE      # the separate "Are you Hispanic or Latino?" question (e.g. "Yes" / "No")
     race_ethnicity: str = DECLINE
     veteran_status: str = DECLINE
     disability_status: str = DECLINE
@@ -76,12 +82,58 @@ class Preferences(BaseModel):
     acknowledge_privacy_notices: bool | None = None
 
 
-class Authorization(BaseModel):
-    """Work-authorization facts. None = not configured (falls back to [answers] patterns)."""
+class CountryAuthorization(BaseModel):
+    """Work-authorization facts for ONE country. None = not configured (the question stays with the owner)."""
     work_authorized: bool | None = None
     requires_sponsorship: bool | None = None
-    citizen: bool | None = None            # US citizenship
+    citizen: bool | None = None
+
+
+class Authorization(BaseModel):
+    """Work-authorization facts, per country (ADR-0040):
+
+        [authorization]            # flat keys: an alias for the home country
+        home_country = "US"        # ISO-2; unset -> derived from [contact].country; neither -> no home country
+        work_authorized = true
+        [authorization.CA]         # any ISO-2 code
+        work_authorized = false
+        requires_sponsorship = true
+    """
+    home_country: str = ""                 # ADR-0050: no US default; see Profile.home_country
+    work_authorized: bool | None = None
+    requires_sponsorship: bool | None = None
+    citizen: bool | None = None            # citizenship of the home country
     citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
+    countries: dict[str, CountryAuthorization] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _collect_countries(cls, data: Any) -> Any:
+        """`[authorization.CA]` tables (ISO-2 keys) go into `countries`."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        countries = dict(out.pop("countries", None) or {})
+        for k in list(out):
+            if re.fullmatch(r"[A-Za-z]{2}", k) and isinstance(out[k], dict):
+                countries[k.upper()] = out.pop(k)
+        out["countries"] = {k.upper(): v for k, v in countries.items()}
+        if "home_country" in out:            # ADR-0050: a confirmed ISO-2 or nothing, never a guessed default
+            from ..apply.places import country_iso
+            out["home_country"] = country_iso(out["home_country"]) or ""
+        return out
+
+    def facts_for(self, country: str) -> CountryAuthorization:
+        """Per-country facts; for the home country, missing per-country values fall back to the flat keys."""
+        c = (country or "").upper()
+        mine = self.countries.get(c, CountryAuthorization())
+        if not self.home_country or c != self.home_country.upper():
+            return mine
+        return CountryAuthorization(
+            work_authorized=mine.work_authorized if mine.work_authorized is not None else self.work_authorized,
+            requires_sponsorship=(mine.requires_sponsorship if mine.requires_sponsorship is not None
+                                  else self.requires_sponsorship),
+            citizen=mine.citizen if mine.citizen is not None else self.citizen)
 
 
 class Profile(BaseModel):
@@ -96,11 +148,22 @@ class Profile(BaseModel):
     preferences: Preferences = Field(default_factory=Preferences)
     authorization: Authorization = Field(default_factory=Authorization)
     answers: dict[str, str] = Field(default_factory=dict)
+    persona: Persona = Field(default_factory=Persona)      # ADR-0047: experience counting, salary policy, projects
     demographics: Demographics = Field(default_factory=Demographics)
     salary: SalaryRules = Field(default_factory=SalaryRules)
     # Groups of interchangeable phrases for [answers] pattern matching (ADR-0011 Amendment 2). Extends the defaults.
     answer_synonyms: list[list[str]] = Field(default_factory=list)
     answer_synonyms_mode: str = "extend"   # "extend" adds to the defaults; "replace" uses only answer_synonyms ([] = off)
+
+    @model_validator(mode="after")
+    def _derive_home_country(self) -> Profile:
+        """ADR-0050: an unset [authorization].home_country comes from [contact].country (name or ISO code) when that
+        is a confirmed ISO-2; otherwise there is no home country and the flat [authorization] keys apply nowhere."""
+        if not self.authorization.home_country:
+            from ..apply.places import country_iso
+            if iso := country_iso(self.contact.country):
+                self.authorization = self.authorization.model_copy(update={"home_country": iso})
+        return self
 
     def education_rows(self) -> list[dict[str, str]]:
         """Generic education list for ATS education blocks, most recent first (ADR-0029). Years are 4-digit strings."""
@@ -135,6 +198,7 @@ class Profile(BaseModel):
         """Answer for EEO-style questions; declines by default. None if not a demographic question."""
         q = normalize_question(question)
         table = {
+            "hispanic": self.demographics.hispanic_latino, "latino": self.demographics.hispanic_latino,
             "gender": self.demographics.gender, "race": self.demographics.race_ethnicity,
             "ethnic": self.demographics.race_ethnicity, "veteran": self.demographics.veteran_status,
             "disabilit": self.demographics.disability_status,
@@ -148,7 +212,9 @@ class Profile(BaseModel):
 
 
 def normalize_question(s: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split())
+    q = " ".join(re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split())
+    # ADR-0050: "opt-in" / "opt out" are one word, so a flat pattern "opt" (the US work program) never matches them
+    return re.sub(r"\bopt (in|out)\b", r"opt\1", q)
 
 
 DEFAULT_ANSWER_SYNONYMS: list[list[str]] = [

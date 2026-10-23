@@ -207,9 +207,10 @@ def test_work_with_does_not_trigger_prior_employee():
 @pytest.mark.parametrize("label", ["Select 'Yes' to join Acme Robotics's Talent Community and receive newsletters",
                                    "Would you like to join our talent network?",
                                    "Sign up for our newsletter"])
-def test_marketing_optins_are_declined(label):
-    assert run(sel(label))[0] == "No"
-    assert run(F("q", label, FieldKind.boolean))[0] is False
+def test_marketing_optins_are_owner_only(label):
+    # ADR-0050 (descoped): no automatic No; the owner (or a stored optin:<channel>) decides
+    assert run(sel(label))[0] is None
+    assert run(F("q", label, FieldKind.boolean))[0] is None
 
 
 def test_consent_and_privacy_acknowledgements_are_left_alone():

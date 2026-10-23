@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import time
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -35,8 +36,10 @@ class Services:
         self._adapters: dict[str, PlatformAdapter] | None = None
         self._store = None
         self._llm = None
+        self._plan_pages: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()   # last plan/draft per ref
         self._skills: list[str] | None = None
         self._desc: dict[str, Posting | None] = {}
+        self._late: set[asyncio.Task] = set()   # timed-out board fetches left to finish into the cache (ADR-0043)
 
     @property
     def improve(self):
@@ -93,7 +96,7 @@ class Services:
             self._http = HttpClient(
                 cache_dir=Path(self.settings.paths.data_dir).expanduser() / "http_cache", ttl_s=p.cache_ttl_s,
                 limiter=self.hosts, timeout_s=p.timeout_s, retries=p.retries, backoff_s=p.backoff_s,
-                user_agent=p.user_agent, prune_days=p.cache_prune_days)
+                user_agent=p.user_agent, prune_days=p.cache_prune_days, memo_entries=p.memo_boards)
         return self._http
 
     @property
@@ -103,6 +106,8 @@ class Services:
         return self._adapters
 
     async def aclose(self) -> None:
+        for t in list(self._late):
+            t.cancel()
         if self._http:
             await self._http.aclose()
 
@@ -133,7 +138,17 @@ class Services:
                 out += [(ads[n], b) for b in cfg.boards.get(n, [])]
             if "jobspy" in names and platforms:
                 out.append((ads["jobspy"], ",".join(cfg.jobspy_sites)))
-        return list(dict.fromkeys((a, b) for a, b in out)), errors
+        return self._interleave(list(dict.fromkeys((a, b) for a, b in out))), errors
+
+    @staticmethod
+    def _interleave(targets: list[tuple[Any, str]]) -> list[tuple[Any, str]]:
+        """Round-robin the targets across platforms (ADR-0043). In config order every global slot first fills with
+        one platform's boards, so that host's per-host cap idles the rest and the hosts run one after another."""
+        by: dict[str, list[tuple[Any, str]]] = {}
+        for t in targets:
+            by.setdefault(getattr(t[0], "name", ""), []).append(t)
+        queues = list(by.values())
+        return [q[i] for i in range(max(map(len, queues), default=0)) for q in queues if i < len(q)]
 
     def _policy_drop(self, p: Posting) -> bool:
         pol, f = self.settings.policy, p.flags
@@ -208,6 +223,8 @@ class Services:
             out["filtered"] = meta["filtered"]
         if meta.get("errors"):
             out["errors"] = meta["errors"][:10]
+        if meta.get("timings"):
+            out["timings"] = meta["timings"]
         budget = self.settings.response_budget_chars   # shrink the page rather than let the server truncate JSON
         while len(page) > 1 and len(json.dumps(out, separators=(",", ":"), default=str)) > budget:
             page.pop()
@@ -225,22 +242,38 @@ class Services:
             return
         since = (datetime.now(UTC).date() - timedelta(days=since_days)).isoformat() if since_days else None
         step = max(1, len(targets) // 50)
+        cfg = self.settings.search
+        t_start, http = time.monotonic(), self.http
+        t0, s0 = dict(http.timings), dict(http.stats)
+        slow: list[tuple[float, str]] = []
+
+        async def collect(a: Any, b: str, kw: dict[str, Any]) -> list[Posting]:
+            return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
 
         async def one(a: Any, b: str) -> list[Posting]:
             kw = {"location": location} if a.name == "jobspy" else {}
-            try:
-                return [p async for p in a.list_postings(b, since=since, query=query, **kw)]
+            t = time.monotonic()
+            task = asyncio.ensure_future(collect(a, b, kw))
+            try:   # per-board budget so one slow board cannot stall the fan-out (ADR-0043)
+                return await asyncio.wait_for(asyncio.shield(task), cfg.board_timeout_s or None)
+            except TimeoutError:
+                # the fetch keeps running so its response lands in the HTTP cache for the next search
+                self._late.add(task)
+                task.add_done_callback(lambda tk: (self._late.discard(tk), tk.cancelled() or tk.exception()))
+                sess.boards_failed += 1
+                raise TimeoutError(f"timed out after {cfg.board_timeout_s:g}s") from None
             except BaseException:
                 sess.boards_failed += 1
                 raise
             finally:
+                slow.append((time.monotonic() - t, f"{a.name}:{b}"))
                 sess.boards_done += 1
                 if progress and (sess.boards_done % step == 0 or sess.boards_done == sess.boards_total):
                     with contextlib.suppress(Exception):   # a broken client channel must not fail the search
                         await progress(sess.boards_done, sess.boards_total)
 
         results = await bounded_gather((one(a, b) for a, b in targets), self.settings.concurrency.global_limit)
-        cfg = self.settings.search
+        t_fetch = time.monotonic()
         terms = [t for t in query.lower().split() if t]
         loc = location.lower().strip()
         rows: list[Posting] = []
@@ -264,11 +297,13 @@ class Services:
                 rows.append(p)
         extra: dict[str, Any] = {}
         scored: dict[str, tuple[float, list[str]]] = {}
+        t_rank = time.monotonic()
         if cfg.rank:
             rows, scored, extra, d2 = await self._rank(rows, query, server_side, apply_policy)
             dropped += d2
         else:
             rows.sort(key=lambda p: (p.posted_at or "", p.ref), reverse=True)
+        t_end = time.monotonic()
         out_rows = []
         for p in rows[: cfg.sessions.max_rows]:
             r = {**p.compact(), "d": p.posted_at}
@@ -276,7 +311,13 @@ class Services:
                 r["score"], r["why"] = scored[p.ref][0], scored[p.ref][1]
             out_rows.append(r)
         sess.rows = out_rows
-        sess.meta = {"extra": extra, "filtered": dropped, "errors": errors}
+        slow.sort(reverse=True)
+        timings = {"total_s": t_end - t_start, "fetch_s": t_fetch - t_start, "filter_s": t_rank - t_fetch,
+                   "rank_s": t_end - t_rank, **{k: http.timings[k] - t0.get(k, 0.0) for k in http.timings}}
+        sess.meta = {"extra": extra, "filtered": dropped, "errors": errors, "timings": {
+            **{k: round(v, 2) for k, v in timings.items()},
+            "n": {k: http.stats[k] - s0.get(k, 0) for k in ("requests", "cache_hits", "memo_hits", "revalidated")},
+            "slowest": [[b, round(d, 1)] for d, b in slow[:3]]}}
 
     # ------------------------------------------------------------------ relevance ranking (ADR-0022)
     def _profile_skills(self) -> list[str]:
@@ -367,8 +408,31 @@ class Services:
             rows.append(r)
         return {"ref": f.ref, "via": f.submit_via, "fields": rows}
 
-    async def plan(self, ref_or_url: str) -> dict[str, Any]:
-        return (await self.engine.plan(ref_or_url)).compact()
+    async def plan(self, ref_or_url: str, cursor: int = 0) -> dict[str, Any]:
+        return await self._paged_plan("plan", ref_or_url, cursor)
+
+    async def draft(self, ref_or_url: str, cursor: int = 0) -> dict[str, Any]:
+        return await self._paged_plan("draft", ref_or_url, cursor)
+
+    async def _paged_plan(self, kind: str, ref: str, cursor: int) -> dict[str, Any]:
+        """plan/draft output in pages (ADR-0049). cursor=0 runs the plan; cursor>0 pages the last result for `ref`
+        from memory (no re-plan, no new approval_id). Every page stays within response_budget_chars."""
+        from .core.output import page_sections
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            raise ValueError(f"cursor must be a whole number >= 0 (got {cursor!r})")
+        pages = self._plan_pages
+        if cursor:
+            full = pages.get((kind, ref))
+            if full is None:
+                raise ValueError(f"no {kind} result in memory for this ref; call it with cursor=0 first")
+        else:
+            out = await (self.engine.plan(ref) if kind == "plan" else self.engine.draft(ref))
+            full = out.compact()
+            pages[(kind, ref)] = full
+            pages.move_to_end((kind, ref))
+            while len(pages) > 32:
+                pages.popitem(last=False)
+        return page_sections(full, cursor, self.settings.response_budget_chars)
 
     async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None,
                      approval_id: str | None = None, approver: Any = None) -> dict[str, Any]:
@@ -378,7 +442,8 @@ class Services:
 
     def _submit_row(self, r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
-               "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t}
+               "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t,
+               "client_tasks": getattr(r, "client_tasks", None)}
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return {k: v for k, v in row.items() if v}
@@ -392,7 +457,11 @@ class Services:
         return await self.engine.resolve_submission(ref, outcome, note, actor, evidence)
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        return {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
+        out: dict[str, Any] = {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
+        from .accounts.runtime import RUN_REPORT  # ADR-0046: login flags for this run (never secrets)
+        if flags := RUN_REPORT.compact():
+            out["account_flags"] = flags
+        return out
 
     async def list_applications(self, status: str, limit: int, cursor: int) -> dict[str, Any]:
         page = await self.store.list(status="" if status in ("", "all") else status, limit=limit, cursor=cursor)

@@ -6,9 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 - Human-provided email/SMS verification codes: `awaiting_code` state, `provide_verification_code`, MCP elicitation, optional desktop notification; the tool never reads mail and never stores the code (ADR-0026).
 - Human-signed, time-limited grants (`job-apply-mcp grant`), `grants_status`, `otp_assist` (ADR-0027).
+- Consent window: `job-apply-mcp consent --for 24h | --per-run [--max N] [--scopes ...]` (TTY only), `--status`,
+  `--revoke`, read-only `consent_status`; inside it `approval_mode=human` approves automatically (logged with the
+  consent id), `captcha_attempt` applies ADR-0036 to hidden widgets, and `otp_unattended` enters an emailed code
+  from the newest message of the expected sender (no mail in time -> `unknown`, never retried). Interface for
+  other modules: `consent.active(settings, scope)` (ADR-0048).
 - Search sessions, per-host rate limits, progress + `search_status` (ADR-0024).
 
+### Fixed
+- `run_applications`: `max_applications` must be a whole number >= 1 and caps eligible postings the same in dry and live mode; one documented status per posting (`dry_run_ok`, `needs_human`, `quota_blocked`, ...; old `handed_off`/`dry_run` rows map on read); dry runs return `live_preview` of the live quotas and never mark a mail message processed; a `quota_blocked` or cap-skipped link keeps its message pending. `plan_application` / `draft_answers` page with `cursor` (from memory, no re-plan); the shaper never emits a negative `next` (ADR-0049, #71).
+- Browser driver: Ashby radio/checkbox groups are selected and verified; the required-field scan counts radio/checkbox groups (an unchecked required group is `incomplete`, never `dry_run`); DOM-only consent radios stop the run unless they are an opted-in privacy-notice acknowledgement; server-rendered forms are filled only after hydration (`browser.hydrate_wait_s`); the phone-widget country comes from the profile; DOM-only self-ID selects use only the profile value or the decline option (optional ones without a profile value stay blank); select read-backs are scoped to the field (ADR-0039).
+
 ### Added
+- `run_applications` tool and `job-apply-mcp run` (explicit links, `--links` file, job links emailed to yourself from the read-only mail source, discovery; any mix, in that priority), `run_report` / `job-apply-mcp report`, `give_feedback` / `job-apply-mcp feedback` applied at the start of the next run, `unsupported_site` rows, concurrent planning, per-host serialized concurrent submits, deferred prose for batch runs, salary feedback bounded by the configured floor, authorization/demographic answers routed to the profile builder (ADR-0045).
+- Credential vault and ATS logins (ADR-0046): `job-apply-mcp vault add|list|rm` (TTY only, keychain via the `keyring` extra, no plaintext fallback), read-only `vault_status`, consent-gated (`consent.active(settings, "credentials")`) sign-in on login walls with at most 2 attempts per host per run, optional account creation (`accounts.auto_create`, trusted user config only, default off) with generated passwords stored in the keychain before the form is filled, `account_flags` in `apply_batch`, and `Secret` / log and tool-output redaction.
+- `writing.timeout_s` hard budget for all prose of one plan (timed-out fields become `client_tasks` with any partial draft, never answers), per-call provider timeouts, `llm.heavy_classes` semaphore with `llm_wait` / `llm_gen` in `timings`, `writing.mode = "deferred"` plus the `draft_answers` tool (ADR-0041).
+- Faster `search_jobs` (issue #60): in-memory memo of parsed boards keyed by response digest, date filter before parsing, guarded text-flag regexes, 404 negative caching, interleaved per-platform fan-out, `search.board_timeout_s`, and a `timings` block in the response. 1,887 boards: cold 333 s -> ~150 s, warm 208 s -> 1.5 s (ADR-0043).
 - Optional submission caps `apply.daily_limit` / `daily_limit_per_platform` / `run_limit` (`0` = no limit; loosening only from the trusted user config), `daily_limit` block in `control_status` and `doctor` (ADR-0035).
 - Resume-first fact precedence, placeholder/addressee/temporal/degeneration/closing lint, comparative quality gate,
   `facts_report` tool, `writing.cover_letter_policy`, tuning degeneration/leakage hard gates (ADR-0023).

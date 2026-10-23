@@ -53,15 +53,44 @@ class LeverAdapter(BaseAdapter):
             ref=self.ref(board, d["id"]), company=board, title=d.get("text", ""),
                  location=cat.get("location") or "", url=d.get("hostedUrl") or f"https://jobs.lever.co/{board}/{d['id']}",
                  apply_url=d.get("applyUrl") or f"https://jobs.lever.co/{board}/{d['id']}/apply",
-                 posted_at=iso_date(d.get("createdAt")))
+                 posted_at=self._posted(d),
+                 countries=self._countries(d, cat), locations=self._locations(cat))
+
+    @staticmethod
+    def _posted(d: dict) -> str | None:
+        return iso_date(d.get("createdAt"))
+
+    def _countries(self, d: dict, cat: dict) -> list[str]:
+        """Lever's `country` covers the primary location only; any other location makes the set unconfirmed, so
+        job_country() is None (deny-by-default, ADR-0040)."""
+        c = self.country_code(d.get("country"))
+        raw = cat.get("allLocations") or []
+        if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+            return ["UNCONFIRMED"]                       # malformed entry: never confirms
+        primary = str(cat.get("location") or "").strip().lower()
+        others = {x.strip().lower() for x in raw if x.strip()} - {primary}
+        if others or (raw and not primary):              # more than one location: `country` covers the primary only
+            return [c, "UNCONFIRMED"] if c else ["UNCONFIRMED"]
+        return [c] if c else []
+
+    @staticmethod
+    def _locations(cat: dict) -> list[str]:
+        raw = cat.get("allLocations") or []
+        return [x for x in raw if isinstance(x, str) and x.strip()] if isinstance(raw, list) else []
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:
-        data = await self._get(f"{API}/{board}", {"mode": "json"})
-        for d in data if isinstance(data, list) else []:
-            p = self._to_posting(board, d, with_description=with_description)
-            if not_before(p.posted_at, since):
-                yield p
+        def derive(data: Any) -> list[Posting]:
+            return [self._to_posting(board, d, with_description=with_description)
+                    for d in (data if isinstance(data, list) else []) if not_before(self._posted(d), since)]
+
+        try:   # finished postings are memoized per response digest (ADR-0043)
+            postings = await self.http.get_derived(f"{API}/{board}", derive, params={"mode": "json"},
+                                                   tag=f"{self.name}:{with_description}:{since}")
+        except HttpError as e:
+            raise AdapterError("posting not found (closed or moved)" if e.status == 404 else str(e)) from e
+        for p in postings:
+            yield p
 
     async def get_posting(self, url_or_ref: str, *, with_description: bool = False) -> Posting:
         board, pid = self._need_job(url_or_ref)

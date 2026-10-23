@@ -53,16 +53,49 @@ class GreenhouseAdapter(BaseAdapter):
                  location=(j.get("location") or {}).get("name", ""),
                  url=j.get("absolute_url") or f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
                  apply_url=f"https://job-boards.greenhouse.io/{board}/jobs/{jid}",
-                 posted_at=iso_date(j.get("updated_at") or j.get("first_published")))
+                 posted_at=self._posted(j),
+                 countries=self._countries(j), locations=self._locations(j))
+
+    @staticmethod
+    def _posted(j: dict) -> str | None:
+        return iso_date(j.get("updated_at") or j.get("first_published"))
+
+    def _countries(self, j: dict) -> list[str]:
+        """Per office, the ISO-2 of a location that ends in a full country name (ADR-0040); any non-dict, malformed or
+        country-less office is "UNCONFIRMED". No offices -> [] (not confirmed; there is no text fallback)."""
+        raw = j.get("offices") or []
+        if not isinstance(raw, list):
+            return ["UNCONFIRMED"]
+        out: list[str] = []
+        for o in raw:
+            loc = o.get("location") if isinstance(o, dict) else None
+            tail = loc.rsplit(",", 1)[-1] if isinstance(loc, str) else ""
+            code = self.country_code(tail, allow_codes=False) or (self.country_code(tail) if tail.strip() == "US" else None)
+            out.append(code or "UNCONFIRMED")
+        return sorted(set(out))
+
+    @staticmethod
+    def _locations(j: dict) -> list[str]:
+        raw = j.get("offices") or []
+        return [str(o.get("location")) for o in (raw if isinstance(raw, list) else [])
+                if isinstance(o, dict) and str(o.get("location") or "").strip()]
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
                             with_description: bool = False) -> AsyncIterator[Posting]:
         params = {"content": "true"} if (self.cfg.list_with_descriptions or with_description) else None
-        data = await self._get(f"{API}/{board}/jobs", params=params)
-        for j in data.get("jobs", []):
-            p = self._to_posting(board, j, with_description=with_description)
-            if not_before(p.posted_at, since):
-                yield p
+
+        def derive(data: Any) -> list[Posting]:
+            jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            return [self._to_posting(board, j, with_description=with_description) for j in jobs
+                    if not_before(self._posted(j), since)]   # date filter first: text flags are the costly part
+
+        try:   # finished postings are memoized per response digest (ADR-0043)
+            postings = await self.http.get_derived(f"{API}/{board}/jobs", derive, params=params,
+                                                   tag=f"{self.name}:{with_description}:{since}")
+        except HttpError as e:
+            raise AdapterError("job not found (closed or moved)" if e.status == 404 else str(e)) from e
+        for p in postings:
+            yield p
 
     async def get_posting(self, url_or_ref: str, *, with_description: bool = False) -> Posting:
         board, jid = self._need_job(url_or_ref)

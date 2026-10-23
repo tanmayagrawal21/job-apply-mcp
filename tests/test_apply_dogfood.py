@@ -80,7 +80,7 @@ async def test_llm_url_placeholder_and_url_questions_never_answered():
                           "n": {"value": "https://example.com/x", "confidence": 0.99}})
     out = await eng(form, r).plan(POSTING.ref)
     assert out.plan.answers == [] and set(out.plan.unresolved) == {"u", "n"}
-    assert '"u"' not in r.calls[0][1]  # URL question never sent to the model
+    assert not r.calls or '"u"' not in r.calls[0][1]  # URL question never sent to the model (ADR-0040: no call at all)
 
 
 def test_geo_fields_derived_or_omitted_never_tasks():
@@ -178,5 +178,7 @@ async def test_ungrounded_experience_claims_rejected():
                           "c": {"value": "bazel", "confidence": 0.9}, "d": {"value": "12", "confidence": 0.9}})
     out = await eng(form, r).plan(POSTING.ref)
     ans = {a.key: a.value for a in out.plan.answers}
-    assert ans == {"b": "Yes", "c": "bazel"}          # grounded Python yes; unseen Kubernetes and number rejected
-    assert set(out.plan.unresolved) == {"a", "d"}
+    # ADR-0040: "experience with X" is not on the short-answer allowlist (the model would state a fact), so even the
+    # grounded Python question goes to the owner; only the allowlisted "Favorite tool" is answered
+    assert ans == {"c": "bazel"}
+    assert set(out.plan.unresolved) == {"a", "b", "d"}
