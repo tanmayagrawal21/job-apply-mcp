@@ -72,7 +72,12 @@ the facts.
    employer, title, city, country, zip) skips the client-prose reviewer of ADR-0044 when it is one short line: at most
    100 characters and 12 words, one sentence. The deterministic text guard (charset, attestation, injection) still
    runs.
-8. **One unresolved list.** `submit_application` lists open fields in full and in the plan's order, from the same
+8. **Race detail (owner request).** `[demographics].race_detail` (optional, default "") holds a finer race value
+   ("South Asian") next to `race_ethnicity` ("Asian"). A race/ethnicity select or radio takes the option that
+   `exact_option` matches to `race_detail`. If none matches, it takes the `race_ethnicity` (EEO-1) option, as before.
+   A broader or narrower option is never chosen ("Asian" for "South Asian", or "Asian Indian"). A declined
+   `race_ethnicity` still declines. The value is used only on the EEO path (ADR-0040) and is never sent to a model.
+9. **One unresolved list.** `submit_application` lists open fields in full and in the plan's order, from the same
    mapping call as its answers (the cached or fresh plan). It also returns them as `unresolved`. Blocking still
    requires a required field without an answer.
 

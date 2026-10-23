@@ -256,3 +256,46 @@ def test_us_person_policy_fallback_only_when_explicit():
 ])
 def test_short_fact_exemption(label, value, want):
     assert _short_fact(F("q", label, FieldKind.text), value) is want
+
+
+# ---------------------------------------------------------------- [demographics].race_detail (owner request)
+def _race(opts, **demo):
+    from job_apply_mcp.profile import Demographics
+    p = ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera"), demographics=Demographics(**demo)),
+                    Settings())
+    f = F("r", "Race / Ethnicity", FieldKind.select, options=opts)
+    r = map_fields([f], p)
+    return {a.key: (a.value, a.source) for a in r.answers}.get("r")
+
+
+EEO1 = ["Asian", "Black or African American", "White", "Two or more races", "Decline to self-identify"]
+DETAIL = ["East Asian", "South Asian", "Southeast Asian", "Black or African American", "White",
+          "Decline to self-identify"]
+
+
+def test_race_detail_picks_the_matching_option():
+    assert _race(DETAIL, race_ethnicity="Asian", race_detail="South Asian") == ("South Asian", "rule:race")
+
+
+def test_race_detail_falls_back_to_the_eeo1_option():
+    assert _race(EEO1, race_ethnicity="Asian", race_detail="South Asian") == ("Asian", "rule:race")
+    assert _race(EEO1, race_ethnicity="Asian") == ("Asian", "rule:race")
+
+
+def test_race_detail_never_picks_a_broader_or_narrower_option():
+    # no "South Asian" option and no plain "Asian" option: decline, never "East Asian" / "Southeast Asian"
+    assert _race(DETAIL, race_ethnicity="Asian", race_detail="Pacific Islander")[0] == "Decline to self-identify"
+    assert _race(["Asian Indian", "Chinese", "Decline to self-identify"], race_ethnicity="Asian",
+                 race_detail="South Asian")[0] == "Decline to self-identify"
+
+
+def test_declined_race_wins_over_detail():
+    assert _race(DETAIL, race_detail="South Asian")[0] == "Decline to self-identify"
+
+
+def test_race_detail_stays_eeo_isolated():
+    from job_apply_mcp.apply.mapper import eeo_class
+    assert eeo_class("Race / Ethnicity") == (True, "race")          # the EEO path runs before every other rule
+    other = F("q", "Which region do you prefer?", FieldKind.select, options=DETAIL)
+    p = ProfileView(Profile(demographics={"race_ethnicity": "Asian", "race_detail": "South Asian"}), Settings())
+    assert map_fields([other], p).answers == []                      # never used outside a race question

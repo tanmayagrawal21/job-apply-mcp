@@ -323,7 +323,7 @@ class ProfileView:
             "discipline": e.field if e else None, "graduation": e.end if e else None,
             "lat": c.lat, "lon": c.lon, "sexual_orientation": d.sexual_orientation,
             "gender": d.gender, "gender_if_required": d.gender_if_required, "hispanic": d.hispanic_latino,
-            "race": d.race_ethnicity,
+            "race": d.race_ethnicity, "race_detail": d.race_detail,
             "veteran": d.veteran_status, "disability": d.disability_status, "pronouns": d.pronouns,
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),

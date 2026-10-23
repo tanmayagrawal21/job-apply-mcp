@@ -1676,7 +1676,12 @@ def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any
             return _truth(v)
         return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
     else:   # the exact option for a plainly-worded question; otherwise declining (never a nearest guess)
-        got = (exact_option(str(v), f.options) if demographic_label_ok(f.label, ck) else None) or decline_option(f.options)
+        ok_label = demographic_label_ok(f.label, ck)
+        detail = profile.lookup("race_detail") if ck == "race" and ok_label else None
+        # ADR-0055: [demographics].race_detail ("South Asian") wins when an option matches it exactly; otherwise the
+        # race_ethnicity (EEO-1) option. exact_option never takes a broader ("Asian") or narrower option.
+        got = ((exact_option(str(detail), f.options) if detail and not _is_decline(detail) else None)
+               or (exact_option(str(v), f.options) if ok_label else None) or decline_option(f.options))
     return None if got is None else [got] if f.kind == FieldKind.multiselect else got
 
 
