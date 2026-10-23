@@ -31,8 +31,9 @@ live run (for example Greenhouse at 25/25). Statuses were unclear: `handed_off` 
    (submitted, needs_human recorded, or ineligible). A `quota_blocked` or cap-skipped link keeps its message
    pending, so the next run retries it. A dry run applies nothing and never marks a message processed, so the live
    run still sees every link.
-4. **Dry runs preview the live quota.** `live_preview` = `{would_submit, quota_blocked, blocked: [{ref, by}],
-   warning: [...]}` built from the control layer's read-only `daily_limit_status()` (the same data as
+4. **Dry runs preview the live quota.** `live_preview` = `{would_submit, quota_blocked, remaining: {day,
+   platform: {name: n}}, blocked: [{ref, by}], warning: [...]}`, present on every dry run (zero counts when no row is
+   `dry_run_ok`; #78) built from the control layer's read-only `daily_limit_status()` (the same data as
    `control_status`), walking the `dry_run_ok` rows in order against the day, run and per-platform remainders. It
    also warns when global `dry_run` or human approval mode would stop or hand off a live run. It reads limits only
    from the loaded (trusted) config and changes nothing; the engine's control layer still enforces every quota.

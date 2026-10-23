@@ -33,7 +33,7 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
         each with `why`: submitted, confirmed, dry_run_ok (a live run would submit it), needs_human (the owner must
         act: unresolved fields, review gate, awaiting approval), quota_blocked (a live quota refused it), skipped
         (policy, duplicate, prose not approved, max_applications reached), unsupported_site, unknown (verify by
-        hand), failed. A dry run adds `live_preview` (would_submit, quota_blocked, warning) from the live quotas."""
+        hand), failed. A dry run adds `live_preview` (would_submit, quota_blocked, remaining, warning), always, from the live quotas."""
         return _dump(await runner().run(links=links, links_file=links_file, sources=sources,
                                         max_applications=max_applications, dry_run=dry_run, mail=mail,
                                         messages=messages, discovery=discovery))

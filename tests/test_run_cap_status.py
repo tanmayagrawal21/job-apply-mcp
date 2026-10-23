@@ -82,6 +82,19 @@ async def test_dry_run_previews_live_quota_block(tmp_path):
     assert any("greenhouse 25/25" in w and "quota_blocked" in w for w in pv["warning"])
 
 
+async def test_dry_run_preview_present_without_dry_run_ok_rows_and_read_only(tmp_path):
+    """#78: a dry run always carries live_preview with remaining quota, even when nothing is dry_run_ok."""
+    r, _ad, eng = make(tmp_path)
+    eng.control = FakeControl()
+    before = {"day": 48, "platform": {"greenhouse": 25}, "run": 0}
+    rep = await r.run(links=["https://careers.example.com/jobs/1"], sources=["links"])
+    assert "dry_run_ok" not in rep["counts"]
+    pv = rep["live_preview"]
+    assert pv["would_submit"] == 0 and pv["quota_blocked"] == 0
+    assert pv["remaining"] == {"day": 2, "platform": {"greenhouse": 0}}
+    assert eng.control.used == before
+
+
 async def test_dry_run_preview_counts_day_quota(tmp_path):
     r, _ad, eng = make(tmp_path)
     eng.control = FakeControl(platform_used=0, day_used=49)
@@ -203,3 +216,33 @@ async def test_dry_run_never_marks_mail_processed(tmp_path):
     assert await r.store.processed(keys) == set()     # a dry run applies nothing: the live run still sees the links
     rep2 = await r.run(sources=["mail"], max_applications=10)
     assert rep2["counts"] == rep["counts"]            # same links offered again
+
+
+async def test_needs_human_why_has_count_and_labels_not_values(tmp_path):
+    r, _ad, _ = make(tmp_path)
+    why = r._unresolved_why([f"q{i}" for i in range(9)] + ["x"], type("C", (), {"form": ApplicationForm(
+        ref="r", submit_via=["api"], fields=[F("q0", "L" * 90), F("q1", "Current employer")])})())
+    assert why.startswith("10 unresolved (7 shown): ") and "Current employer" in why and why.endswith(", …")
+    assert "L" * 61 not in why and "q2" in why
+
+
+async def test_control_status_reports_last_run_mode(tmp_path):
+    from job_apply_mcp.control.tools import last_run_info
+    r, _ad, _ = make(tmp_path)
+    rep = await r.run(links=GH[:1], sources=["links"], dry_run=True)
+    info = await last_run_info(r.s.paths.data_dir)
+    assert info["dry_run"] is True and info["run_id"] == rep["run_id"]
+
+
+async def test_unresolved_label_secret_straddling_the_cut_is_fully_redacted(tmp_path):
+    from job_apply_mcp.core import secrets
+    r, _ad, _ = make(tmp_path)
+    tok = "zq-fict-" + "secret-value-" + "9981"
+    label = "A" * 50 + tok + " tail"            # the secret spans position 60
+    secrets._remember(tok)
+    try:
+        why = r._unresolved_why(["q0"], type("C", (), {"form": ApplicationForm(
+            ref="r", submit_via=["api"], fields=[F("q0", label)])})())
+    finally:
+        secrets.forget(tok)
+    assert "zq-fict" not in why and "secret-value" not in why and "9981" not in why
