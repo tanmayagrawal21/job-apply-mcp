@@ -175,7 +175,16 @@ def test_short_llm_allowlist():
     for label in blocked:
         f = F("k", label, FieldKind.text, max_length=80)
         assert not llm_safe_short(f), label
-    for label in ["Favorite build tool", "How many years of experience with Rust?", "What is your notice period?",
-                  "Link to your portfolio", "When can you start?", "Which programming languages do you know?"]:
+    for label in ["Any misdemeanors involving software?", "Have you been cautioned by police for software piracy?",
+                  "Do you have pre-settled status to use our platform?", "Are you an Irish Stamp 4 holder with Python skills?",
+                  "Can you work CET hours on our platform?", "Do you have a driving licence and tools?",
+                  "Have you misused company tools resulting in dismissal?", "Were you fired for software misuse?",
+                  "Have you been terminated from a software job?", "Any disciplinary action related to coding?",
+                  "Do you have a pending lawsuit about software?", "Have you ever been bankrupt? (skills)",
+                  "Do you consent to a coding test?", "How many years of experience with Rust?",
+                  "Link to your portfolio", "When can you start?"]:
+        assert not llm_safe_short(F("k", label, FieldKind.text, max_length=80)), label
+    for label in ["Favorite build tool", "What is your notice period?", "Which programming languages do you know?",
+                  "What tools do you use?", "GitHub URL", "How did you hear about us?", "Earliest start date"]:
         assert llm_safe_short(F("k", label, FieldKind.text, max_length=80)), label
     assert e._is_short(F("k", "Favorite build tool", FieldKind.text, max_length=80))

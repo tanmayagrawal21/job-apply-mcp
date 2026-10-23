@@ -999,19 +999,28 @@ _NEVER_LLM_PLACE_SHORT = re.compile(r"\boffices?\b|\bmetro\b|\bnear\b|\bwhere\b|
                                     r"\bcome (?:in|to)\b")
 
 
-# ADR-0040 (final): the short-answer model may only answer an ALLOWLISTED kind of question: tools / technologies /
-# skills, years of experience with something, notice period or start availability, links or portfolio, referral
-# source. Everything else stays unresolved (owner task or profile gap). never_llm() stays as defence in depth.
-_LLM_SAFE_SHORT = re.compile(
-    r"\b(?:tools?|technolog\w*|frameworks?|librar(?:y|ies)|languages?|tech stack|stack|software|platforms?|databases?|"
-    r"programming|coding|skills?|proficien\w*|familiar\w*|experience (?:with|in|using)|years of (?:professional )?"
-    r"experience|how many years|notice period|start date|available to start|availability to start|earliest start|"
-    r"when can you start|portfolio|github|website|links?|url|how did you hear|how did you find|referred)\b")
+# ADR-0040 (final, fail-closed): the short-answer model may only answer a label that FULLY matches one of these strict
+# templates (normalized label, anchored). One allowlisted word inside another question never qualifies. Questions
+# that would make the model guess a fact about the candidate (years with X, experience with X) are not templates:
+# the profile answers them deterministically or the owner does.
+_LLM_SAFE_TEMPLATES = [re.compile(p) for p in (
+    (r"(?:which|what) (?:tools|technologies|frameworks|libraries|programming languages|languages|databases|platforms)"
+     r"(?: do you| have you)?(?: (?:use|used|know|prefer|work with))?"),
+    (r"(?:what is your |what are your )?(?:favou?rite|preferred) (?:build tool|tool|programming language|language|"
+     r"editor|ide|framework|library|database)"),
+    r"how did you (?:hear|find out|learn) about (?:us|this (?:role|job|position|opportunity))",
+    r"(?:github|portfolio|website|personal website)(?: url| link| profile)?",
+    r"(?:what is your )?notice period",
+    r"(?:what is your )?earliest (?:possible )?start date",
+)]
 
 
 def llm_safe_short(f: FormField) -> bool:
-    """True only for an allowlisted, non-legal, non-place short question (ADR-0040)."""
-    return bool(_LLM_SAFE_SHORT.search(normalize(f.label))) and not never_llm(f) and not eeo_class(f.label)[0]
+    """True only when the whole normalized label matches an allowlisted template and names nothing sensitive."""
+    n = normalize(f.label)
+    if not n or never_llm(f) or eeo_class(f.label)[0] or _CONSENT.search(f.label):
+        return False
+    return any(t.fullmatch(n) for t in _LLM_SAFE_TEMPLATES)
 
 
 def never_llm(f: FormField) -> bool:

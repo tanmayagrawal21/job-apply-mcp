@@ -91,7 +91,7 @@ A QA round (issues #47, #48, #51) found:
     an unknown job country or missing facts leave the field unresolved; missing facts are recorded as
     `profile_gaps` ({country, fact, key}) in the plan output for the profile builder. Export control and "U.S. person"
     remain legal, never-LLM and unresolved by default.
-- **Short-answer allowlist (final).** The short-answer model only sees allowlisted questions (`llm_safe_short`):
+- **Short-answer allowlist (final, fail-closed).** The short-answer model only sees a label that FULLY matches one of a few anchored templates (`_LLM_SAFE_TEMPLATES`: which tools/languages, favourite tool, how did you hear about us, GitHub/portfolio link, notice period, earliest start date); one allowlisted word inside another question never qualifies, and "experience with X" is not a template. Earlier scope (`llm_safe_short`):
   tools, technologies, skills, years of experience with something, notice period or start availability, links or
   portfolio, referral source. Everything else (criminal record, police cautions, residence statuses such as
   pre-settled status or Stamp 4, working hours, driving licence, ...) stays with the owner. `never_llm` and the

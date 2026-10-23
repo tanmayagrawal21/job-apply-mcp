@@ -178,5 +178,7 @@ async def test_ungrounded_experience_claims_rejected():
                           "c": {"value": "bazel", "confidence": 0.9}, "d": {"value": "12", "confidence": 0.9}})
     out = await eng(form, r).plan(POSTING.ref)
     ans = {a.key: a.value for a in out.plan.answers}
-    assert ans == {"b": "Yes", "c": "bazel"}          # grounded Python yes; unseen Kubernetes and number rejected
-    assert set(out.plan.unresolved) == {"a", "d"}
+    # ADR-0040: "experience with X" is not on the short-answer allowlist (the model would state a fact), so even the
+    # grounded Python question goes to the owner; only the allowlisted "Favorite tool" is answered
+    assert ans == {"c": "bazel"}
+    assert set(out.plan.unresolved) == {"a", "b", "d"}
