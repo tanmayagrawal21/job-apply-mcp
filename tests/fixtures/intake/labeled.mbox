@@ -1,0 +1,21 @@
+From avery.tester@example.com Thu Oct 15 10:00:00 2026
+From: avery.tester@example.com
+To: avery.tester@example.com
+Subject: saved job
+Date: Thu, 15 Oct 2026 10:00:00 +0000
+Message-ID: <mbox-001@fixture.test>
+X-Gmail-Labels: Inbox,Jobs
+Content-Type: text/plain; charset=utf-8
+
+https://jobs.lever.co/vandelay/0001-aaaa
+
+From avery.tester@example.com Thu Oct 15 11:00:00 2026
+From: avery.tester@example.com
+To: avery.tester@example.com
+Subject: dinner
+Date: Thu, 15 Oct 2026 11:00:00 +0000
+Message-ID: <mbox-002@fixture.test>
+X-Gmail-Labels: Inbox
+Content-Type: text/plain; charset=utf-8
+
+Menu: https://food.example.org/jobs-of-the-chef/menu
