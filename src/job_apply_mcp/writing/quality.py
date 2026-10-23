@@ -152,8 +152,10 @@ def rubric_prompt(draft: str, refs: list[str], company: str, title: str, facts: 
             f"\n\nDRAFT:\n{draft}\n\nScore 1-5: argument (each paragraph ties the evidence to the company's problem as the "
             "reference letters do), voice (tone and diction match the reference letters), precision (every claim is in the "
             "allowed facts), specificity (not generic). Answer: is this at least as strong as the reference letters, and why "
-            "or why not? Give sentence-level edits. Return JSON "
-            '{"scores":{"argument":n,"voice":n,"precision":n,"specificity":n},"at_least_as_strong":bool,"why":str,'
+            "or why not? Give sentence-level edits. " + ATTEST_CLAUSE + " If the draft contains any such statement, set "
+            '"attestation" to true and "at_least_as_strong" to false. Return JSON '
+            '{"scores":{"argument":n,"voice":n,"precision":n,"specificity":n},"at_least_as_strong":bool,'
+            '"attestation":bool,"why":str,'
             f'"edits":[str],"corrected":str}}. Pass thresholds: {need}.')
 
 
@@ -189,8 +191,11 @@ def parse_rubric(raw: str, cfg: WritingCfg) -> tuple[bool, dict[str, int], list[
         return False, {}, ["rubric reviewer returned invalid JSON"], ""
     low = [f"{k} {scores.get(k, 0)} < {v}" for k, v in cfg.quality_min_scores.items() if scores.get(k, 0) < v]
     edits = [str(e) for e in d.get("edits", [])]
-    ok = not low and strict_verdict(d.get("at_least_as_strong"))
-    why = [f"rubric: {x}" for x in low] + ([] if ok or low else [f"not as strong as reference: {d.get('why', '')}"])
+    att = d.get("attestation", False)
+    hit = not (att is False or att == "false")              # any value but a strict false is a hit (ADR-0044)
+    ok = not low and not hit and strict_verdict(d.get("at_least_as_strong"))
+    why = [f"rubric: {x}" for x in low] + (["attestation/authorship/consent statement in the draft"] if hit else [])
+    why += [] if ok or low or hit else [f"not as strong as reference: {d.get('why', '')}"]
     return ok, scores, why + edits[:4], str(d.get("corrected") or "")
 
 

@@ -471,3 +471,82 @@ def test_rubrics_carry_the_attestation_clause():
     assert checks.ATTEST_CLAUSE in quality.client_rubric([], cfg)
     for w in ("certifies", "swears", "without AI", "consents"):
         assert w in checks.ATTEST_CLAUSE
+
+
+# ---- round 6: gate-path attestation clause, meaning-level authorship / no-AI scan (ADR-0044)
+from test_apply_engine import GOOD as LETTER
+
+from job_apply_mcp.apply.writing import review_text
+from job_apply_mcp.writing.quality import rubric_prompt
+
+GATE_PASS = {"scores": {"argument": 5, "voice": 5, "precision": 5, "specificity": 5}, "at_least_as_strong": True,
+             "why": "", "edits": [], "corrected": ""}
+
+
+def test_gate_prompt_carries_attestation_clause():
+    p = rubric_prompt("x", ["r"], "A", "T", [], WritingCfg())
+    assert checks.ATTEST_CLAUSE in p and '"attestation":bool' in p
+
+
+@pytest.mark.parametrize(("att", "ok"), [(False, True), ("false", True), (True, False), ("true", False),
+                                         ("yes", False), (1, False), (None, False)])
+def test_gate_attestation_hit_fails(att, ok):
+    assert parse_rubric(json.dumps(GATE_PASS | {"attestation": att}), WritingCfg())[0] is ok
+
+
+async def test_gate_path_review_sends_clause_and_fails_on_hit():
+    cfg = WritingCfg(quality_tolerance=100.0)
+    r = R(review=GATE_PASS | {"attestation": True})
+    res = await review_text(r, cfg, LETTER, kind="cover_letter", label="Cover letter", company="Acme Robotics",
+                            title="Software Engineer", summary="", facts=["Built a fleet scheduler in Python"],
+                            corpus=[LETTER])
+    prompts = _reviews(r)
+    assert len(prompts) == 1 and checks.ATTEST_CLAUSE in prompts[0] and "REFERENCE LETTERS" in prompts[0]
+    assert res.status == "needs_review" and any("attestation" in v.detail for v in res.violations)
+    r2 = R(review=GATE_PASS | {"attestation": False})
+    res2 = await review_text(r2, cfg, LETTER, kind="cover_letter", label="Cover letter", company="Acme Robotics",
+                             title="Software Engineer", summary="", facts=["Built a fleet scheduler in Python"],
+                             corpus=[LETTER])
+    assert res2.status == "pass"
+
+
+def test_free_text_reviewer_prompt_carries_clause():
+    from job_apply_mcp.apply.writing import review_rubric
+    assert checks.ATTEST_CLAUSE in review_rubric(WritingCfg(), company="A", title="T", facts=[])
+
+
+MEANING = [
+    # control's list at 19e78366
+    "This is not AI-generated.", "Non-AI answer.", "I did not use GPT.", "Claude was not used.",
+    "100% human-written.", "Every word here is my own.", "Written unaided.", "Written with no assistance.",
+    "I wrote this alone.", "Handwritten by the applicant.", "No A-I was used.", "No A–I was used.",
+    "I pledge this is accurate.", "I vouch for this.", "I guarantee this is accurate.",
+    "All of the above is accurate and complete.", "I accept the privacy policy.", "I opt in to marketing messages.",
+    "Okay to email me promotions.",
+    # reviewer's list at 15b1ce5d
+    "I wrote this myself without AI.", "AI was not used for this answer.", "This answer is AI-free.",
+    "Zero AI was used.", "I solemnly swear the above.",
+    # paraphrases
+    "This answer was human-authored.", "These are entirely my own words.", "I wrote it on my own.",
+    "I did not rely on Gemini.", "ChatGPT was never used.", "Composed unaided.", "I have not used Copilot.",
+    "GPT-4 was not used here.", "Written single-handedly by me.", "Done without any outside help.",
+]
+
+
+@pytest.mark.parametrize("text", MEANING)
+def test_meaning_level_claims_caught_deterministically(text):
+    e, _ = engine(R())
+    assert (e._text_guard(text) or "").startswith("[attestation]"), text
+
+
+@pytest.mark.parametrize("text", MEANING)
+async def test_meaning_level_claims_rejected_even_if_reviewer_passes(text):
+    t, r = await _rejected(GOOD + " " + text, R(review={"pass": True, "violations": [], "corrected": ""}))
+    assert t["violations"][0].startswith("[attestation]") and not _reviews(r)
+
+
+@pytest.mark.parametrize("text", [GOOD, "I led a team of four engineers at Initech.", "The scheduler used Rust and SQL.",
+                                  "I designed the dispatch rules and documented them for operators."])
+def test_ordinary_prose_is_not_flagged(text):
+    e, _ = engine(R())
+    assert e._text_guard(text) is None

@@ -82,7 +82,26 @@ _ATTEST_TEXT = re.compile(
     r"\bunder\s+penalty\b|\btrue,?\s+(?:complete\s+)?and\s+(?:correct|accurate|complete)\b|\b(?:consent|agree)\s+to\b|"
     r"\bpermission\s+to\s+(?:text|call|contact|email|e\W?mail|message|sms)\b|\bsms\b|\btexts\b|"
     r"\btext\s+(?:me|messages?|messaging|updates?|alerts?)\b|\bcall\s+or\s+text\b|"
-    r"\bcontact\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|text|sms|mobile|cell)\b",
+    r"\bcontact\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|text|sms|mobile|cell)\b|"
+    # authorship and no-AI claims by meaning (ADR-0044)
+    r"\bnot\s+(?:ai|llm|machine|computer)\W?(?:generated|written|assisted|produced)\b|\bnon\W?ai\b|"
+    r"\bhuman\W?(?:written|authored|made|generated|crafted)\b|\b100\s?%\s+human\b|\bentirely\s+human\b|"
+    r"\bmy\s+own\s+(?:words|writing|work)\b|\bevery\s+(?:single\s+)?word\b[^.!?\n]{0,60}\bmy\s+own\b|"
+    r"\bentirely\s+(?:my\s+own|mine)\b|\bunaided\b|"
+    r"\b(?:no|without(?:\s+any)?)\s+(?:outside\s+|external\s+)?(?:assistance|help)\b|"
+    r"\b(?:wrote|written|authored|composed|drafted)\s+(?:this|it|these|them|everything)?\s*"
+    r"(?:entirely\s+|completely\s+)?(?:alone|by\s+myself|myself|on\s+my\s+own|single\W?handedly)\b|"
+    r"\bhand\W?written\s+by\b|"
+    r"\b(?:did\s+not|didn\W?t|never|do\s+not|don\W?t|have\s+not|haven\W?t)\s+(?:use|used|rely\s+on|relied\s+on|consult|"
+    r"consulted)\s+(?:any\s+|an?\s+)?(?:gpt|chatgpt|claude|gemini|copilot|bard|openai|llms?|ai|artificial intelligence)\b|"
+    r"\b(?:gpt|chatgpt|claude|gemini|copilot|bard|openai|llms?|ai)(?:\W?\d+(?:\.\d+)?)?\s+(?:was|were|is|has\s+been|had\s+been)"
+    r"\s+(?:not|never)\s+(?:used|involved|consulted|employed)\b|"
+    # pledges, completeness statements and other consent/contact wording
+    r"\b(?:i|we)\s+(?:hereby\s+)?(?:pledge|vouch|guarantee|warrant|promise)\b|"
+    r"\b(?:accurate|true|correct)\s+and\s+(?:complete|accurate|correct|true)\b|"
+    r"\baccept\s+the\s+(?:privacy|terms|policy|conditions)\b|\bprivacy\s+policy\b|\bopt\W?in\b|"
+    r"\b(?:okay|ok|fine|happy|free)\s+to\s+(?:email|e\W?mail|call|text|contact|message)\s+me\b|\bpromotions?\b|"
+    r"\bmarketing\s+(?:messages?|emails?|communications?|texts?)\b",
     re.IGNORECASE)
 # Text aimed at the reviewer model rather than the employer (ADR-0044).
 _INJECT_TEXT = re.compile(

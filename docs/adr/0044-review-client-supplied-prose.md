@@ -74,10 +74,17 @@ it could contradict the resume or break the writing rules and still be sent.
 
 - Short answers ("Favorite build tool") now cost a reviewer call each in agent mode. A legitimate answer that uses
   consent wording ("I agree to relocate") is held for review; that is the intended fail-closed trade-off.
-- Paraphrases the patterns do not list are left to the strict reviewer. `review_rubric` and `quality.client_rubric`
-  both carry `checks.ATTEST_CLAUSE`, which tells it to fail any attestation, no-AI or consent statement. The patterns
-  also cover "without AI", "AI was not used", "AI-free", "zero AI", solemnly/swear/sworn and "written by me/myself";
-  the scan maps ø to o. The deterministic layer alone catches these (tests do not rely on the reviewer).
+- Paraphrases the patterns do not list are left to the strict reviewer, on both review paths. `review_rubric` (free
+  text) and the quality-gate prompt `quality.rubric_prompt` (cover letters with a corpus) both embed
+  `checks.ATTEST_CLAUSE`. The gate prompt also asks for an `"attestation"` field. Any value other than a strict
+  false fails the gate, as does `at_least_as_strong` not being true.
+- The deterministic layer covers authorship and no-AI claims by meaning, so it does not depend on the model. It
+  catches: not AI-generated or non-AI; human-written or 100% human; my own words, or every word ... my own;
+  unaided; no or without assistance or help; wrote this alone, myself or on my own; handwritten by; did not
+  use/rely on GPT, ChatGPT, Claude, Gemini, Copilot or an LLM; "<tool> was not used"; without AI, AI-free and zero
+  AI; solemnly, swear and sworn; I pledge, vouch or guarantee; "accurate and complete"; the privacy policy; opt
+  in; "okay to email me"; promotions and marketing messages. "A-I" and "A–I" fold to "ai", and the scan maps ø to
+  o. Tests check that each phrase is rejected even when the fake reviewer passes.
 
 ## Verify
 `uv run pytest -q tests/test_client_prose_review.py tests/test_config_trust.py`: passing prose is reviewed then

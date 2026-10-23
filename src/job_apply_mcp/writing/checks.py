@@ -169,7 +169,7 @@ _PUNCT = re.compile(r"[\W_]+")
 _ATTEST_VERB = (r"(?:hereby\s+|also\s+|further\s+)?(?:certif|attest|affirm|declar|confirm|consent|agree|acknowledg|"
                 r"authori[sz])")
 _LOOKALIKE_I = re.compile(rf"(?<![\w|!])[1l|!](?=\s+{_ATTEST_VERB})")
-_AI_FORM = r"(?:a\.\s*i\.?|a\s+i|al)"
+_AI_FORM = r"(?:a\.\s*i\.?|a\s*[-\u2013\u2014]\s*i|a\s+i|al)"
 _AI_BEFORE = re.compile(rf"\b(no|use|used|of|without|any|an|using|zero)\s+{_AI_FORM}(?=[\W]|$)")
 _AI_AFTER = re.compile(rf"(?<![\w.]){_AI_FORM}\s*-?\s*(assisted|generated|written|tools?|used|free|(?:was|were)\s+not)\b")
 
