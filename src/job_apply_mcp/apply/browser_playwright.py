@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -381,6 +382,23 @@ _EMPTY_REQUIRED_JS = """() => {
 _SUBMIT_NAME = re.compile(r"^\s*(submit( application)?|send application|apply( now)?)\s*$", re.IGNORECASE)
 
 
+def captcha_attempt_ok(policy: str, widgets: list, state: dict[str, Any], consent_ok: Callable[[], bool]) -> bool:
+    """Click Submit once through a captcha widget? Only when every widget is passive/invisible AND (the trusted
+    config says `attempt` OR a consent window covers captcha_attempt). A visible or unsafe challenge: never; the
+    consent is not even consulted (ADR-0036, ADR-0048)."""
+    passive = bool(widgets) and not state.get("visible", True) and not state.get("unsafe", True)
+    return passive and (policy == "attempt" or consent_ok())
+
+
+def _consent_captcha(settings, ref: str) -> bool:
+    """captcha_attempt under an active consent window (ADR-0048). Any error -> False (handoff)."""
+    try:
+        from ..consent import use
+        return use(settings, "captcha_attempt", f"ref={ref} passive widget only") is not None
+    except Exception:
+        return False
+
+
 class PlaywrightDriver(VerificationMixin):
     name = "playwright"
 
@@ -548,8 +566,8 @@ class PlaywrightDriver(VerificationMixin):
             if widgets or state["unsafe"] or ats.name == "ashby":
                 # captcha_policy="attempt" (ADR-0036): only a passive/invisible widget and NO visible challenge may be
                 # clicked through, once, exactly like a person would. Anything else stays a human handoff.
-                if (self.b.captcha_policy == "attempt" and widgets and not state["visible"]
-                        and not state["unsafe"]):
+                # An active consent window with captcha_attempt (ADR-0048) applies the same rule; nothing else changes.
+                if captcha_attempt_ok(self.b.captcha_policy, widgets, state, lambda: _consent_captcha(self.s, ref)):
                     attempt = True
                 else:      # never evade/solve bot checks: a human makes the final click
                     ev = await self._save_evidence(page, ref, "handoff", extra={"captcha": widgets, "unsafe": state["unsafe"]})

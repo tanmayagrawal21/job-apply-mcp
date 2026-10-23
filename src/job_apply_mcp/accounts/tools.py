@@ -27,7 +27,7 @@ def status(settings: Any, vault: Vault | None = None, db: AccountsDB | None = No
         if db is None:
             d.close()
     out: dict[str, Any] = {
-        "consent": consent.active(settings, "credentials"),
+        "consent": consent.active(settings, "credentials") is not None,   # ADR-0048 returns the Consent or None
         "auto_create": settings.accounts.auto_create,
         "hosts": [{"host": h, "logins": n} for h, n in sorted(hosts.items())],
         "pending_verification": pending,

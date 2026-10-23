@@ -1,5 +1,5 @@
-"""Command line: ``job-apply-mcp [serve] | init | doctor | version | grant | vault | run | report | feedback``
-(ADR-0020, ADR-0045).
+"""Command line: ``job-apply-mcp [serve] | init | doctor | version | grant | consent | vault | run | report |
+feedback`` (ADR-0020, ADR-0045, ADR-0048).
 
 With no subcommand the server starts on stdio, exactly like 0.1, so existing MCP client configs keep working.
 """
@@ -11,8 +11,8 @@ from pathlib import Path
 
 from . import __version__
 
-COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "vault",
-            "profile", "run", "report", "feedback"}
+COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "consent",
+            "vault", "profile", "run", "report", "feedback"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser(name, help=h).add_argument("rest", nargs="*")
     sub.add_parser("grant", help="HUMAN ONLY (needs a TTY): time-limited grants for agents (--list, --revoke)"
                    ).add_argument("rest", nargs=argparse.REMAINDER)
+    sub.add_parser("consent", help="HUMAN ONLY (needs a TTY): consent window for unattended runs "
+                   "(--for 24h | --per-run, --status, --revoke)").add_argument("rest", nargs=argparse.REMAINDER)
     sub.add_parser("profile", help="build your profile: ask | list | answer (open gaps the tool collected)"
                    ).add_argument("rest", nargs=argparse.REMAINDER)
     sub.add_parser("vault", help="HUMAN ONLY (needs a TTY): ATS logins in the OS keychain (add, list, rm)"
@@ -79,6 +81,15 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or (argv[0] not in COMMANDS and argv[0] not in ("-h", "--help", "--version")):
         argv.insert(0, "serve")
+    if argv[0] in ("grant", "consent"):
+        # argparse.REMAINDER drops a leading option (`consent --for 24h`), so these pass argv through verbatim
+        from .config import load_settings
+
+        if argv[0] == "grant":
+            from .grants.cli import cli as grant_cli
+            raise SystemExit(grant_cli(argv[1:], load_settings()))
+        from .consent.cli import cli as consent_cli
+        raise SystemExit(consent_cli(argv[1:], load_settings()))
     args = build_parser().parse_args(argv)
 
     if args.cmd == "version":
@@ -100,6 +111,11 @@ def main(argv: list[str] | None = None) -> None:
         from .grants.cli import cli as grant_cli
 
         raise SystemExit(grant_cli(args.rest, load_settings()))
+    elif args.cmd == "consent":
+        from .config import load_settings
+        from .consent.cli import cli as consent_cli
+
+        raise SystemExit(consent_cli(args.rest, load_settings()))
     elif args.cmd in ("run", "report", "feedback"):
         raise SystemExit(_intake_cli(args))
     elif args.cmd == "profile":

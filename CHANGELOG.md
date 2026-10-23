@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 - Human-provided email/SMS verification codes: `awaiting_code` state, `provide_verification_code`, MCP elicitation, optional desktop notification; the tool never reads mail and never stores the code (ADR-0026).
 - Human-signed, time-limited grants (`job-apply-mcp grant`), `grants_status`, `otp_assist` (ADR-0027).
+- Consent window: `job-apply-mcp consent --for 24h | --per-run [--max N] [--scopes ...]` (TTY only), `--status`,
+  `--revoke`, read-only `consent_status`; inside it `approval_mode=human` approves automatically (logged with the
+  consent id), `captcha_attempt` applies ADR-0036 to hidden widgets, and `otp_unattended` enters an emailed code
+  from the newest message of the expected sender (no mail in time -> `unknown`, never retried). Interface for
+  other modules: `consent.active(settings, scope)` (ADR-0048).
 - Search sessions, per-host rate limits, progress + `search_status` (ADR-0024).
 
 ### Added
