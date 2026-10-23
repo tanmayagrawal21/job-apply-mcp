@@ -16,13 +16,16 @@ from typing import Any
 
 from ..core.models import Answer, FieldKind, FormField
 from .derive import pick_languages, whole_years, years_option
+from .geo import US_STATES
 from .places import (
     _VISA_COMMON,
     ISO2,
     MULTI_REGION,
+    SUBDIVISIONS,
     VISA_LEXICON,
     VISA_MARKERS,
     _part_in,
+    country_iso,
     split_location,
     strip_own_subdivisions,
 )
@@ -32,10 +35,16 @@ _PUNCT = re.compile(r"[^a-z0-9 ]+")
 _OPTIONAL = re.compile(r"\((optional|required)\)|\b(optional|required)\b$")
 
 
+# ADR-0053: misspellings of "sponsor" ("sponorship", "sponsership", "sponser") read as "sponsor", so such a question is
+# RECOGNISED as a sponsorship question (and never takes a flat [answers] value). The answer source is unchanged.
+_SPONSOR_TYPO = re.compile(r"\bspon(?!sor)[a-z]{0,3}(?:or|er)(s|ed|ing|ship|ships)?\b")
+
+
 def normalize(label: str) -> str:
     s = label.lower().replace("’", "'")
     s = _OPTIONAL.sub(" ", s)
     s = _PUNCT.sub(" ", s)
+    s = _SPONSOR_TYPO.sub(lambda m: "sponsor" + (m.group(1) or ""), s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -78,9 +87,26 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("location", (r"^(your )?(current )?location( city)?$", r"^city$", r"^current city$",
                   r"^where are you (currently )?(located|based|living|residing)$",
                   r"^where do you (currently )?(live|reside)$", r"^(your )?(current )?(city|location) of residence$")),
-    ("country", (r"^country( of residence)?$",)),
-    ("current_company", (r"^current (company|employer)$",)),
-    ("current_title", (r"^current (job )?title$",)),
+    ("country", (r"^country( of residence)?$",
+                 # ADR-0053: "Please select the country where you currently reside", "Country of current residence"
+                 (r"^(?:please (?:select|enter|choose|indicate|provide) |what is |which is )?(?:the |your )?(?:current )?"
+                  r"country (?:of (?:your )?(?:current |primary )?residence|(?:where|in which) you (?:currently |presently )?"
+                  r"(?:reside|live|are located|are based)(?: in)?)$"),
+                 r"^(?:in )?(?:what|which) country do you (?:currently |presently )?(?:reside|live)(?: in)?$",
+                 r"^(?:your )?(?:current )?country of residen(?:ce|cy)$")),
+    # ADR-0053: "If located in the US, in what city and state do you reside?" (from [contact] city + region only)
+    ("residence_city_state", ((r"^(?:if (?:you are |you re )?(?:located|based|living|residing) in the "
+                               r"(?:us|u s|usa|united states)(?: of america)? )?(?:in )?(?:what|which) city (?:and|or) "
+                               r"state do you (?:currently |presently )?(?:reside|live)(?: in)?$"),
+                              r"^(?:your )?(?:current )?city (?:and|or) state of residence$")),
+    # ADR-0053: "current or previous employer/title" = the current [[work]] entry, else the latest ended one
+    ("recent_company", ((r"^(?:(?:who|what) (?:is|was) )?(?:your )?(?:current or (?:previous|most recent|last|former|"
+                         r"past)|most recent|latest) (?:company|employer)(?: name)?$"),)),
+    ("recent_title", ((r"^(?:what (?:is|was) )?(?:your )?(?:current or (?:previous|most recent|last|former|past)|"
+                       r"most recent|latest) (?:job )?(?:title|position)$"),)),
+    ("current_company", (r"^current (company|employer)$",
+                         r"^(?:(?:who|what) is )?(?:your )?current (?:company|employer)(?: name)?$")),
+    ("current_title", (r"^current (job )?title$", r"^(?:what is )?(?:your )?current (?:job )?(?:title|position)$")),
     ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization",
                          r"authori[sz]ation to work", r"(permitted|allowed) to work", r"right to work")),
     ("requires_sponsorship", (r"sponsorship", r"require.* visa", r"\bsponsor(s|ed|ing)?\b")),
@@ -89,6 +115,10 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",)),
     ("located_in_us", ((r"(located|based|reside|live|residing)\b.*\b(in|within) the ((continental|contiguous) )?"
                         r"(us|u s|usa|united states)\b"),)),
+    # ADR-0053: "Do you live within 50 miles of Austin, TX?" / "Are you located in Canada?" (from [contact] only)
+    ("located_near", ((r"^(?:are|do) you (?:currently |presently )?(?:located|based|live|living|reside|residing) "
+                       r"within \d+ (?:miles?|mi|kilometers?|kilometres?|km) of .+$"),)),
+    ("located_in_place", (r"^(?:are|do) you (?:currently |presently )?(?:located|based|live|living|reside|residing) in .+$",)),
     ("start_date", (r"(earliest )?start date", r"available to start", r"notice period")),
     ("salary_expectation", (r"salary expectation", r"expected (salary|compensation)", r"desired (salary|compensation)")),
     ("referral_source", (r"how did you (hear|find)", r"source$")),
@@ -379,11 +409,15 @@ _AUTH_WORDS = re.compile(r"authori[sz]|eligible to work|permitted to work|allowe
 _AUTH_NEG = re.compile(r"\bunauthori[sz]ed\b|\bunable to work\b|\bineligible\b|"
                        r"\bnot (?:legally )?(?:authori[sz]ed|eligible|permitted|allowed)\b")
 _SPOKEN = re.compile(r"speak|spoken|fluen|english|native|written|verbal|translat", re.IGNORECASE)
+_PREF_FIELD = {"relocation_support": "needs_relocation_support"}
 _SEMANTIC_KEYS = {"work_authorized", "requires_sponsorship", "us_citizen", "relocation_support", "open_to_hybrid",
                   "open_to_onsite", "knows_employee", "years_experience", "languages_known", "citizenship", "gpa",
-                  "prior_employee", "marketing_optin", "citizenship_countries", "located_in_us"}
+                  "prior_employee", "marketing_optin", "citizenship_countries", "located_in_us", "willing_to_relocate"}
 # Never sent to the local LLM: a guess is a false statement about the candidate.
-SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"}
+# ADR-0053: facts read from [contact] / [[work]] only; unresolved (and a profile gap) when the fact is missing
+PROFILE_FACT_KEYS = frozenset(["country", "residence_city_state", "recent_company", "recent_title", "current_company",
+                               "current_title", "located_near", "located_in_place"])
+SEMANTIC_SENSITIVE = _SEMANTIC_KEYS | {"willing_to_relocate"} | PROFILE_FACT_KEYS
 _TOTAL_GENERIC = frozenset(
     ["how", "many", "total", "years", "yrs", "year", "of", "experience", "professional", "software", "engineering", "engineer", "work", "working", "relevant", "practical", "career", "industry", "overall", "do", "you", "have", "at", "least", "a", "an", "the", "your", "please", "input", "enter", "number", "in", "that", "are", "to", "this", "role", "position", "related", "full", "time", "hands", "on", "is", "what", "minimum", "prior", "paid", "commercial", "real", "world", "combined", "cumulative", "amount", "can", "say", "for", "with", "or", "and", "i", "am", "if", "any", "has", "s", "plus", "more", "field"]
 )
@@ -566,7 +600,7 @@ _ISO_NAME = {v: k for k, v in _NAME_ISO.items() if v}
 # authorization/sponsorship wording, that country's visa lexicon, or the country itself (replaced by a placeholder).
 # Any other word (a city, region, another country, "here", "the country where ...") leaves it unresolved.
 _PLACE = "zzplacezz"
-_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", _PLACE])
+_AUTH_VOCAB_GENERIC = frozenset(["a", "an", "the", "and", "or", "any", "to", "in", "of", "for", "with", "without", "by", "on", "at", "as", "is", "are", "be", "been", "being", "do", "does", "did", "will", "would", "can", "could", "may", "must", "shall", "should", "if", "not", "no", "now", "currently", "presently", "future", "ever", "you", "your", "yourself", "i", "am", "have", "has", "had", "who", "that", "this", "legally", "lawfully", "legal", "authorized", "authorised", "authorization", "authorisation", "authorize", "unauthorized", "eligible", "eligibility", "permitted", "allowed", "able", "right", "work", "working", "works", "employment", "employed", "employer", "employers", "job", "position", "role", "require", "requires", "required", "requiring", "need", "needs", "needed", "sponsor", "sponsors", "sponsored", "sponsorship", "sponsoring", "visa", "visas", "status", "immigration", "immigrant", "petition", "support", "assistance", "obtain", "maintain", "retain", "extend", "continue", "continued", "extension", "transfer", "valid", "permit", "current", "based", "restriction", "restrictions", "restricted", "unrestricted", "basis", "full", "time", "hired", "offered", "offer", "company", "please", "select", "answer", "yes", "no", "question", "choose", "option", "options", "describes", "describe", "best", "which", "what", "following", "one", _PLACE])
 _US_WORDS = frozenset(["us", "u", "s", "usa", "united", "states", "america", "american"])
 _AUTH_VOCAB = _AUTH_VOCAB_GENERIC | VISA_LEXICON["US"] | _US_WORDS      # ADR-0038 US vocabulary (compatibility)
 _US_NAME_IN_QUESTION = re.compile(r"\b(?:united states(?: of america)?|usa|u s(?: a)?|america|american|us)\b")
@@ -584,7 +618,11 @@ _VISA_TYPES = VISA_MARKERS["US"]
 _AUTH_NOTE_VOCAB = frozenset(["if", "qualify", "qualifies", "defined", "define", "regulations", "note", "considered",
                               "applicants", "candidates", "those", "under", "per", "etc", "e", "g"])
 _JOB_PLACE = re.compile(r"\b(?:the|this) country (?:where|in which) (?:the|this) (?:job|role|position) is "
-                        r"(?:located|based)\b|\bthis country\b|\bthis location\b|\bthe country of employment\b",
+                        r"(?:located|based)\b|\bthis country\b|\bthis location\b|\bthe country of employment\b|"
+                        # ADR-0053 variants
+                        r"\bthe country (?:where|in which) (?:this|the) (?:job|role|position) (?:will be|is to be) "
+                        r"(?:located|based|performed)\b|\b(?:the|this) (?:job|role|position) s country\b|"
+                        r"\bthe country (?:of|for) (?:this|the) (?:job|role|position)\b",
                         re.IGNORECASE)
 
 
@@ -700,7 +738,13 @@ def auth_legal_blocked(f: FormField) -> bool:
     return any(_AUTH_LEGAL_BLOCK.search(normalize(t)) for t in (f.label, *f.options))
 
 
-_FLAT_KEY = {"work_authorized": "work_authorized", "requires_sponsorship": "requires_sponsorship", "citizen": "us_citizen"}
+_FLAT_KEY = {"work_authorized": "work_authorized", "requires_sponsorship": "requires_sponsorship", "citizen": "us_citizen",
+             "requires_sponsorship_now": "requires_sponsorship_now"}
+# ADR-0053: a sponsorship question about NOW only ("Do you currently require sponsorship?"). requires_sponsorship means
+# now OR in the future, so only requires_sponsorship_now (or requires_sponsorship = false) answers it.
+_NOW_ONLY = re.compile(r"\b(?:now|currently|presently|at (?:this|the present) time|today|at present)\b")
+_FUTURE = re.compile(r"\bfuture\b|\bever\b|\blater\b|\bgoing forward\b|\bat any (?:point|time)\b|\bwill (?:you )?(?:ever )?"
+                     r"(?:need|require)\b|\bupcoming\b|\bduring (?:your|the) employment\b|\bnext\b")
 
 
 def country_fact(profile: ProfileLike, country: str, fact: str) -> bool | None:
@@ -746,6 +790,10 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
     home = str(profile.lookup("home_country") or "").upper() or None
     if core is None and not named and country == job_country == home and company:
         core = _home_job_core(f.label, country, company)
+    elif core is None and named == [home] and job_country == home and company:
+        # ADR-0053: on a confirmed home-country job, a question that also names that country ("Will <company> need to
+        # sponsor you to work in the US?"): the company's name is not a place word
+        core = _home_job_core(f.label, country, company)
     if core is None:
         name = _ISO_NAME.get(country)
         if name and named:                                   # only the user's own [answers] pattern naming that country
@@ -776,6 +824,11 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
             missing("work_authorized" if auth is None else "requires_sponsorship")
         return True, None
     if ck == "requires_sponsorship" or (has_sp and not has_auth):
+        if _NOW_ONLY.search(n) and not _FUTURE.search(n) and req is not False:
+            now = country_fact(profile, country, "requires_sponsorship_now")
+            if now is None:
+                return missing("requires_sponsorship_now")
+            req = now
         if req is None:
             return missing("requires_sponsorship")
         return True, _yn(not req if _SPONS_NEG.search(n) else req)
@@ -825,7 +878,7 @@ _SELF_REF = re.compile(r"\b(?:this|the) (?:company|organi[sz]ation)\b|(?<=\bfor 
                        r"(?<=\bwith )us\b")
 _TIME = r"(?:(?:ever|previously|formerly|currently|before|once) )*"
 _DIRECT_EMPLOY = re.compile(
-    rf"^(?:have|did|do) you {_TIME}(?:been employed|worked|work|been an? (?:employee|intern)) {_TIME}(?:by|for|at|with) {_CO}"
+    rf"^(?:have|did|do) you {_TIME}(?:been {_TIME}employed|worked|work|been an? (?:employee|intern)) {_TIME}(?:by|for|at|with) {_CO}"
     rf"(?: {_TIME}| before| previously| for any (?:length|period) of time)?$|"
     rf"^(?:are|were) you {_TIME}(?:been )?employed (?:by|at) {_CO}(?: before| previously| for any (?:length|period) of time)?$|"
     rf"^(?:are|were) you an? (?:current or former|former or current|current|former|previous|past|prior) "
@@ -841,6 +894,10 @@ _CO_QUALIFIER_PHRASES = re.compile(r"\b(army|navy|air force|armed forces|marines
                                    r"national guard|veterans?|transit authority|school district)\b")
 _GENERIC_CO_WORDS = frozenset(["the", "global", "united", "american", "national", "general", "first", "international",
                                "data", "systems", "group", "technologies", "digital", "new", "world", "health"])
+
+
+_AFFILIATE_TAIL = re.compile(r" (?:or|and(?:/or)?) (?:an? |any |one of )?(?:\S+ ){0,4}(?:s )?(?:affiliates?|subsidiar(?:y|ies)|"
+                             r"affiliated (?:company|companies|entity|entities))(?: of \S+)?$")
 
 
 def _mark_company(words: list[str], name: str) -> tuple[list[str], bool]:
@@ -930,6 +987,128 @@ def _residence_answer(f: FormField, profile: ProfileLike) -> Any | None:
     return _yn(v)
 
 
+# ---- residence, location and employer facts (ADR-0053) ----------------------------------------------------------
+# Read from [contact] and [[work]] only. A missing fact leaves the field unresolved and records a profile gap; a
+# place the rule cannot compare exactly (a metro area, "near", two places, an unknown city) stays unresolved.
+_AMBIGUOUS_STATE_NAMES = frozenset(["new york", "washington"])     # also city names: "located in New York?"
+_US_STATE_NAMES = {normalize(v): k for k, v in US_STATES.items()}
+_IF_IN_US = re.compile(r"^if (?:you are |you re )?(?:located|based|living|residing) in the (?:us|u s|usa|united states)\b")
+
+
+def _region_code(region: str) -> str | None:
+    r = normalize(region)
+    return r.upper() if r.upper() in US_STATES else _US_STATE_NAMES.get(r)
+
+
+def _place_answer(place: str, profile: ProfileLike, near: bool, gap: Any) -> Any | None:
+    """Yes/No for "located in <place>" (country, US state or the owner's own city), Yes for "within N miles of <the
+    owner's own city>"; anything else None. `place` is the raw text after "in"/"of"."""
+    city, region = str(profile.lookup("contact:city") or ""), str(profile.lookup("contact:region") or "")
+    home = country_iso(profile.lookup("country") or "")
+    raw = re.sub(r"[?.!]+\s*$", "", place).strip()
+    x = normalize(re.sub(r"^the\s+", "", raw, flags=re.IGNORECASE))
+    if not x:
+        return None
+    parts = [normalize(t) for t in raw.split(",") if normalize(t)]
+    if city and parts and parts[0] == normalize(city):
+        # ADR-0053 (control): the owner's own city counts only with the profile's region (state/province) named; a
+        # country is accepted only after that region ("Springfield, IL, USA"). A bare "Springfield" or "Springfield,
+        # USA" may be another Springfield. Only a home country without subdivisions accepts "<city>, <country>".
+        rest = parts[1:]
+        if not rest or len(rest) > 2:
+            return None
+
+        def same_region(r: str) -> bool:
+            return bool(region) and (r == normalize(region) or (_region_code(r) is not None
+                                                                and _region_code(r) == _region_code(region)))
+
+        def same_country(r: str) -> bool:
+            return home is not None and country_iso(r, allow_codes=False) == home
+        if region or home is None or home in SUBDIVISIONS:
+            ok = same_region(rest[0]) and (len(rest) == 1 or same_country(rest[1]))
+        else:
+            ok = len(rest) == 1 and same_country(rest[0])
+        return "Yes" if ok else None
+    if near:                                                  # no geocoder: another place is never "computable"
+        if not city:
+            gap("contact.city")
+        return None
+    iso = country_iso(x, allow_codes=False)
+    if iso:
+        if not home:
+            gap("contact.country")
+            return None
+        return _yn(iso == home)
+    st = x.removesuffix(" state")
+    if st in _US_STATE_NAMES and (st not in _AMBIGUOUS_STATE_NAMES or x.endswith(" state")):
+        if not home:
+            gap("contact.country")
+            return None
+        if home != "US":
+            return "No"
+        mine = _region_code(region)
+        if mine is None:
+            gap("contact.region")
+            return None
+        return _yn(mine == _US_STATE_NAMES[st])
+    if not city:
+        gap("contact.city")
+    return None
+
+
+def _profile_fact(f: FormField, ck: str, profile: ProfileLike, gaps: list[dict[str, Any]] | None) -> Any | None:
+    def gap(fact: str) -> None:
+        if gaps is not None:
+            gaps.append({"country": None, "fact": fact, "key": f.key, "profile_fact": True})
+    n = normalize(f.label)
+    choice = bool(f.options) or f.kind in (FieldKind.select, FieldKind.multiselect)
+    if ck in ("recent_company", "recent_title", "current_company", "current_title"):
+        if choice or f.kind not in (FieldKind.text, FieldKind.textarea, FieldKind.unknown):
+            return None
+        v = profile.lookup("work:" + ck)
+        if not v:
+            gap("work.current" if ck.startswith("current") else "work")
+        return v or None
+    if ck == "country":
+        c = str(profile.lookup("country") or "").strip()
+        if not c:
+            gap("contact.country")
+            return None
+        if not f.options:
+            return c if f.kind in (FieldKind.text, FieldKind.unknown, FieldKind.location) else None
+        iso = country_iso(c)
+        hit = [o for o in f.options if iso and country_iso(o) == iso]
+        if len(hit) > 1:
+            return None
+        if not hit:
+            return c                           # no option names the country exactly: the usual option snapping
+        return hit if f.kind == FieldKind.multiselect else hit[0]
+    if ck == "residence_city_state":
+        if choice:
+            return None
+        city, region = str(profile.lookup("contact:city") or ""), str(profile.lookup("contact:region") or "")
+        if _IF_IN_US.search(n):
+            home = country_iso(profile.lookup("country") or "")
+            if home is None:
+                gap("contact.country")
+                return None
+            if home != "US":
+                return None                     # the question is for US residents only: the owner decides
+        if not city or not region:
+            gap("contact.city" if not city else "contact.region")
+            return None
+        return f"{city}, {region}"
+    if ck in ("located_near", "located_in_place"):
+        if f.options and not _yes_no_options(f.options) or f.kind not in (FieldKind.boolean, FieldKind.select,
+                                                                         FieldKind.text, FieldKind.unknown):
+            return None
+        m = re.search(r"\bwithin\s+\d+\s*(?:miles?|mi|kilometers?|kilometres?|km)\s+of\s+(.+)$", f.label, re.IGNORECASE) \
+            if ck == "located_near" else re.search(r"\b(?:located|based|live|living|reside|residing)\s+in\s+(.+)$",
+                                                    f.label, re.IGNORECASE)
+        return _place_answer(m.group(1), profile, ck == "located_near", gap) if m else None
+    return None
+
+
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
               company_aliases: Sequence[str] = (), job_country: str | None = None,
               gaps: list[dict[str, Any]] | None = None) -> tuple[bool, Any]:
@@ -946,10 +1125,13 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return (False, None) if v is None else (True, v)
     if ck in ("work_authorized", "requires_sponsorship"):
         return _auth_answer(f, ck, profile, job_country, gaps, company)
-    if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite"):
+    if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
             return True, None
         v = profile.lookup(ck)
+        if v is None and gaps is not None:                    # ADR-0053: [preferences] fact missing
+            gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(ck, ck), "key": f.key,
+                         "profile_fact": True})
         return (False, None) if v is None else (True, v)
     if ck == "knows_employee":
         if not company:
@@ -977,9 +1159,25 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             return True, pick_gpa_option(g, f.options)
         return True, re.sub(r"\s*/.*$", "", str(raw).strip())
     if ck == "prior_employee":
-        if not company or not about_this_company(f.label, company, company_aliases):   # ADR-0038: government/competitor/other employers
+        worked = bool(company) and bool(profile.lookup("employer:" + normalize(company)))
+        if company and re.search(r"\b(?:worked|work|working) with\b", n):
+            # ADR-0053 (control): "worked WITH <company>" may mean a vendor or partner relationship. Employment
+            # proves Yes; its absence proves nothing, so never a No
+            return True, ("Yes" if worked and about_this_company(_AFFILIATE_TAIL.sub("", n), company, company_aliases)
+                          else None)
+        if company and not about_this_company(f.label, company, company_aliases):   # ADR-0038: government/competitor/other employers
+            # ADR-0053: "... <Company> or a <Company> affiliate?" is Yes when <Company> is in the work history; a No
+            # would also deny every affiliate, which the profile cannot know, so that case stays with the owner
+            if worked and about_this_company(_AFFILIATE_TAIL.sub("", n), company, company_aliases):
+                return True, "Yes"
             return True, profile.lookup(n)                            # only the user's own explicit answer
-        return True, "Yes" if profile.lookup("employer:" + normalize(company)) else "No"
+        if not company:
+            return True, profile.lookup(n)
+        if not worked and not profile.lookup("work_history"):        # ADR-0053: no work history at all: not a "No"
+            if gaps is not None:
+                gaps.append({"country": None, "fact": "work", "key": f.key, "profile_fact": True})
+            return True, None
+        return True, "Yes" if worked else "No"
     if ck == "marketing_optin":               # ADR-0050: owner-only, never an automatic No (or Yes)
         return True, None
     if ck == "languages_known":
@@ -1561,6 +1759,18 @@ def flat_auth_allowed(f: FormField, profile: ProfileLike, job_country: str | Non
     return country is not None and country == home
 
 
+_FACT_RULE_KEYS = PROFILE_FACT_KEYS | {"prior_employee", "willing_to_relocate", "relocation_support", "open_to_hybrid",
+                                      "open_to_onsite", "located_in_us", "work_authorized", "requires_sponsorship"}
+
+
+def fact_rule_field(f: FormField, company: str = "", aliases: Sequence[str] = ()) -> bool:
+    """ADR-0053: a field the deterministic profile-fact rules own (employer, title, prior employment, residence,
+    preferences, authorization). Left unresolved by those rules, it goes to the owner: the autonomy layer
+    (ADR-0052) never assumes or infers it."""
+    return (canonical_key(f.label) in _FACT_RULE_KEYS or is_auth_question(f)
+            or (bool(company) and about_this_company(f.label, company, aliases)))
+
+
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
                stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
@@ -1612,6 +1822,9 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 res.unresolved.append(f)  # owner-only: never Yes, never an automatic No, no flat/persona/LLM
             continue
         ck = canonical_key(f.label)
+        if (ck is None and company and not is_auth_question(f)
+                and about_this_company(f.label, company, company_aliases)):
+            ck = "prior_employee"        # ADR-0053: "Have you worked with <posting company>?" is work history, not a skill
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
             ck = canonical_key(f.label, skip=("privacy_ack",))
         # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0038)
@@ -1628,6 +1841,13 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             continue
         if ck == "referral_source" and f.options:
             ok(f, pick_source(profile.lookup("referral_source"), f.options, pref), "rule:referral_source")
+            continue
+        if ck in PROFILE_FACT_KEYS:          # ADR-0053: [contact] / [[work]] facts only, never a flat or persona value
+            pv = _profile_fact(f, ck, profile, gaps)
+            if ck in ("located_near", "located_in_place") and pv is None:
+                pv = profile.lookup(normalize(f.label))   # only the owner's own explicit answer for that wording
+            c = pv if (pv is None or isinstance(pv, list)) else _coerce(f, pv, min_score)
+            ok(f, c, f"rule:{ck}")
             continue
         if ck in _SEMANTIC_KEYS:
             handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases, job_country, gaps)
@@ -1686,9 +1906,10 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
     res.answers = keep
     answered = {a.key for a in res.answers}
     res.profile_gaps = list({(g["country"], g["fact"]): g for g in gaps
-                             if g["key"] not in answered and g["country"]}.values())
+                             if g["key"] not in answered and (g["country"] or g.get("profile_fact"))}.values())
     # authorization/sponsorship fields whose country is not confirmed: never a gap under any reusable key
-    res.no_gap_keys = {g["key"] for g in gaps if not g["country"] and g["key"] not in answered}
+    res.no_gap_keys = {g["key"] for g in gaps if not g["country"] and not g.get("profile_fact")
+                       and g["key"] not in answered}
     res.skipped_voluntary = [f for f in res.unresolved if not f.required
                              and (f.key in eeo_keys or _DEMOGRAPHIC_LABEL.search(f.label) or _VOLUNTARY_LABEL.search(f.label))]
     return res
