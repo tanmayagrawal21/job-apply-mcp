@@ -207,7 +207,7 @@ CONTROL_LABELS = [
     ("Okay to WhatsApp you?", ["whatsapp"]),
     ("Would you like Signal updates?", ["signal"]),
     ("Can we reach you on Signal?", ["signal"]),
-    ("Can we contact you with updates?", ["contact"]),
+    ("Can we contact you with updates?", ["contact"]),          # generic contact: owner-only (review round 3)
     ("Can we email you about future roles?", ["email", "marketing"]),
 ]
 
@@ -217,6 +217,11 @@ def test_control_labels_fail_closed(label, chans):
     p = view(CONTROL_FLAT)
     f = F("q", label, FieldKind.select, options=YN)
     assert optin_channels(f) == chans
+    if chans == ["contact"]:            # no named messaging channel: never auto-answered, even with optin:contact
+        for q in (p, view(CONTROL_FLAT | {"optin:contact": "Yes"})):
+            assert run(label, p=q)[:2] == (None, ["q"])
+            assert run(label, p=q, required=False)[:2] == (None, ["q"])
+        return
     assert run(label, p=p)[0] == ("No", "rule:messaging_optin")
     assert run(label, FieldKind.boolean, options=None, p=p)[0] == (False, "rule:messaging_optin")
     assert run(label, p=p, required=False) == (None, [], ["q"])
@@ -243,8 +248,11 @@ def test_skills_facts_and_other_rules_are_not_optins(label):
     assert optin_channels(F("q", label, FieldKind.select, options=YN)) is None
 
 
-def test_open_to_receiving_newsletter_optional_is_empty():
-    assert run("Are you open to receiving our newsletter?", required=False) == (None, [], ["q"])
+def test_open_to_receiving_newsletter_is_owner_only():
+    # not narrow permission wording: owner-only (unresolved), never a flat answer
+    assert run("Are you open to receiving our newsletter?", required=False, p=view({"newsletter": "Yes"})) == \
+        (None, ["q"], [])
+    assert run("Are you open to receiving our newsletter?", p=view({"newsletter": "Yes"}))[:2] == (None, ["q"])
 
 
 @pytest.mark.parametrize("tail", ["for the location you selected", "for the locations you selected",
@@ -264,3 +272,69 @@ def test_engine_guard_covers_every_wording():
     assert contact_permission_channels("WhatsApp number") == []
     assert contact_permission_channels("Have you built SMS gateways?") == []
     assert contact_permission_channels("WhatsApp updates", choice=True) == ["whatsapp"]
+
+
+# ---------------------------------------------------------------- review round 3: broad marks owner-only, never answers
+EVERY_FLAT = CONTROL_FLAT | {"experience": "Yes", "on call": "Yes", "available": "Yes", "platform": "Yes",
+                             "tools": "Yes", "manager": "Yes", "managed": "Yes", "cold calls": "Yes",
+                             "valid email": "Yes", "push": "Yes", "messages": "Yes", "clients": "Yes",
+                             "phone calls": "Yes", "customer calls": "Yes", "status updates": "Yes", "receive": "Yes",
+                             "job alerts": "Yes", "campaigns": "Yes"}
+REVIEWER_9 = [
+    "Are you comfortable communicating with clients daily?",
+    "Will you be able to answer customer calls during business hours?",
+    "Are you comfortable sending weekly status updates to stakeholders?",
+    "Do you have a valid email address?",
+    "Can you handle a high volume of phone calls?",
+    "Are you comfortable making cold calls?",
+    "Will you respond to messages from the team promptly?",
+    "Are you willing to push code to production on weekends?",
+    "Have you managed email marketing campaigns?",
+]
+
+
+@pytest.mark.parametrize("label", REVIEWER_9)
+def test_ordinary_job_questions_are_never_auto_answered(label):
+    for p in (view(), view(EVERY_FLAT)):
+        for req in (True, False):
+            assert run(label, p=p, required=req)[:2] == (None, ["q"]), (label, req)
+            assert run(label, FieldKind.boolean, options=None, p=p, required=req)[:2] == (None, ["q"])
+
+
+# control round 3: exceptions remove only their own words; label -> answer when required without optin
+CONTROL_12 = [
+    ("Are you OK being on call and receiving texts?", None),
+    ("Are you available to receive texts from our recruiters?", None),
+    ("Can we email you about future engineering roles?", "No"),
+    ("Do you want job alerts for our platform?", None),
+    ("Can we text you about our tools?", "No"),
+    ("Can we contact your manager and also text you?", None),
+    ("Is it OK to text your emergency contact and you?", None),
+    ("Have you been contacted by us before, and may we text you?", "No"),
+    ("Can we text you using WhatsApp?", "No"),
+    ("Can we contact you about a phone screen?", None),
+    ("Can we text you about your availability?", "No"),
+    ("Do you have WhatsApp experience, and may we message you there?", None),
+]
+
+
+@pytest.mark.parametrize("label,want", CONTROL_12)
+def test_compound_labels_never_yes_without_optin(label, want):
+    p = view(EVERY_FLAT)
+    got, unresolved, _ = run(label, p=p)
+    if want == "No":
+        assert got == ("No", "rule:messaging_optin")
+        assert run(label, p=p, required=False) == (None, [], ["q"])
+    else:
+        assert (got, unresolved) == (None, ["q"])
+        assert run(label, p=p, required=False)[:2] == (None, ["q"])
+    assert run(label, FieldKind.boolean, options=None, p=p, required=False)[0] in (None,)
+    f = F("q", label, FieldKind.select, options=YN)
+    from job_apply_mcp.apply.mapper import never_llm
+    assert never_llm(f)                 # owner-only: never a model
+
+
+def test_narrow_optin_with_stored_yes_for_every_channel():
+    p = view(EVERY_FLAT | {"optin:whatsapp": "Yes", "optin:sms": "Yes"})
+    assert run("Can we text you using WhatsApp?", p=p)[0] == ("Yes", "rule:messaging_optin")
+    assert run("Are you comfortable making cold calls?", p=view({"optin:phone": "Yes"}))[:2] == (None, ["q"])

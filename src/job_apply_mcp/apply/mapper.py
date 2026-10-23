@@ -1049,6 +1049,9 @@ def never_llm(f: FormField) -> bool:
     texts = [normalize(f.label), *(normalize(o) for o in f.options)]
     if any(_NEVER_LLM_LEGAL.search(t) or _NEVER_LLM_PLACE.search(t) for t in texts):
         return True
+    choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
+    if contact_permission_channels(f.label, choice=choice) or _TEXT_OPTIN.search(_strip_exceptions(texts[0])):
+        return True                     # ADR-0050: contact-permission questions are owner-only
     return f.kind != FieldKind.textarea and any(_NEVER_LLM_PLACE_SHORT.search(t) for t in texts)
 
 
@@ -1325,7 +1328,7 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: s
 # one is left empty (omitted: never a task, never a model). No flat [answers] pattern, persona or LLM ever sees it.
 _OPTIN_CHANNELS: list[tuple[str, re.Pattern[str]]] = [
     ("whatsapp", re.compile(r"\bwhats ?app\w*\b")),
-    ("sms", re.compile(r"\bsms\b|\bmms\b|\btext(?:s|ed|ing)?\b(?! (?:box|field|area|input|below|above|editor)\b)")),
+    ("sms", re.compile(r"\bsms\b|\bmms\b|\b(?:mobile|cell(?:ular)?|phone) messag\w*|\btext(?:s|ed|ing)?\b(?! (?:box|field|area|input|below|above|editor)\b)")),
     ("phone", re.compile(r"\b(?:call(?:s|ed|ing)?|phone(?:d|s)?|voicemail)\b")),
     ("email", re.compile(r"\be ?mail(?:s|ed|ing)?\b")),
     ("signal", re.compile(r"\bsignal\b")),
@@ -1348,14 +1351,36 @@ _OPTIN_ADDRESSED = re.compile(r"\b(?:you|your|me|my|i)\b|\bopt(?:ing|ed)? ?in\b|
 # a choice/checkbox whose label starts with the channel ("SMS updates", "WhatsApp: may we ...") is addressed too
 _OPTIN_LEADING = re.compile(r"^(?:sms|text|e ?mail|whats ?app|phone|push|marketing|newsletter|signal|telegram)\b")
 # skills / experience, facts about the past, other people and the company's own process are not opt-ins
-_OPTIN_NOT = re.compile(r"\bexperience\w*\b|\bskills?\b|\byears?\b|\bworked\b|\bproficien\w*|\bfamiliar\w*\b|"
-                        r"\bbackground in\b|\bbuil(?:t|d|ding)\b|\bdevelop\w*|\bimplement\w*|\bdesign(?:ed|ing)?\b|"
-                        r"\bintegrat\w*|\bdeploy\w*|\bengineer\w*|\bexpertise\b|\bknowledge\b|\btools?\b|"
-                        r"\btechnolog\w*|\bplatforms?\b|\bapis?\b|\bgateways?\b|\btwilio\b|\bused\b|\busing\b|"
-                        r"\bhave you (?:ever |previously |already )?(?:been )?(?:contact|call|email|messag|text|reach)\w*|"
-                        r"\b(?:did|has|have) (?:anyone|someone|a recruiter|we|our)\b|\breferences?\b|\breferees?\b|"
-                        r"\bemployers?\b|\bmanager\b|\bemergency\b|\bkin\b|\bon ?call\b|\bpager\w*|"
-                        r"\bphone (?:interview|screen)\w*|\bvideo (?:call|interview)\w*|\bavailab\w*")
+# Exceptions REMOVE only the words they account for (control round 3): "WhatsApp experience", "experience with Twilio
+# SMS", "call your references", "on call", "phone screen". Whatever remains is checked again, so "Do you have WhatsApp
+# experience, and may we message you there?" still asks to contact the candidate.
+_W = r"(?: (?!and\b|or\b|but\b|also\b)\w+)"           # one following word inside the same clause
+_OPTIN_NOT = re.compile(
+    r"(?:\b\w+ ){0,2}\b(?:experience\w*|expertise|skills?|knowledge|proficien\w*|familiar\w*|background in)\b"
+    rf"(?: (?:with|in|using|of|on|building|managing|as)\b{_W}{{0,4}})?|"
+    rf"\b(?:built|build|building|developed|develop\w*|implement\w*|designed|designing|integrat\w*|deploy\w*|"
+    rf"managed|managing|worked (?:on|with)|administer\w*)\b{_W}{{0,3}}|"   # never "using": "text you using WhatsApp"
+    r"\b(?:\d+ )?years?(?: of)?\b|\bengineer\w*|\btools?\b|\btechnolog\w*|\bplatforms?\b|\bapis?\b|\bgateways?\b|"
+    r"\btwilio\b|"
+    rf"\bhave you (?:ever |previously |already )?(?:been )?(?:contact|call|email|messag|text|reach)\w*"
+    rf"(?: by{_W}{{1,4}})?(?: before)?|"
+    rf"\b(?:did|has|have) (?:anyone|someone|a recruiter|we|our)\b{_W}{{0,4}}|"
+    r"\b(?:your |the |my |our )?(?:current |previous |former |past )?(?:references?|referees?|employers?|managers?|"
+    r"supervisors?|emergency contacts?|next of kin)\b|"
+    r"\bon ?call\b|\bpager\w*|\bphone (?:interview|screen)\w*|\bvideo (?:call|interview)\w*|\bavailab\w*")
+
+
+def _names_channel(f: FormField) -> bool:
+    """A choice/boolean field whose raw label names any contact channel (before exceptions are removed)."""
+    choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
+    n = normalize(f.label)
+    return choice and any(rx.search(n) for c, rx in _OPTIN_CHANNELS if c != "contact")
+
+
+def _strip_exceptions(n: str) -> str:
+    return re.sub(r"\s+", " ", _OPTIN_NOT.sub(" ", n)).strip()
+
+
 _OPTOUT = re.compile(r"\bopt(?:ing|ed)? ?out\b|\bunsubscri\w*|\bstop receiving\b|\b(?:do not|don t|never) "
                      r"(?:want|wish) to (?:receive|be contacted)\b")
 
@@ -1369,9 +1394,9 @@ _TEXT_OPTIN = re.compile(r"\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bsubscri\w*|\bsi
 def contact_permission_channels(label: str, choice: bool = False) -> list[str]:
     """ADR-0050: the channels a label asks permission to contact the candidate on ([] when it is not such a
     question). Shared by the mapper's opt-in rule and the engine, which refuses client answers for these fields."""
-    n = normalize(label)
+    n = _strip_exceptions(normalize(label))
     chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
-    if not chans or _OPTIN_NOT.search(n) or not (_OPTIN_ADDRESSED.search(n) or (choice and _OPTIN_LEADING.search(n))):
+    if not chans or not (_OPTIN_ADDRESSED.search(n) or (choice and _OPTIN_LEADING.search(n))):
         return []
     return [c for c in chans if c != "contact"] or ["contact"]
 
@@ -1380,18 +1405,19 @@ def optin_channels(f: FormField) -> list[str] | None:
     """The channels a choice/boolean field asks permission to contact the candidate on, or None when it is not a
     contact-permission question. [] = an opt-in the owner must answer (opt-out wording, bundled consent, free text).
     A text field naming a channel ("WhatsApp number", "Your email") is not an opt-in."""
-    n = normalize(f.label)
+    n = _strip_exceptions(normalize(f.label))      # exceptions remove only the words they cover
     chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
-    if not chans or _OPTIN_NOT.search(n):
-        return None                     # "experience with Twilio", "built SMS gateways", "contact your references"
+    if not chans:
+        return None                     # "experience with Twilio SMS", "built SMS gateways", "call your references"
     choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
     if not choice:
         return [] if _TEXT_OPTIN.search(n) else None
-    if is_auth_question(f) or eeo_class(f.label)[0] or canonical_key(f.label) in _OPTIN_OTHER_KEYS:
-        return None                     # a real question with its own rule (authorization, EEO, referral, ...)
     shared = contact_permission_channels(f.label, choice=True)
     if not shared:
         return None
+    if is_auth_question(f) or eeo_class(f.label)[0] or canonical_key(f.label) in _OPTIN_OTHER_KEYS:
+        # a question with its own rule; if another clause still asks permission to contact, the owner decides
+        return [] if _PERMISSION_ASK.search(n) else None
     if _OPTOUT.search(n) or _OPTIN_BUNDLED.search(n):
         return []                       # opt-out wording, or bundled with a notice/terms/attestation: the owner decides
     return shared
@@ -1410,9 +1436,32 @@ def _no_option(options: Sequence[str]) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
+# ADR-0050 (review round 3): only a NARROW permission question with a named messaging/marketing channel is ever
+# answered. The broad classifier (contact_permission_channels) only marks a field owner-only: "Are you comfortable
+# making cold calls?" or "Do you have a valid email address?" is never answered by this rule.
+_PERMISSION_ASK = re.compile(
+    r"\bopt(?:ing|ed)? ?in\b|\bconsent\w*|\bsubscri\w*|\bsign(?: me)? up\b|\bpermission\b|"
+    r"\bagree\w* to (?:receive|receiving|be (?:contacted|texted|called|emailed|messaged))\b|"
+    r"\b(?:may|can|could) (?:we|our (?:team|recruiters?)|recruiters?|\w+ recruiting) (?:send|contact|text|call|email|"
+    r"message|reach|whats ?app)\w*(?: or (?:contact|text|call|email|message)\w*)? (?:you|your)\b|"
+    r"\bok(?:ay)? to (?:text|call|email|contact|message|whats ?app)\w* (?:you|your)\b|"
+    r"\b(?:would|d) (?:you |i )?like (?:to receive|to get)?\b|"
+    r"\bjoin (?:our|the|\w+(?: \w+)? s) (?:talent (?:community|network|pool)|mailing list|newsletter)\b")
+# channels that may be auto-answered; bare phone/call, email, push and generic contact words never are
+_AUTO_CHANNELS = frozenset({"whatsapp", "sms", "signal", "telegram", "wechat", "line", "viber", "imessage",
+                            "marketing"})
+
+
+def permission_ask(f: FormField, chans: Sequence[str]) -> bool:
+    """A narrow opt-in: permission wording AND at least one named messaging or marketing channel."""
+    return (bool(chans) and bool(_AUTO_CHANNELS & set(chans))
+            and bool(_PERMISSION_ASK.search(_strip_exceptions(normalize(f.label)))))
+
+
 def optin_value(f: FormField, chans: list[str], profile: ProfileLike) -> Any | None:
-    """Yes only if the owner stored Yes for every named channel; else No when required, else None (left empty)."""
-    if not chans:
+    """Narrow opt-ins only: Yes if the owner stored Yes for every named channel; else No when required, else None
+    (left empty). Anything else the broad rule flags returns None (owner-only, unresolved)."""
+    if not permission_ask(f, chans):
         return None
     stored = [_truth(profile.lookup(f"optin:{c}")) for c in chans]
     if all(v is True for v in stored):
@@ -1501,10 +1550,10 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             ov = optin_value(f, chans, profile)
             if ov is not None:
                 res.answers.append(Answer(key=f.key, value=ov, source="rule:messaging_optin"))
-            elif f.required or not chans:
-                res.unresolved.append(f)  # owner decides (no clean No option, opt-out wording, text box)
+            elif f.required or not permission_ask(f, chans):
+                res.unresolved.append(f)  # owner-only: broad contact wording, no clean No option, opt-out, text box
             else:
-                res.omitted.append(f)     # optional: left empty, never a task
+                res.omitted.append(f)     # optional narrow opt-in: left empty, never a task
             continue
         ck = canonical_key(f.label)
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
@@ -1549,6 +1598,9 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             res.unresolved.append(f)
             if not flat_auth_allowed(f, profile, job_country):
                 gaps.append({"country": None, "fact": None, "key": f.key})
+            continue
+        if _names_channel(f):            # ADR-0050: a choice field naming a contact channel never takes a flat,
+            res.unresolved.append(f)     # persona or alias-phrase answer (only optin:<channel>, via the rule above)
             continue
         value: Any | None = profile.lookup(ck) if ck else None
         persona_src = False

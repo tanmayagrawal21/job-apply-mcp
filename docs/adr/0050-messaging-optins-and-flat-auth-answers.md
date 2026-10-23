@@ -14,24 +14,30 @@ QA (#70) found two wrong answers on Greenhouse postings:
    "now or in the future".
 
 ## Decision
-1. **Contact-permission questions are opt-ins (deny by default), before every answer source.** On a choice or
-   boolean field, a label that names a channel or contact word (text/SMS/MMS, call/phone, email, WhatsApp, Signal,
-   Telegram, WeChat, LINE, Viber, iMessage/RCS, push, marketing/newsletter/promotions/future roles/talent community/
-   job alerts, or generic contact/reach/message/updates/alerts/notifications) and addresses the candidate ("you",
-   "your", "me", opt in, consent, agree, receive, OK, allow, ...) is handled by `rule:messaging_optin` only. A
-   phrasing list is not needed: any such label qualifies unless it is a skills/experience question ("experience
-   with Twilio", "built SMS gateways"), a question about the past or other people ("have you been contacted",
-   references, employer, emergency contact), on-call/phone-screen/availability wording, an authorization or EEO
-   question, or a field with its own canonical rule (referral, prior employee, contact details, ...).
-   - **Yes** only when the owner stored Yes for every named channel under the exact `[answers]` key
-     `optin:<channel>`: `whatsapp`, `sms`, `phone`, `email`, `signal`, `telegram`, `wechat`, `line`, `viber`,
-     `imessage`, `push`, `marketing`, or `contact` (no channel named). Stored/persona answers and flat patterns
-     never count.
-   - Otherwise **No** when required (the single "No ..." / "do not want" option, or `false` for a checkbox), and
-     **left empty** when optional (`omitted`: never a task, never a model).
-   - Opt-out wording, unclear options, or an opt-in bundled with a notice, terms, attestation or recording consent
-     stay unresolved for the owner. On a free-text field only explicit opt-in wording (opt in, consent, subscribe,
-     "may we contact ...") is treated as an opt-in (unresolved); "WhatsApp number" or "Your email" is not.
+1. **Contact-permission questions: a broad owner-only marker and a narrow answer rule.**
+   - **Broad (owner-only).** On a choice or boolean field, a label that names a contact channel or contact word
+     (text/SMS/MMS, call/phone, email, WhatsApp, Signal, Telegram, WeChat, LINE, Viber, iMessage/RCS, push,
+     marketing/newsletter/future roles/talent community/job alerts, or generic contact/reach/message/updates/alerts)
+     and addresses the candidate is owner-only (`contact_permission_channels`). The engine refuses client answers for
+     it, it is never sent to a model (`never_llm`), and it stays unresolved. This marker never decides an answer.
+   - **Exceptions remove only their own words.** Skills/experience phrases ("WhatsApp experience", "experience with
+     Twilio SMS", "built SMS gateways", "managed email campaigns"), past contact ("have you been contacted by us"),
+     other people (references, employer, manager, emergency contact), "on call", "phone screen", "availability",
+     "tools", "platform" and similar are cut out of the label. Whatever remains is checked again, so "Do you have
+     WhatsApp experience, and may we message you there?" stays owner-only. An authorization, EEO or own-rule
+     question keeps its rule unless another clause still asks permission to contact (then the owner decides).
+   - **Narrow (answered).** Only a permission wording (`_PERMISSION_ASK`: opt in, consent, subscribe, sign me up,
+     agree to receive / be contacted, permission, "(may|can) we|recruiters (contact|text|call|email|message|reach)
+     you", "ok to (text|call|email|contact) you", "would you like (to receive)") together with a **named messaging
+     or marketing channel** (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`, `viber`, `imessage`,
+     `marketing`) is answered by `rule:messaging_optin`. It is Yes only when the owner stored Yes for every named
+     channel under the exact `[answers]` key `optin:<channel>` (the keys above plus `phone`, `email`, `push`).
+     Otherwise it is No when required and left empty when optional. The bare phone/call, email, push and generic
+     contact channels are never auto-answered.
+   - **No flat answer, ever.** A choice field whose label names any channel never takes a flat `[answers]`, persona
+     or alias-phrase answer. Only `optin:<channel>` can opt the user in.
+   - Opt-out wording, unclear options, or bundling with a notice, terms, attestation or recording consent stay
+     unresolved. On a free-text field only explicit opt-in wording counts (unresolved); "WhatsApp number" does not.
 2. **"opt-in" is one token** in `normalize_question` (`optin` / `optout`), so a flat `opt` pattern never matches it.
    Flat `[answers]` patterns already match whole words only (`\b<pattern>\b` on the normalized question); "opt" vs
    "opt in" was the one cross-token match. The OPT work-program term in the authorization-topic check likewise
