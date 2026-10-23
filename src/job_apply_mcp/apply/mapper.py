@@ -811,7 +811,7 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = ()) -> Any | N
 
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
-               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = ()) -> MapResult:
+               stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None) -> MapResult:
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
     res = MapResult()
 
@@ -838,6 +838,9 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 res.answers.append(Answer(key=f.key, value=str(v), source="derived:geo"))
             continue
         ck = canonical_key(f.label)
+        if persona is not None and (pv := persona.claim(f.label, ck)) is not None and (c := _coerce(f, pv, min_score)):
+            res.answers.append(Answer(key=f.key, value=c, source="persona:answer"))     # ADR-0047
+            continue
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
             ck = canonical_key(f.label, skip=("privacy_ack",))
         # opt-in (ADR-0034); only for a field that is not a sensitive or canonical question (ADR-0038)

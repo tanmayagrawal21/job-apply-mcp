@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 
-COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant"}
+COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "profile"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser(name, help=h).add_argument("rest", nargs="*")
     sub.add_parser("grant", help="HUMAN ONLY (needs a TTY): time-limited grants for agents (--list, --revoke)"
                    ).add_argument("rest", nargs=argparse.REMAINDER)
+    sub.add_parser("profile", help="build your profile: ask | list | answer (open gaps the tool collected)"
+                   ).add_argument("rest", nargs=argparse.REMAINDER)
     return p
 
 
@@ -73,6 +75,11 @@ def main(argv: list[str] | None = None) -> None:
         from .grants.cli import cli as grant_cli
 
         raise SystemExit(grant_cli(args.rest, load_settings()))
+    elif args.cmd == "profile":
+        from .config import load_settings
+        from .persona.cli import cli as profile_cli
+
+        raise SystemExit(profile_cli(args.rest, load_settings()))
     elif args.cmd == "doctor":
         from .doctor import run_doctor
 
