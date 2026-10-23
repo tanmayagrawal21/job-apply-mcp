@@ -708,12 +708,27 @@ def country_fact(profile: ProfileLike, country: str, fact: str) -> bool | None:
     v = _truth(profile.lookup(f"auth:{country}:{fact}"))
     home = str(profile.lookup("home_country") or "US").upper()
     if v is None and country == home and not (fact == "citizen" and home != "US"):
-        v = _truth(profile.lookup(_FLAT_KEY[fact]))
+        v = _truth(profile.lookup("structured:" + _FLAT_KEY[fact]))   # ADR-0050: never a flat [answers] pattern
     return v
 
 
+# ADR-0050: wording that names only the posting company or the places picked in an earlier question. On a confirmed
+# home-country job it does not change which country the question is about.
+_SELECTED_PLACES = re.compile(r"\b(?:for|in|to work in) (?:the )?location s? (?:that )?you (?:have )?selected"
+                              r"(?: (?:in )+(?:your|the) previous (?:response|answer|question))?")
+
+
+def _home_job_core(label: str, country: str, company: str) -> str | None:
+    """auth_core() after the company's name and "the location(s) you selected" are removed (home-country job only)."""
+    n = _SELECTED_PLACES.sub(" ", normalize(label))
+    words = [w for w in normalize(company).split() if w not in _LEGAL_SUFFIX and w not in _AUTH_VOCAB_GENERIC]
+    if words:
+        n = re.sub(rf"\b{re.escape(' '.join(words))}(?: s)?\b", " company ", n)
+    return auth_core(re.sub(r"\s+", " ", n).strip(), country)
+
+
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str | None = None,
-                 gaps: list[dict[str, Any]] | None = None) -> tuple[bool, Any]:
+                 gaps: list[dict[str, Any]] | None = None, company: str = "") -> tuple[bool, Any]:
     if auth_legal_blocked(f):
         return True, None
     named = named_countries(f.label)
@@ -728,13 +743,15 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
             gaps.append({"country": None, "fact": None, "key": f.key})
         return True, None
     core = auth_core(f.label, country, job_place=job_place and country == job_country)
+    home = str(profile.lookup("home_country") or "US").upper()
+    if core is None and not named and country == job_country == home and company:
+        core = _home_job_core(f.label, country, company)
     if core is None:
         name = _ISO_NAME.get(country)
         if name and named:                                   # only the user's own [answers] pattern naming that country
             return True, profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
         return True, None
     n = normalize(core)
-    home = str(profile.lookup("home_country") or "US").upper()
     auth, req = country_fact(profile, country, "work_authorized"), country_fact(profile, country, "requires_sponsorship")
     cit = country_fact(profile, country, "citizen")
 
@@ -743,7 +760,7 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
             gaps.append({"country": country, "fact": fact, "key": f.key})
         if country != home and (name := _ISO_NAME.get(country)) and named:
             return True, profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
-        return (False, None) if country == home else (True, None)
+        return True, None                    # ADR-0050: never a fall-through to flat [answers]
     ma, ms = _AUTH_WORDS.search(n), re.search(r"sponsor|\bvisa\b", n)
     has_auth, has_sp = bool(ma), bool(ms)
     if ma and ms and ms.start() < ma.start():    # "require sponsorship ... for work authorization": a sponsorship question
@@ -922,13 +939,13 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return True, _residence_answer(f, profile)
     if ck == "us_citizen":
         if _AUTH_WORDS.search(n):
-            return _auth_answer(f, "work_authorized", profile, job_country, gaps)
+            return _auth_answer(f, "work_authorized", profile, job_country, gaps, company)
         if re.search(r"permanent resident|green card|national\b", n):
             return True, None
         v = profile.lookup("us_citizen")
         return (False, None) if v is None else (True, v)
     if ck in ("work_authorized", "requires_sponsorship"):
-        return _auth_answer(f, ck, profile, job_country, gaps)
+        return _auth_answer(f, ck, profile, job_country, gaps, company)
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite"):
         if not _YESNO_STYLE.search(n):
             return True, None
@@ -1302,7 +1319,7 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: s
     return None
 
 
-# ---- messaging / marketing opt-ins (ADR-0049) -------------------------------------------------------
+# ---- messaging / marketing opt-ins (ADR-0050) -------------------------------------------------------
 # Fail closed: a WhatsApp, SMS/text, phone-messaging or marketing opt-in is never Yes unless the owner stored Yes for
 # that exact channel ([answers] key "optin:<channel>"). Otherwise a required field gets the No option, and an optional
 # one is left empty (omitted: never a task, never a model). No flat [answers] pattern, persona or LLM ever sees it.
@@ -1376,7 +1393,7 @@ def optin_value(f: FormField, chans: list[str], profile: ProfileLike) -> Any | N
     return [pick] if f.kind == FieldKind.multiselect else pick
 
 
-# ---- flat [answers] and authorization (ADR-0049) -----------------------------------------------------------
+# ---- flat [answers] and authorization (ADR-0050) -----------------------------------------------------------
 # Since ADR-0040 a job outside the home country takes only [authorization.<CC>] facts or a stored
 # authorization.<CC>.* answer. A flat [answers] pattern ("now or in the future", "require sponsorship") states a
 # home-country fact, so it may answer an authorization/sponsorship question only on a confirmed home-country job.
@@ -1442,7 +1459,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             ok(f, v, f"rule:{ek or 'eeo'}")
             continue
         chans = optin_channels(f)
-        if chans is not None:            # ADR-0049: messaging/marketing opt-in, before every answer source
+        if chans is not None:            # ADR-0050: messaging/marketing opt-in, before every answer source
             ov = optin_value(f, chans, profile)
             if ov is not None:
                 res.answers.append(Answer(key=f.key, value=ov, source="rule:messaging_optin"))
@@ -1490,9 +1507,9 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 else:
                     res.answers.append(Answer(key=f.key, value=c, source=f"rule:{ck}"))
                 continue
-        if is_auth_question(f) and not flat_auth_allowed(f, profile, job_country):
-            res.unresolved.append(f)     # ADR-0049: no flat/global answer for a foreign or unconfirmed-country job
-            if ck in ("work_authorized", "requires_sponsorship") or ck is None:
+        if is_auth_question(f):          # ADR-0050: only structured per-country facts (above) answer these
+            res.unresolved.append(f)
+            if not flat_auth_allowed(f, profile, job_country):
                 gaps.append({"country": None, "fact": None, "key": f.key})
             continue
         value: Any | None = profile.lookup(ck) if ck else None

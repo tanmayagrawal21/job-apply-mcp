@@ -1,4 +1,4 @@
-# ADR-0049: Messaging opt-ins fail closed; flat answers never answer foreign authorization
+# ADR-0050: Messaging opt-ins fail closed; flat answers never answer foreign authorization
 
 Status: accepted · Date: 2026-10-22 · Amends ADR-0030, ADR-0038, ADR-0040 · Issue #70
 
@@ -25,14 +25,23 @@ QA (#70) found two wrong answers on Greenhouse postings:
      stay unresolved for the owner. A text field that only names a channel ("WhatsApp number") is not an opt-in.
 2. **"opt-in" is one token** in `normalize_question` (`optin` / `optout`), so a flat `opt` pattern never matches it.
 3. **Any form of "sponsor"** maps to `requires_sponsorship`, so such questions take the per-country rule.
-4. **Flat answers are home-country facts.** In the generic lookup, a field whose label or options name
-   authorization, sponsorship, visas or work permits is answered only when its country (the one it names, else the
-   job's confirmed country) is the home country. Otherwise it is unresolved and never a reusable gap. A non-home job
-   uses only `[authorization.<CC>]` facts or a stored `authorization.<CC>.*` answer (ADR-0040).
-5. Defence in depth: "WhatsApp" joins the engine's consent-label and the browser's consent-option words, so a client
+4. **Flat answers never answer authorization or sponsorship.** A field whose label or options name authorization,
+   sponsorship, visas or work permits is answered only from structured facts: `[authorization]` (flat keys, for
+   `home_country`) or `[authorization.<CC>]`, or a stored `authorization.<CC>.*` answer (ADR-0040/0047). A missing
+   home-country fact no longer falls through to `[answers]` patterns, and `country_fact` falls back only to the
+   structured flat keys (`structured:<key>`). This replaces the ADR-0030 fallback to `[answers]` patterns.
+   A non-home or unconfirmed-country job stays unresolved, never a reusable gap.
+5. **"Sponsor you" on a confirmed home-country job.** When the question names no country and the job's confirmed
+   country is the home country, the posting company's name and "for the location(s) you selected (in your previous
+   response)" are removed before the strict vocabulary check. So "Will you require <company> to sponsor you for a
+   work permit now or in the future for the location(s) you selected ...?" is answered from the home-country
+   `requires_sponsorship` fact. For a US-home profile that is `[authorization] home_country = "US"` (the default) with
+   `requires_sponsorship = true|false`, or `[authorization.US] requires_sponsorship = true|false`.
+6. Defence in depth: "WhatsApp" joins the engine's consent-label and the browser's consent-option words, so a client
    or a DOM-only group never ticks it.
 
 ## Consequences
-Some questions answered before are now left to the owner (for example a sponsorship question that also names the
-company or "the location(s) you selected"). That is deliberate: a missing answer is recoverable, a false Yes to an
-opt-in or a sponsorship question is not.
+A profile that stated authorization or sponsorship only as `[answers]` patterns now gets these questions left to the
+owner. The fix is to set the structured `[authorization]` keys. Questions that name another country, or a job whose
+country is not confirmed, stay unresolved. A missing answer is recoverable; a false Yes to an opt-in or to a
+sponsorship question is not.

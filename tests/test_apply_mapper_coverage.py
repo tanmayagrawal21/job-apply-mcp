@@ -80,10 +80,11 @@ def test_sponsorship_unknown_stays_unresolved():
     assert run(sel("Will you require visa sponsorship?"), p) == (None, ["q"])
 
 
-def test_authorization_falls_back_to_answers_patterns():
+def test_authorization_never_falls_back_to_answers_patterns():
+    # ADR-0050 (#70): flat [answers] patterns never answer authorization or sponsorship, even on a home-country job
     p = prof(authorization=Authorization(), answers={"eligible to work": "Yes", "require sponsorship": "Yes"})
-    assert run(sel("Are you eligible to work in the US?"), p)[0] == "Yes"
-    assert run(sel("Do you now or will you in the future require immigration sponsorship"), p, job_in_us=True)[0] == "Yes"
+    assert run(sel("Are you eligible to work in the US?"), p)[0] is None
+    assert run(sel("Do you now or will you in the future require immigration sponsorship"), p, job_in_us=True)[0] is None
 
 
 COUNTRY = ["I am a citizen of this country", "I have permission to work here but will require sponsorship",

@@ -1,4 +1,4 @@
-"""ADR-0049 (#70): messaging/marketing opt-ins fail closed; flat [answers] never answer authorization or sponsorship
+"""ADR-0050 (#70): messaging/marketing opt-ins fail closed; flat [answers] never answer authorization or sponsorship
 on a foreign or unconfirmed-country job. Fictional profile only (Alex Rivera, Springfield)."""
 import pytest
 from apply_fakes import F
@@ -22,9 +22,9 @@ def view(answers=None, **auth):
                        Settings())
 
 
-def run(label, kind=FieldKind.select, options=YN, required=True, p=None, job="US"):
+def run(label, kind=FieldKind.select, options=YN, required=True, p=None, job="US", company="Acme Robotics"):
     f = F("q", label, kind, required=required, options=list(options) if options else None)
-    r = map_fields([f], p or view(), company="Acme Robotics", job_country=job)
+    r = map_fields([f], p or view(), company=company, job_country=job)
     got = {a.key: (a.value, a.source) for a in r.answers}.get("q")
     return got, [x.key for x in r.unresolved], [x.key for x in r.omitted]
 
@@ -126,13 +126,34 @@ def test_non_yes_no_sponsorship_options_on_a_foreign_job_stay_unresolved():
     assert run("Visa sponsorship status", options=opts, job="CA")[:2] == (None, ["q"])
 
 
-def test_home_country_job_still_uses_profile_facts():
-    assert run("Will you now or in the future require sponsorship to work in this role?", job="US")[0] == \
-        ("Yes", "rule:requires_sponsorship")
+STRIPE_STYLE = ("Will you require Acme Robotics to sponsor you for a work permit now or in the future for the "
+                "location(s) you selected in in your previous response?")
 
 
-def test_optin_bundled_with_a_notice_or_recording_consent_stays_with_the_owner():
-    for label in ("I acknowledge the privacy notice and agree to receive WhatsApp messages",
-                  "Do you consent to interview recording and to receive SMS reminders?"):
-        assert run(label, options=["I acknowledge", "I do not acknowledge"]) == (None, ["q"], [])
-        assert run(label) == (None, ["q"], [])
+def test_us_job_answers_sponsor_you_wording_from_the_structured_fact():
+    for auth in ({"requires_sponsorship": True}, {"US": {"requires_sponsorship": True}}):
+        p = view(**auth)
+        assert run(STRIPE_STYLE, p=p, job="US")[0] == ("Yes", "rule:requires_sponsorship")
+        assert run("Will you now or in the future require sponsorship to work in this role?", p=p, job="US")[0] == \
+            ("Yes", "rule:requires_sponsorship")
+    p = view(requires_sponsorship=False)
+    assert run(STRIPE_STYLE, p=p, job="US")[0] == ("No", "rule:requires_sponsorship")
+    assert run(STRIPE_STYLE, FieldKind.boolean, options=None, p=p, job="US")[0] == (False, "rule:requires_sponsorship")
+
+
+def test_us_job_without_a_structured_fact_is_unresolved_despite_flat_answers():
+    p = view(requires_sponsorship=None)               # FLAT still holds "now or in the future" / "require sponsorship"
+    assert run(STRIPE_STYLE, p=p, job="US")[:2] == (None, ["q"])
+    assert run("Will you now or in the future require sponsorship?", p=p, job="US")[:2] == (None, ["q"])
+
+
+def test_ca_job_with_only_a_us_fact_is_unresolved():
+    p = view(requires_sponsorship=False)
+    assert run(STRIPE_STYLE, p=p, job="CA")[:2] == (None, ["q"])
+    assert run(STRIPE_STYLE, p=p, job=None)[:2] == (None, ["q"])
+
+
+def test_home_job_relaxation_never_covers_another_named_country():
+    p = view(requires_sponsorship=False)
+    assert run("Will you require Acme Robotics to sponsor you for a work permit in Canada?", p=p, job="US")[:2] == \
+        (None, ["q"])

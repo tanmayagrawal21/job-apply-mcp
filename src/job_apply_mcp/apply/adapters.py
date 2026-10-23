@@ -204,7 +204,10 @@ class ProfileView:
         return None
 
     def lookup(self, key: str) -> Any | None:
-        if key.startswith("optin:"):      # ADR-0049: only the owner's exact [answers] key, never a stored/persona answer
+        if key.startswith("structured:"):   # ADR-0050: the [authorization]/[preferences] value only, never [answers]
+            st = self._structured(key[11:])
+            return None if st is None else self._TRI[st]
+        if key.startswith("optin:"):      # ADR-0050: only the owner's exact [answers] key, never a stored/persona answer
             want = key.lower()
             return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
         v = self._lookup(key)

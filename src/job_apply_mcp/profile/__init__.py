@@ -202,7 +202,7 @@ class Profile(BaseModel):
 
 def normalize_question(s: str) -> str:
     q = " ".join(re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split())
-    # ADR-0049: "opt-in" / "opt out" are one word, so a flat pattern "opt" (the US work program) never matches them
+    # ADR-0050: "opt-in" / "opt out" are one word, so a flat pattern "opt" (the US work program) never matches them
     return re.sub(r"\bopt (in|out)\b", r"opt\1", q)
 
 
