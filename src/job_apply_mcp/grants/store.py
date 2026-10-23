@@ -122,7 +122,22 @@ def os_user() -> str:
         return os.environ.get("USER", "")
 
 
+@dataclass(frozen=True)
+class _Ok:
+    ok: bool
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
 class GrantStore:
+    # Subclass hooks (ADR-0048: the consent window reuses this store with its own files and record type).
+    record_cls: type[Grant] = Grant
+    files: tuple[str, str] = ("grants.json", "audit.jsonl")
+    hwm_prefix: str = KEYRING_HWM_PREFIX
+    hwm_name: str = "grant_uses.json"
+
     def __init__(self, data_dir: str | Path, secret: bytes | None = None, *, use_keyring: bool = True,
                  clock=time.time, user: str | None = None, hwm_keyring: bool | None = None,
                  hwm_file: Path | None = None):
@@ -149,11 +164,11 @@ class GrantStore:
 
     @property
     def _grants_file(self) -> Path:
-        return self.dir / "grants.json"
+        return self.dir / self.files[0]
 
     @property
     def _audit_file(self) -> Path:
-        return self.dir / "audit.jsonl"
+        return self.dir / self.files[1]
 
     # ---- audit (hash-chained: prev signature is part of every line's signature)
     def _audit_lines(self) -> tuple[list[dict[str, Any]], bool]:
@@ -229,14 +244,30 @@ class GrantStore:
         if key is None:
             raise GrantError("grant secret unavailable")
         try:
-            g = Grant(**row)
+            g = self.record_cls(**row)
         except TypeError:
             raise GrantError("malformed grant record") from None
         if "used" not in row or not isinstance(g.used, int) or isinstance(g.used, bool) or g.used < 0:
             raise GrantError(f"grant {g.id}: malformed use counter (re-issue the grant)")
         if not hmac.compare_digest(g.sig, _sign(key, g.payload())):
             raise GrantError(f"grant {g.id}: signature invalid (tampered)")
+        self._validate(g)
         return g
+
+    def _validate(self, g: Grant) -> None:
+        """Extra structural checks on a correctly signed record (subclass hook)."""
+
+    def _covers(self, row: dict[str, Any], scope: str) -> bool:
+        """Does this (unverified) row claim `scope`? Grants carry exactly one scope."""
+        return row.get("scope") == scope
+
+    def _usable(self, g: Grant, scope: str) -> _Ok:
+        """Subclass hook for extra per-record conditions (e.g. a consent bound to another run)."""
+        return _Ok(True)
+
+    def _metered(self, scope: str) -> bool:
+        """Does using `scope` consume one of max_uses? Every grant scope does."""
+        return True
 
     def _dup_ids(self, rows: list[dict[str, Any]]) -> set[str]:
         """Grant ids that appear more than once: a copied row would carry its own counter, so it is tampering."""
@@ -251,7 +282,7 @@ class GrantStore:
     # ---- high-water mark: a third, independent use counter outside the data dir
     @property
     def _hwm_file(self) -> Path:
-        return self._hwm_path or (paths.config_dir() / "grant_uses.json")
+        return self._hwm_path or (paths.config_dir() / self.hwm_name)
 
     def _hwm_file_read(self) -> dict[str, int]:
         try:
@@ -266,7 +297,7 @@ class GrantStore:
         if self._hwm_keyring:
             try:
                 import keyring  # lazy: optional extra
-                v = keyring.get_password(KEYRING_SERVICE, KEYRING_HWM_PREFIX + gid)
+                v = keyring.get_password(KEYRING_SERVICE, self.hwm_prefix + gid)
                 if v and v.isdigit():
                     n = max(n, int(v))
             except Exception as e:  # noqa: BLE001 - no keyring / no backend: the file is the fallback
@@ -277,7 +308,7 @@ class GrantStore:
         if self._hwm_keyring:
             try:
                 import keyring
-                keyring.set_password(KEYRING_SERVICE, KEYRING_HWM_PREFIX + gid, str(n))
+                keyring.set_password(KEYRING_SERVICE, self.hwm_prefix + gid, str(n))
                 return
             except Exception as e:  # noqa: BLE001
                 log.debug("keyring unavailable for high-water mark (%s); using file", type(e).__name__)
@@ -323,12 +354,25 @@ class GrantStore:
         rows = self._read_all()
         for i, row in enumerate(rows):
             if row.get("id") == g.id and row.get("sig") == g.sig:
-                ng = Grant(**{**json.loads(g.payload()), "used": used + 1})
+                ng = self.record_cls(**{**json.loads(g.payload()), "used": used + 1})
                 rows[i] = {**json.loads(ng.payload()), "sig": _sign(key, ng.payload())}
                 self._hwm_set(g.id, used + 1)
                 self._write_all(rows)
                 return
         raise GrantError(f"grant {g.id}: record changed during use")
+
+    def _resign(self, g: Grant, **changes: Any) -> Grant:
+        """Rewrite one record with `changes` and a fresh signature (caller holds the lock)."""
+        key = self._key()
+        assert key is not None
+        rows = self._read_all()
+        for i, row in enumerate(rows):
+            if row.get("id") == g.id and row.get("sig") == g.sig:
+                ng = self.record_cls(**{**json.loads(g.payload()), **changes})
+                rows[i] = {**json.loads(ng.payload()), "sig": _sign(key, ng.payload())}
+                self._write_all(rows)
+                return self.record_cls(**rows[i])
+        raise GrantError(f"grant {g.id}: record changed during update")
 
     def active(self) -> list[tuple[Grant, int | None]]:
         """Valid, unexpired, same-user, unexhausted grants with remaining uses (None = unlimited). Read-only."""
@@ -359,18 +403,19 @@ class GrantStore:
         reason = "no active grant"
         key = self._key()
         if key is None:
-            raise GrantError(f"no active grant for '{scope}'; a human must run `job-apply-mcp grant {scope} --for 1h`")
+            raise GrantError(f"no active grant for '{scope}'; {self._hint(scope)}")
+        metered = self._metered(scope)
         with self._lock:
             entries, chain_ok = self._audit_lines()
             audit_n = self._audit_uses(entries)
             rows = self._read_all()
             dup = self._dup_ids(rows)
             now = self._clock()
-            for gid in sorted(i for i in dup if any(r.get("id") == i and r.get("scope") == scope for r in rows)):
+            for gid in sorted(i for i in dup if any(r.get("id") == i and self._covers(r, scope) for r in rows)):
                 reason = f"grant {gid}: duplicated in the grant store (tampered)"
                 self.audit_safe("tampered", gid, scope, "duplicate grant id")
             for row in rows:
-                if row.get("scope") != scope or row.get("id") in dup:
+                if not self._covers(row, scope) or row.get("id") in dup:
                     continue
                 try:
                     g = self._verify_row(row)
@@ -385,17 +430,24 @@ class GrantStore:
                     reason = f"grant {g.id}: issued for another OS user"
                 elif g.expires <= now:
                     reason = f"grant {g.id}: expired"
-                elif g.max_uses is not None and not chain_ok:
+                elif not (why := self._usable(g, scope)):
+                    reason = why.reason
+                elif g.max_uses is not None and metered and not chain_ok:
                     reason = f"grant {g.id}: audit log tampered; cannot verify use count"
-                elif g.max_uses is not None and used >= g.max_uses:
+                elif g.max_uses is not None and metered and used >= g.max_uses:
                     reason = f"grant {g.id}: max_uses reached"
                 else:
-                    if consume:
+                    if consume and metered:
                         self._bump(g, used)           # signed counter + high-water mark, then the audit line
                         self.audit("use", g.id, scope, detail)
+                    elif consume:                     # unmetered scope: audited, but never counted as a use
+                        self.audit("act", g.id, scope, detail)
                     return g
             self.audit_safe("denied", "", scope, reason)
-        raise GrantError(f"{reason}; a human must run `job-apply-mcp grant {scope} --for 1h`")
+        raise GrantError(f"{reason}; {self._hint(scope)}")
+
+    def _hint(self, scope: str) -> str:
+        return f"a human must run `job-apply-mcp grant {scope} --for 1h`"
 
     def audit_safe(self, *a: Any, **k: Any) -> None:
         with contextlib.suppress(Exception):    # a refusal must not turn into a crash
