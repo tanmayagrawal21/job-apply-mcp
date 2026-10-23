@@ -162,6 +162,8 @@ class ProfileView:
                 from .places import country_iso
                 iso = country_iso(c)
                 v = (iso == cc.upper()) if iso else None
+            if v is None and self.persona is not None:   # ADR-0047: the owner's answer to the recorded per-country gap
+                return self.persona.stored(f"authorization.{cc.upper()}.{fact}")   # an explicit profile fact wins
             return None if v is None else self._TRI[v]
         if key == "citizenship_country":
             return self._citizenship_country()

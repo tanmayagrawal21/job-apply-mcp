@@ -247,3 +247,35 @@ def test_free_text_gender_only_required_and_only_gender_if_required():
         p = ProfileView(Profile(demographics=Demographics(race_ethnicity="Asian", veteran_status="No",
                                                           disability_status="No", pronouns="she/her")), Settings())
         assert map_fields([F("x", label, FieldKind.text, required=True)], p).answers == [], label
+
+
+async def test_per_country_gap_answer_round_trip(tmp_path):
+    from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeStore, settings
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    from job_apply_mcp.core.models import ApplicationForm
+    from job_apply_mcp.persona import PersonaPolicy, ProfileDB
+    db = ProfileDB(tmp_path)
+    pv = ProfileView(Profile(contact=Contact(first_name="Alex", city="Springfield")), Settings())   # no auth facts
+    pv.persona = PersonaPolicy(pv.p.persona, db, pv.resume_projects)
+    form = ApplicationForm(ref=POSTING.ref, fields=[F("q", "Will you require sponsorship?", FieldKind.select,
+                                                      options=YN, required=True)])
+
+    async def plan(location, countries):
+        posting = POSTING.model_copy(update={"location": location, "countries": countries})
+        e = ApplyEngine(settings(), resolve_adapter=lambda ref: FakeAdapter(form=form, posting=posting), profile=pv,
+                        router=None, gates=FakeGates(), store=FakeStore(), driver_factory=lambda n: None)
+        e.persona, e.gaps = pv.persona, db
+        return await e.plan(POSTING.ref)
+    out = await plan("Toronto, ON", ["CA"])
+    assert "q" in out.plan.unresolved and db.gap("authorization.CA.requires_sponsorship") is not None
+    db.set_answer("authorization.CA.requires_sponsorship", "No", origin="user_written")
+    out = await plan("Toronto, ON", ["CA"])
+    assert {a.key: a.value for a in out.plan.answers}.get("q") == "No"        # the stored answer is reused for CA
+    out = await plan("New York, NY", ["US"])
+    assert "q" in out.plan.unresolved                                          # never for a US job
+    # an explicit profile fact wins over the stored answer
+    pv.p.authorization.countries["CA"] = pv.p.authorization.facts_for("US").model_copy(
+        update={"requires_sponsorship": True})
+    out = await plan("Toronto, ON", ["CA"])
+    assert {a.key: a.value for a in out.plan.answers}.get("q") == "Yes"

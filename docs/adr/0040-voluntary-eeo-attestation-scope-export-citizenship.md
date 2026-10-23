@@ -99,7 +99,7 @@ A QA round (issues #47, #48, #51) found:
   counts only when `home_country` is US, otherwise `[authorization.US].citizen`.
 - **With the gap collector (ADR-0047).** A per-country authorization gap is recorded as
   `authorization.<ISO-2>.<fact>`; that field is not passed to the collector as the unscoped home-country key, so an
-  owner's answer to a Canadian question can never become a US fact. An authorization/sponsorship field whose country
+  owner's answer to a Canadian question can never become a US fact; that stored answer is read back only for that country (`auth:<ISO-2>:<fact>`), and an explicit profile fact wins over it. An authorization/sponsorship field whose country
   is NOT confirmed (place-less on an unconfirmed job, several countries, a region, a contradiction) is recorded under no
   key at all: it stays unresolved and the posting is a handoff, so an answer given in that context is never reused.
 - **Free-text EEO fields.** A free-text EEO box is blank by default, whatever the profile says. The only exception is
