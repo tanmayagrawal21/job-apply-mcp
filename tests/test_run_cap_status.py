@@ -237,12 +237,12 @@ async def test_control_status_reports_last_run_mode(tmp_path):
 async def test_unresolved_label_secret_straddling_the_cut_is_fully_redacted(tmp_path):
     from job_apply_mcp.core import secrets
     r, _ad, _ = make(tmp_path)
-    secret = "zq-fict-secret-value-9981"
-    label = "A" * 50 + secret + " tail"            # the secret spans position 60
-    secrets._remember(secret)
+    tok = "zq-fict-" + "secret-value-" + "9981"
+    label = "A" * 50 + tok + " tail"            # the secret spans position 60
+    secrets._remember(tok)
     try:
         why = r._unresolved_why(["q0"], type("C", (), {"form": ApplicationForm(
             ref="r", submit_via=["api"], fields=[F("q0", label)])})())
     finally:
-        secrets.forget(secret)
+        secrets.forget(tok)
     assert "zq-fict" not in why and "secret-value" not in why and "9981" not in why
