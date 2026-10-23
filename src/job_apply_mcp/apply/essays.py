@@ -6,7 +6,9 @@ strict reviewer rejected. Only approved text is ever planned as an answer; rejec
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +28,8 @@ def save(data_dir: str | Path, ref: str, *, key: str, label: str, company: str, 
     try:
         d = essay_dir(data_dir, ref)
         d.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):   # owner-only: essays are private prose (no-op on Windows)
+            os.chmod(d, 0o700)
         p = d / f"{_SAFE.sub('_', key)[:80] or 'essay'}.md"
         lines = [f"# {label.strip()[:200]}", "",
                  f"- posting: {title} @ {company}", f"- ref: {ref}", f"- status: {status}",
@@ -35,7 +39,11 @@ def save(data_dir: str | Path, ref: str, *, key: str, label: str, company: str, 
         if violations:
             lines += ["- review findings:", *[f"  - {v[:300]}" for v in violations[:12]]]
         lines += ["", "---", "", text.strip(), ""]
-        p.write_text("\n".join(lines), encoding="utf-8")
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+        with contextlib.suppress(OSError):
+            os.chmod(p, 0o600)               # also tightens a file that existed before with wider bits
         return str(p)
     except OSError:
         return None

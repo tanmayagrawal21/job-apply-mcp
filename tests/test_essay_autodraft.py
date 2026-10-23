@@ -298,3 +298,11 @@ async def test_run_applications_returns_unresolved_essays_as_client_tasks_and_ac
     res = await eng.submit(prose, {"q_why": GOOD}, ct["approval_id"], True)
     assert res.status == "dry_run", (res.status, res.detail, res.client_tasks)
     assert "essay_review" in [c for c, _ in router.calls]             # judged by the local strict reviewer, not the client
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix permission model")
+def test_saved_essays_are_owner_only(tmp_path):
+    path = essays.save(tmp_path, "greenhouse:acme:1", key="q", label="Why?", company="Acme", title="Eng",
+                       status="approved", text=GOOD)
+    assert path and os.stat(path).st_mode & 0o777 == 0o600
+    assert os.stat(os.path.dirname(path)).st_mode & 0o777 == 0o700
