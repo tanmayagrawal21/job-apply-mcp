@@ -165,6 +165,37 @@ class ImapSource:
             with contextlib.suppress(Exception):  # best-effort close
                 conn.logout()
 
+    def latest_from(self, domain: str, since: datetime) -> Message | None:
+        """ONLY the newest message FROM `domain` since `since` (ADR-0048): SEARCH, then FETCH the last match only.
+        Sequence numbers grow with arrival, so the highest one is the newest message."""
+        cfg = self.cfg
+        if not cfg.host and self._connect is None:
+            raise ValueError("ingest.imap.host is not configured")
+        user, pw = _credentials(cfg) if self._connect is None else ("", "")
+        conn = self._connect() if self._connect else imaplib.IMAP4_SSL(cfg.host, cfg.port)
+        try:
+            if self._connect is None:
+                conn.login(user, pw)
+            typ, _ = conn.select(f'"{cfg.folder}"', readonly=True)  # EXAMINE
+            if typ != "OK":
+                raise RuntimeError(f"cannot EXAMINE folder {cfg.folder!r}")
+            typ, data = conn.search(None, *build_search(since, [domain], []))
+            ids = data[0].split() if typ == "OK" and data and data[0] else []
+            if not ids:
+                return None
+            newest = max(ids, key=int)
+            typ, parts = conn.fetch(newest, f"(BODY.PEEK[]<0.{self.PEEK_BYTES}>)")
+            if typ != "OK":
+                return None
+            for part in parts:
+                if isinstance(part, tuple):
+                    msg = message_from_bytes(part[1])
+                    return msg if msg.date is not None and msg.date >= since else None
+            return None
+        finally:
+            with contextlib.suppress(Exception):  # best-effort close
+                conn.logout()
+
 
 def since_dt(days: int) -> datetime:
     return datetime.now(UTC) - timedelta(days=max(0, days))

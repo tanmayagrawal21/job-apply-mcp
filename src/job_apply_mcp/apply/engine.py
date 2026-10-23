@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -604,6 +605,11 @@ class ApplyEngine:
             self.approvals.approve(rec.approval_id, "agent")
             return rec.approval_id, "", "agent"
         if rec.status != "approved":                    # human mode: needs a separate human channel
+            from .. import consent  # one human consent per window (ADR-0048)
+            c = consent.use(self.s, "approve_submissions", f"ref={ref} approval={rec.approval_id[:8]}")
+            if c is not None:
+                self.approvals.approve(rec.approval_id, f"consent:{c.id}")
+                return rec.approval_id, "", f"consent:{c.id}"
             from ..grants import try_use  # human-signed time-limited grant (ADR-0027)
             g = try_use(self.s, "approve_submissions", f"ref={ref} approval={rec.approval_id[:8]}")
             if g is not None:
@@ -723,6 +729,7 @@ class ApplyEngine:
                     ok, st = self.approvals.begin_submit(ref, approval_id)   # durable BEFORE the click
                     if not ok:
                         return self._state_block(ref) or SubmitResult(ref=ref, status="needs_human", detail=st)
+                clicked_at = datetime.now(UTC)
                 try:
                     with self._stage(ref, "submit"):
                         result = await self._dispatch(ctx, eff, dry)
@@ -748,6 +755,8 @@ class ApplyEngine:
                                             url=ctx.posting.apply_url or ctx.posting.url)
                 if result.status == "submitted":
                     self._plans.pop(ref, None)
+                if not dry and result.status == "awaiting_code" and result.pending_id:
+                    result = await self._unattended_code(result, ctx.posting.platform, clicked_at)
                 return result
         except ComponentMissing:
             raise
@@ -794,10 +803,13 @@ class ApplyEngine:
         if (err := drv.pending_check(pending_id, code)):             # format only; costs no attempt
             return SubmitResult(ref=ref, status="awaiting_code", pending_id=pending_id,
                                 detail=f"invalid code format: {err}. Not entered; ask the user to re-check it.")
-        if not self.approvals.set_state(ref, "submitting", detail="verification code entered by the user",
-                                        only_from=("awaiting_code",)):
+        return await self._enter_code(drv, pending_id, ref, code, "user", "verification code entered by the user")
+
+    async def _enter_code(self, drv: Any, pending_id: str, ref: str, code: str, actor: str,
+                          why: str) -> SubmitResult:
+        if not self.approvals.set_state(ref, "submitting", detail=why, only_from=("awaiting_code",)):
             return SubmitResult(ref=ref, status="error", detail="submission is not awaiting a code")
-        self.approvals.audit("code_provided", ref=ref, actor="user", detail="code entered (value not recorded)")
+        self.approvals.audit("code_provided", ref=ref, actor=actor, detail="code entered (value not recorded)")
         try:
             res = await drv.provide_code(pending_id, code)
         except BaseException:
@@ -806,6 +818,52 @@ class ApplyEngine:
         if res is None:
             res = SubmitResult(ref=ref, status="error", detail="unknown or expired pending_id")
         return await self._apply_code_result(res)
+
+    async def _unattended_code(self, res: SubmitResult, platform: str, clicked_at: datetime) -> SubmitResult:
+        """otp_unattended (ADR-0048). Outside a consent window: unchanged (the human / otp_assist path). Inside: read
+        the newest code mail from the expected sender, enter it once, continue confirmation detection; no usable
+        mail -> `unknown`, never retried. The code is never logged, stored, audited or returned."""
+        from .. import consent
+        from ..consent.otp import fetch_code
+
+        pid, ref = res.pending_id or "", res.ref
+        c = consent.use(self.s, "otp_unattended", f"ref={ref}")
+        if c is None:
+            return res
+        drv = next((d for d in self._code_drivers() if d.pending_info(pid)), None)
+        if drv is None:
+            return res
+        actor = f"consent:{c.id}"
+
+        async def give_up(why: str) -> SubmitResult:
+            self.approvals.audit("code_unattended_failed", ref=ref, actor=actor, detail=why[:120])
+            r = await drv.abandon_pending(pid, f"unattended code: {why}")
+            if r is None:
+                return res
+            out = await self._apply_code_result(r)                   # handoff -> state `unknown` (blocking)
+            return out.model_copy(update={"status": "roadblock", "pending_id": None,
+                                          "detail": f"unknown (never retried): {out.detail or ''}"[:400]})
+
+        doms = self.s.verification.sender_domains
+        domain = doms.get(ref.split(":")[0]) or doms.get(str(platform or "").lower())
+        if not domain:
+            return await give_up("no expected sender domain for this platform (verification.sender_domains)")
+        try:
+            got = await fetch_code(self.s, sender_domain=domain, clicked_at=clicked_at)
+        except Exception as e:  # noqa: BLE001 - message dropped: it could quote mail content
+            return await give_up(f"mail read failed ({type(e).__name__})")
+        if got.code is None:
+            return await give_up(got.detail or got.status)
+        if drv.pending_check(pid, got.code.reveal()):                # format mismatch: never typed
+            return await give_up("the mailed code does not fit the page's code format")
+        try:
+            return await self._enter_code(drv, pid, ref, got.code.reveal(), actor,
+                                          f"verification code entered unattended ({actor})")
+        except Exception as e:  # noqa: BLE001 - state already `unknown`; no exception text (no code) escapes
+            return SubmitResult(ref=ref, status="roadblock",
+                                detail=f"unknown (never retried): code entry failed ({type(e).__name__})")
+        finally:
+            got.code = None
 
     async def resolve_submission(self, ref: str, outcome: str = "", note: str = "",
                                  actor: str = "agent", evidence: str = "") -> dict[str, Any]:
