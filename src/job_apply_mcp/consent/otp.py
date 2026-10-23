@@ -20,22 +20,33 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..grants.otp import _domain_ok, pick_latest
-from ..grants.otp import extract_code as _numeric_code
 
-_CUE = re.compile(r"(?i)\b(code|passcode|otp|pin|one[- ]time password)\b")
-_TOKEN = re.compile(r"(?<![\w-])([A-Za-z0-9]{4,12})(?![\w-])")
+# Cue words in common languages (the code itself is ASCII letters/digits everywhere). Matching is case-insensitive
+# and needs only a Latin-letter boundary before the cue, so scripts without spaces (CJK) work too.
+_CUES = ("code", "passcode", "otp", "pin", "one-time password", "one time password", "token",
+         "código", "codigo", "codice", "kod", "kód", "koodi", "kode", "cod", "κωδικ", "код",
+         "verifizierung", "bestätigung", "vérification", "verificación", "verificação", "verifica",
+         "認証コード", "確認コード", "コード", "验证码", "驗證碼", "校验码", "인증번호", "인증 코드", "확인 코드",
+         "رمز", "קוד", "कोड", "mã xác", "รหัส")
+_CUE = re.compile("(?<![A-Za-z])(?:" + "|".join(re.escape(c) for c in sorted(_CUES, key=len, reverse=True)) + ")",
+                  re.IGNORECASE)
+_TOKEN = re.compile(r"(?<![A-Za-z0-9-])([A-Za-z0-9]{4,12})(?![A-Za-z0-9-])")
+_DIGITS = re.compile(r"(?<![A-Za-z0-9-])(\d{6,8})(?![A-Za-z0-9-])")
+_YEAR = re.compile(r"(19|20)\d\d")
 
 
 def extract_code(subject: str, body: str) -> str | None:
-    """A code from a verification mail: the first 4-12 character letters+digits token (at least one digit) within
-    ~80 characters after a cue word ("code", "passcode", ...); else a numeric 4-8 digit code (grants.otp rules)."""
+    """A code from a verification mail: the first 4-12 character ASCII letters+digits token (at least one digit)
+    within ~80 characters after a cue word in any of several languages. Language-neutral fallback for other
+    wording: the ONLY 6-8 digit number in the mail. Anything ambiguous -> None (the caller fails closed)."""
     text = f"{subject}\n{body}"
     for cue in _CUE.finditer(text):
         for t in _TOKEN.finditer(text, cue.end(), min(len(text), cue.end() + 80)):
             tok = t.group(1)
-            if any(ch.isdigit() for ch in tok) and not re.fullmatch(r"(19|20)\d\d", tok):
+            if any(ch.isdigit() for ch in tok) and not _YEAR.fullmatch(tok):
                 return tok
-    return _numeric_code(subject, body)
+    nums = {m.group(1) for m in _DIGITS.finditer(text)}
+    return nums.pop() if len(nums) == 1 else None
 
 
 class SecretCode:

@@ -147,6 +147,7 @@ class ApplyEngine:
         self._drivers: dict[str, BrowserDriver | None] = {}
         self._plans: dict[str, _Cached] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._otp_locks: dict[str, asyncio.Lock] = {}   # ADR-0048: one unattended code flow per sender domain
         self.control = control
         self.approvals = approvals or ApprovalBook(":memory:", ttl_s=settings.apply.approval_ttl_s)
         self._browser_sem = asyncio.Semaphore(max(1, settings.concurrency.browser_workers))
@@ -711,7 +712,7 @@ class ApplyEngine:
                 if err:
                     return SubmitResult(ref=ref, status="needs_human" if err.startswith("awaiting") else "error",
                                         detail=err)
-            async with self._lock(ctx.posting.company):
+            async with self._lock(ctx.posting.company), self._otp_guard(ref, ctx.posting.platform, dry):
                 why = None
                 if hasattr(self.store, "seen_why"):
                     why = await self.store.seen_why(ctx.posting.company, ctx.posting.title,
@@ -819,6 +820,23 @@ class ApplyEngine:
             res = SubmitResult(ref=ref, status="error", detail="unknown or expired pending_id")
         return await self._apply_code_result(res)
 
+    def _sender_domain(self, ref: str, platform: str | None) -> str | None:
+        doms = self.s.verification.sender_domains
+        return doms.get(ref.split(":")[0]) or doms.get(str(platform or "").lower())
+
+    def _otp_guard(self, ref: str, platform: str | None, dry: bool):
+        """Inside an otp_unattended window, one submission per mail sender domain is between its click and its code
+        at a time, so the newest message from that sender can only belong to this application (ADR-0048)."""
+        if dry:
+            return contextlib.nullcontext()
+        domain = self._sender_domain(ref, platform)
+        if not domain:
+            return contextlib.nullcontext()
+        from .. import consent
+        if consent.active(self.s, "otp_unattended") is None:
+            return contextlib.nullcontext()
+        return self._otp_locks.setdefault(domain.lower(), asyncio.Lock())
+
     async def _unattended_code(self, res: SubmitResult, platform: str, clicked_at: datetime) -> SubmitResult:
         """otp_unattended (ADR-0048). Outside a consent window: unchanged (the human / otp_assist path). Inside: read
         the newest code mail from the expected sender, enter it once, continue confirmation detection; no usable
@@ -844,8 +862,7 @@ class ApplyEngine:
             return out.model_copy(update={"status": "roadblock", "pending_id": None,
                                           "detail": f"unknown (never retried): {out.detail or ''}"[:400]})
 
-        doms = self.s.verification.sender_domains
-        domain = doms.get(ref.split(":")[0]) or doms.get(str(platform or "").lower())
+        domain = self._sender_domain(ref, platform)
         if not domain:
             return await give_up("no expected sender domain for this platform (verification.sender_domains)")
         try:

@@ -560,3 +560,89 @@ def test_cli_entry_passes_leading_options_through(monkeypatch, capsys):
     with pytest.raises(SystemExit) as ex:
         top.main(["consent", "--status"])
     assert ex.value.code == 0 and "no active consent" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ review round 1: general-purpose, fail-closed
+
+@pytest.mark.parametrize(("subject", "body", "want"), [
+    ("Ihr Bestätigungscode", "Ihr Bestätigungscode lautet: 4K7P92QX", "4K7P92QX"),
+    ("認証コード", "認証コード：8H3K2M9Q を入力してください", "8H3K2M9Q"),
+    ("验证码", "您的验证码是739182，10分钟内有效", "739182"),
+    ("Código de verificación", "Tu código de verificación es 58Q2XK", "58Q2XK"),
+    ("Code de vérification", "Votre code : 3J9K7Q", "3J9K7Q"),
+    ("인증번호", "인증번호 [624913]", "624913"),
+    ("Thanks for applying", "We received your application on 2026-10-22. Shipping opinion 2026.", None),
+])
+def test_extract_code_is_not_english_only(subject, body, want):
+    assert cotp.extract_code(subject, body) == want
+
+
+def test_imap_dates_do_not_depend_on_the_locale(monkeypatch):
+    import locale
+
+    from job_apply_mcp.ingest.sources import build_search, imap_date
+    d = datetime(2026, 3, 5, tzinfo=UTC)
+    for loc in ("de_DE.UTF-8", "fr_FR.UTF-8", "ja_JP.UTF-8"):
+        try:
+            locale.setlocale(locale.LC_TIME, loc)
+        except locale.Error:
+            continue
+        try:
+            assert imap_date(d) == "05-Mar-2026" and build_search(d, [DOMAIN], [])[:2] == ["SINCE", "05-Mar-2026"]
+        finally:
+            locale.setlocale(locale.LC_TIME, "C")
+    assert imap_date(d) == "05-Mar-2026"
+
+
+def test_unattended_codes_are_serialized_per_sender_domain(tmp_path):
+    s = esettings(tmp_path)
+    e, _ = engine(tmp_path, s, AutoCodeDriver("Zx81Qa7P"))
+    assert not isinstance(e._otp_guard(POSTING.ref, "greenhouse", False), asyncio.Lock)   # no window
+    consent.store_for(s).issue_consent(600, scopes=["approve_submissions"])
+    assert not isinstance(e._otp_guard(POSTING.ref, "greenhouse", False), asyncio.Lock)   # no otp scope
+    consent.store_for(s).issue_consent(600, scopes=["otp_unattended"])
+    a = e._otp_guard(POSTING.ref, "greenhouse", False)
+    assert isinstance(a, asyncio.Lock) and a is e._otp_guard("greenhouse:other:2", "greenhouse", False)
+    assert not isinstance(e._otp_guard(POSTING.ref, "greenhouse", True), asyncio.Lock)    # dry run
+    assert not isinstance(e._otp_guard("custom:x:1", "custom", False), asyncio.Lock)       # no sender domain
+
+
+async def test_second_submission_on_same_sender_waits_for_the_first_code(tmp_path, monkeypatch):
+    s = esettings(tmp_path)
+    consent.store_for(s).issue_consent(600, scopes=["otp_unattended"])
+    e, _ = engine(tmp_path, s, AutoCodeDriver("Zx81Qa7P"))
+    lock = e._otp_guard(POSTING.ref, "greenhouse", False)
+    order = []
+
+    async def holder():
+        async with lock:
+            order.append("first-click")
+            await asyncio.sleep(0.05)
+            order.append("first-code")
+
+    async def second():
+        await asyncio.sleep(0.01)
+        async with e._otp_guard("greenhouse:other:2", "greenhouse", False):
+            order.append("second-click")
+
+    await asyncio.gather(holder(), second())
+    assert order == ["first-click", "first-code", "second-click"]
+
+
+async def test_code_never_reaches_tool_output_for_the_llm(tmp_path, monkeypatch):
+    from job_apply_mcp import server
+    code = "Q7m2Kx9P"
+    s = esettings(tmp_path)
+    consent.store_for(s).issue_consent(600)
+    monkeypatch.setattr("job_apply_mcp.ingest.sources.make_source", lambda *a, **k: Mail(_mail(code)))
+    e, book = engine(tmp_path, s, AutoCodeDriver(code))
+    r = await _submit(e)
+    assert r.status == "submitted"
+    tool_text = server._out(r.model_dump()) + server._out({"rows": [r.model_dump()]})
+    tool_text += json.dumps(consent.status(s)) + json.dumps(book.audit_rows(POSTING.ref))
+    assert code not in tool_text and "Q7m2" not in tool_text and "Kx9P" not in tool_text
+
+
+def test_extract_code_fallback_is_unambiguous_or_nothing():
+    assert cotp.extract_code("Mensaje", "Gebruik 739182 om verder te gaan") == "739182"
+    assert cotp.extract_code("Mensaje", "Referentie 739182, dossier 551203") is None

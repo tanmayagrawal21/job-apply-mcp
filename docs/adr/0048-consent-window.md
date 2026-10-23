@@ -54,6 +54,20 @@ unattended action covered right now?"
 11. **Outside a window nothing changes.** No mail is read, no code is entered; `awaiting_code` goes to the existing
    human/`otp_assist` path, and `approval_mode=human` waits for a human.
 
+## Owner decision and review amendments (round 1)
+- **Authority.** The owner decided (2026-10-22, reflected in the reviewer definition) that the tool may enter
+  emailed codes and approve submissions unattended ONLY inside an owner-minted consent window, and that no secret
+  (code, password, token) may ever reach the LLM, logs or tool output. This ADR implements exactly that gate; it
+  does not relax anything outside a window.
+- **One code flow per sender domain.** While an `otp_unattended` window is active, submissions to the same mail
+  sender (e.g. two postings on one ATS in a parallel batch) are serialized from the click to the code entry, so the
+  newest message from that sender can only be this application's code. Outside a window, nothing is serialized.
+- **Not English-only.** Code extraction uses cue words in many languages (and CJK without word spacing); without a
+  cue it accepts only a single unambiguous 6-8 digit number, else nothing (fail closed). IMAP `SINCE` dates use the
+  protocol's fixed month tokens instead of the localized `%b`, which broke searches under non-English locales.
+- **LLM isolation.** Tool output for the agent (`submit_application`, `apply_batch`, `consent_status`) carries the
+  status and the sender domain only; a test runs a full unattended submission and checks the serialized tool output.
+
 ## Consequences
 - An unattended run needs one terminal command per period; review happens afterwards (`list_applications`, the
   approvals audit `consent:<id>` actor, `consent_audit.jsonl`).

@@ -122,8 +122,17 @@ def _or_chain(terms: list[tuple[str, str]]) -> list[str]:
     return crit
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def imap_date(d: datetime) -> str:
+    """RFC 3501 date (`22-Oct-2026`). Month names are fixed English tokens in the protocol, so never use the
+    process locale (`%b` is localized)."""
+    return f"{d.day:02d}-{_MONTHS[d.month - 1]}-{d.year}"
+
+
 def build_search(since: datetime, senders: list[str], subjects: list[str]) -> list[str]:
-    crit = ["SINCE", since.strftime("%d-%b-%Y")]
+    crit = ["SINCE", imap_date(since)]
     terms = [("SUBJECT", s) for s in subjects if s.isascii() and s.strip()]
     terms += [("FROM", s) for s in senders if s.isascii() and s.strip()]
     return crit + (_or_chain(terms) if terms else [])
