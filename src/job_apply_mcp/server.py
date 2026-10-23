@@ -43,6 +43,11 @@ def _out(obj: Any) -> str:
     return _output.out(obj, svc().settings.response_budget_chars)
 
 
+async def _ask_start(ctx: Context) -> None:
+    from .persona.tools import ask_at_start
+    await ask_at_start(ctx, svc)
+
+
 @mcp.tool()
 async def search_jobs(ctx: Context, query: str = "", boards: list[str] | None = None,
                       platforms: list[str] | None = None, location: str = "", since_days: int = 7, limit: int = 25,
@@ -76,9 +81,11 @@ async def get_form(ref_or_url: str) -> str:
 
 
 @mcp.tool()
-async def plan_application(ref_or_url: str) -> str:
+async def plan_application(ctx: Context, ref_or_url: str) -> str:
     """Run policy gates + duplicate check, fill answers from the profile and local LLMs, and list unresolved fields.
-    Unresolved free-text fields come back as `client_tasks` for the calling agent to write."""
+    Unresolved free-text fields come back as `client_tasks` for the calling agent to write. The first call of a
+    session may ask the user the top open profile questions (elicitation) before planning."""
+    await _ask_start(ctx)
     return _out(await svc().plan(ref_or_url))
 
 
@@ -181,8 +188,11 @@ if _agent_mode():   # in approval_mode="human" resolving is CLI-only: the tool i
 
 
 @mcp.tool()
-async def apply_batch(refs: list[str], dry_run: bool | None = None, max_parallel: int | None = None) -> str:
-    """Plan + submit many applications concurrently. Returns one compact status row per ref."""
+async def apply_batch(ctx: Context, refs: list[str], dry_run: bool | None = None,
+                      max_parallel: int | None = None) -> str:
+    """Plan + submit many applications concurrently. Returns one compact status row per ref. Open profile questions
+    are asked once, before the batch starts (never mid-batch)."""
+    await _ask_start(ctx)
     return _out(await svc().apply_batch(refs, dry_run=dry_run, max_parallel=max_parallel))
 
 
@@ -259,6 +269,9 @@ _register_vault(mcp, lambda: svc().settings)
 from .ingest.tools import register as _register_ingest
 
 _register_ingest(mcp, svc)
+from .persona.tools import register as _register_persona
+
+_register_persona(mcp, svc)
 
 
 def main() -> None:

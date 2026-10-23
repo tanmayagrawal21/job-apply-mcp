@@ -497,10 +497,19 @@ class DedupeCfg(BaseModel):
     title_threshold: float = Field(0.6, ge=0.0, le=1.0)    # token-Jaccard for the company+title fallback
 
 
+class PersonaCfg(BaseModel):
+    """Profile builder (ADR-0047): gap collection, stored answers and interactive questions."""
+    enabled: bool = True              # record gaps and apply stored answers/persona policies
+    ask_on_start: bool = True         # ask the top gaps once, at the start of a session, if the client can elicit
+    ask_limit: int = 5                # questions per interactive round
+    min_hits: int = 1                 # a gap must have been seen on this many applications to be asked
+
+
 class Settings(BaseModel):
     # ADR-0048: False when the mail settings otp_unattended relies on (sender domains, mail source, IMAP server,
     # trusted authserv ids) came from anything but the trusted user config. Programmatic Settings are trusted.
     _otp_mail_trusted: bool = PrivateAttr(default=True)
+    persona: PersonaCfg = Field(default_factory=PersonaCfg)
     search: SearchCfg = Field(default_factory=SearchCfg)
     dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
     improve: ImproveCfg = Field(default_factory=ImproveCfg)

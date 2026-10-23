@@ -224,6 +224,8 @@ class ApplyEngine:
         self._plan_sem = asyncio.Semaphore(max(1, settings.apply.plan_workers))
         self.timings: dict[str, dict[str, int]] = {}
         self._exemplar: str | None = None
+        self.persona: Any = None      # PersonaPolicy (ADR-0047); set by the factory
+        self.gaps: Any = None         # ProfileDB gap collector; set by the factory
         self._reviewed: set[str] = set()     # digests of (ref, key, text) client prose that passed review (ADR-0044)
 
     # ---------------------------------------------------------------- helpers
@@ -313,7 +315,8 @@ class ApplyEngine:
                 d[k] = d.get(k, 0) + v
 
     async def _plan_ctx(self, ref: str, ctx: _Ctx) -> PlanOut:
-        with self._llm_timings(ref):
+        from ..persona import posting_scope
+        with self._llm_timings(ref), posting_scope(ctx.posting.company, ctx.posting.title, ctx.summary):
             out = await self._plan_inner(ref, ctx)
         out.timings = dict(self.timings.get(ref, {}))
         return out
@@ -324,7 +327,7 @@ class ApplyEngine:
             return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate), timings=self.timings.get(ref, {}))
         audit: dict[str, Any] = {}
         sal_answers: list[Answer] = []
-        sal_decision = compute_ask(self.s.policy, ctx.posting)
+        sal_decision = self._salary(ctx.posting)
         rest: list[FormField] = []
         for f in ctx.form.fields:
             v = format_ask(f, sal_decision.ask) if sal_decision and is_salary_field(f) else None
@@ -339,7 +342,7 @@ class ApplyEngine:
                                 min_score=self.s.apply.option_min_score,
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
-                                company_aliases=self._company_aliases(ctx.posting.company))
+                                company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona)
         answers = sal_answers + list(mapped.answers)
         short = [f for f in mapped.unresolved if self._is_short(f) and self._llm_allowed(f)]
         long_ = [f for f in mapped.unresolved if f not in short]
@@ -371,6 +374,7 @@ class ApplyEngine:
             unresolved_keys.append(f.key)
             tasks.append(self._task(f, ctx))
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
+        self._record_gaps(ref, ctx, answers, unresolved_keys)
         planned = {a.key: a.value for a in answers}
         self._plans[ref] = _Cached(planned, unresolved_keys, ctx.posting, ctx.form,
                                    time.monotonic() + self.s.apply.plan_ttl_s, ctx.adapter, ctx.summary,
@@ -382,6 +386,24 @@ class ApplyEngine:
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}))
+
+    def _salary(self, posting: Posting):
+        """Persona salary policy when wired (ADR-0047); otherwise the deterministic rule from PolicyCfg."""
+        if self.persona is None:
+            return compute_ask(self.s.policy, posting)
+        exp = getattr(getattr(getattr(self.profile, "p", None), "salary", None), "expected", None)
+        return self.persona.salary(self.s.policy, posting, exp)
+
+    def _record_gaps(self, ref: str, ctx: _Ctx, answers: list[Answer], unresolved: list[str]) -> None:
+        """Record unresolved fields and default-used answers as profile gaps; must never break planning."""
+        if self.gaps is None:
+            return
+        try:
+            from ..persona.collector import collect_gaps
+            collect_gaps(self.gaps, self.persona, self.profile, ref=ref, posting=ctx.posting,
+                         fields=ctx.form.fields, answers=answers, unresolved=unresolved)
+        except Exception:  # noqa: BLE001, S110
+            pass
 
     def _company_aliases(self, company: str) -> list[str]:
         """dedupe.company_aliases names that are the same employer as the posting company (ADR-0038)."""
@@ -613,7 +635,9 @@ class ApplyEngine:
                 return out
         ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)
         open_ = [f for f in ctx.form.fields if f.key in cached.unresolved]
-        with self._llm_timings(ref), self._stage(ref, "llm"):
+        from ..persona import posting_scope
+        with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
+                ctx.posting.company, ctx.posting.title, ctx.summary):
             written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
         out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit)
         out.timings = dict(self.timings.get(ref, {}))
