@@ -49,6 +49,7 @@ from .mapper import (
     canonical_key,
     contact_permission_channels,
     eeo_class,
+    fact_rule_field,
     geo_kind,
     job_country,
     llm_safe_short,
@@ -439,6 +440,7 @@ class ApplyEngine:
         left: list[FormField] = []
         infer: list[FormField] = []
         prefs = [p for p in [self.s.answers.referral_default, *self.s.apply.referral_preference] if p]
+        aliases = self._company_aliases(ctx.posting.company)
 
         def take(f: FormField, value: Any, rule: str, why: str, kind: str | None, question: str = "",
                  conf: float = 1.0) -> None:
@@ -455,6 +457,9 @@ class ApplyEngine:
 
         for f in [*fields, *voluntary]:
             if f.kind == FieldKind.file or geo_kind(f):
+                left.append(f)
+                continue
+            if fact_rule_field(f, ctx.posting.company, aliases):   # ADR-0053: profile facts or the owner, never assumed
                 left.append(f)
                 continue
             chans = autonomy.contact_channels(f, ctx.posting.company)

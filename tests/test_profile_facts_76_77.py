@@ -193,3 +193,30 @@ def test_preferences_only_when_configured(label, field):
     assert run(label, p=view(prefs=Preferences(**{field: False})))[0] is False
     assert run(label) is None
     assert run.gaps == [f"preferences.{field}"]
+
+
+# ---------------------------------------------------------------- precedence over the autonomy layer (ADR-0052)
+@pytest.mark.parametrize("level", ["safe_default", "infer"])
+@pytest.mark.parametrize("label", ["Have you worked with Acme Robotics?", "Have you ever been employed by Acme Robotics?",
+                                   "Do you have experience with Acme Robotics?",
+                                   "Are you located in Chicago?", "Do you live within 25 miles of Chicago, IL?"])
+async def test_fact_rule_fields_are_never_assumed_or_inferred(level, label):
+    from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeProfile, FakeRouter, FakeStore, settings
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    from job_apply_mcp.apply.mapper import fact_rule_field
+    from job_apply_mcp.core.models import ApplicationForm
+    f = F("q_fact", label, FieldKind.select, options=YN)
+
+    class One(FakeAdapter):
+        async def get_form(self, ref):
+            return ApplicationForm(ref=ref, submit_via=["api"], fields=[f])
+    router = FakeRouter(short={"q_fact": {"value": "Yes", "confidence": 0.99, "rationale": "fictional"}})
+    e = ApplyEngine(settings(answers__autonomy=level), resolve_adapter=lambda ref: One(), profile=FakeProfile(),
+                    router=router, gates=FakeGates(), store=FakeStore())
+    out = await e.plan(POSTING.ref)
+    if fact_rule_field(f, POSTING.company):
+        assert "q_fact" in out.plan.unresolved and not out.plan.answers     # no work history / not computable
+    else:                                                                    # not a fact question: unaffected
+        assert all(not a.source.startswith("rule:") for a in out.plan.answers)
+    assert fact_rule_field(F("q", "Have you worked with Acme Robotics?"), "Acme Robotics")

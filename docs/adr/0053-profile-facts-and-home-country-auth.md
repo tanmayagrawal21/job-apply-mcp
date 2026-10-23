@@ -64,6 +64,9 @@ holds these facts. Root causes:
    - Relocation, hybrid and onsite questions (yes/no style only) use `[preferences]` when they are set.
    - A missing fact leaves the field unresolved and adds `profile_gaps` entry `{"fact": "<section.field>",
      "profile_fact": true}`. The engine records it as `profile.<section.field>`.
+5. **Before the autonomy layer (ADR-0052).** These rules run in `map_fields`, before `safe_default` and `infer`.
+   A field they own (`fact_rule_field`: the keys above, prior employment with the posting company or its aliases,
+   preferences, authorization) that they leave unresolved goes to the owner. It is never assumed and never inferred.
 
 ## Consequences
 More real forms finish without the owner when the facts exist. Every new answer is a fact the profile states.

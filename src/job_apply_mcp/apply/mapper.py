@@ -1728,6 +1728,18 @@ def flat_auth_allowed(f: FormField, profile: ProfileLike, job_country: str | Non
     return country is not None and country == home
 
 
+_FACT_RULE_KEYS = PROFILE_FACT_KEYS | {"prior_employee", "willing_to_relocate", "relocation_support", "open_to_hybrid",
+                                      "open_to_onsite", "located_in_us", "work_authorized", "requires_sponsorship"}
+
+
+def fact_rule_field(f: FormField, company: str = "", aliases: Sequence[str] = ()) -> bool:
+    """ADR-0053: a field the deterministic profile-fact rules own (employer, title, prior employment, residence,
+    preferences, authorization). Left unresolved by those rules, it goes to the owner: the autonomy layer
+    (ADR-0052) never assumes or infers it."""
+    return (canonical_key(f.label) in _FACT_RULE_KEYS or is_auth_question(f)
+            or (bool(company) and about_this_company(f.label, company, aliases)))
+
+
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
                stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
