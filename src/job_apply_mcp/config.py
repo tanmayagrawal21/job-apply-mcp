@@ -618,6 +618,11 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
     ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
 }
+# Whose mail feeds automatic applications (ADR-0045): identity keys, so ANY change from the trusted baseline counts as
+# relaxing. Only the trusted user config may set them; a project file or JOB_APPLY__* cannot point "self" elsewhere.
+for _k in ("sender", "recipient", "self_address", "self_aliases"):
+    _RELAXES[("intake.mail", _k)] = lambda new, base: new != base
+_RELAXES[("ingest.imap", "user_env")] = lambda new, base: new != base   # fallback source of the "self" address
 
 # Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy
 # spelling and takes precedence when set, so it is guarded too.
@@ -653,7 +658,9 @@ def _stricter_cap(a: int, b: int) -> int:
 
 
 def _adapter(sect: str | None, key: str) -> TypeAdapter:
-    model: type[BaseModel] = Settings.model_fields[sect].annotation if sect else Settings  # type: ignore[assignment]
+    model: type[BaseModel] = Settings
+    for part in (sect.split(".") if sect else []):   # dotted sections: "intake.mail"
+        model = model.model_fields[part].annotation  # type: ignore[assignment]
     return TypeAdapter(model.model_fields[key].annotation)
 
 
@@ -666,8 +673,32 @@ def _typed(adapter: TypeAdapter, v: Any) -> Any:
         return _INVALID
 
 
+def _obj(s: Any, sect: str | None) -> Any:
+    for part in (sect.split(".") if sect else []):
+        s = getattr(s, part)
+    return s
+
+
+def _section(d: dict, sect: str | None) -> Any:
+    """The raw dict for a (dotted) section, or None."""
+    for part in (sect.split(".") if sect else []):
+        d = d.get(part) if isinstance(d, dict) else None
+    return d
+
+
+def _drop(d: dict, sect: str | None, key: str) -> dict:
+    """Copy of `d` without sect.key (dotted sections rebuilt along the path)."""
+    if not sect:
+        return {k: v for k, v in d.items() if k != key}
+    head, _, rest = sect.partition(".")
+    sub = d.get(head)
+    if not isinstance(sub, dict):
+        return d
+    return {**d, head: _drop(sub, rest or None, key)}
+
+
 def _get(s: Settings, sect: str | None, key: str) -> Any:
-    return getattr(getattr(s, sect) if sect else s, key)
+    return getattr(_obj(s, sect), key)
 
 
 def _quota_params(d: dict) -> dict:
@@ -690,7 +721,7 @@ def _relaxations(d: dict, base: Settings) -> tuple[list[tuple[str | None, str, A
     """Guarded keys in raw layer `d` whose typed value relaxes `base`: ([(sect, key, raw)], [(quota_key, raw)])."""
     hits = []
     for (sect, key), relaxes in _RELAXES.items():
-        tgt = d.get(sect) if sect else d
+        tgt = _section(d, sect)
         if isinstance(tgt, dict) and key in tgt:
             v = _typed(_adapter(sect, key), tgt[key])
             if v is not _INVALID and relaxes(v, _get(base, sect, key)):
@@ -756,10 +787,7 @@ def _restrict(d: dict, source: str, base: Settings | None = None) -> dict:
     for sect, key, raw in hits:
         log.warning("%s%s=%r from %s IGNORED: security settings can only be relaxed in the user config file",
                     f"{sect}." if sect else "", key, raw, source)
-        if sect:
-            out[sect] = {k: v for k, v in out[sect].items() if k != key}
-        else:
-            out = {k: v for k, v in out.items() if k != key}
+        out = _drop(out, sect, key)
     return out
 
 
@@ -769,7 +797,7 @@ def _enforce(s: Settings, base: Settings) -> None:
         if relaxes(_get(s, sect, key), _get(base, sect, key)):
             log.error("%s%s=%r relaxed past the user config; reset to %r", f"{sect}." if sect else "", key,
                       _get(s, sect, key), _get(base, sect, key))
-            setattr(getattr(s, sect) if sect else s, key, _get(base, sect, key))
+            setattr(_obj(s, sect), key, _get(base, sect, key))
     q = s.control.params.get("quota")
     if isinstance(q, dict):
         for k in LEGACY_QUOTA_KEYS:

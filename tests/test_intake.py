@@ -511,3 +511,28 @@ def test_site_key():
     from job_apply_mcp.intake.runner import site_key
     assert site_key("boards.greenhouse.io") == site_key("job-boards.greenhouse.io") == "greenhouse.io"
     assert site_key("careers.example.co.uk") == "example.co.uk"
+
+
+def test_mail_identity_only_from_trusted_user_config(tmp_path, monkeypatch, caplog):
+    """A project file or JOB_APPLY__* must not point "self" at someone else's mail (ADR-0045)."""
+    from test_approvals import _cfg
+    user = '[intake.mail]\nself_address = "avery.tester@example.com"\n'
+    proj = ('[intake.mail]\nsender = "intruder@example.org"\nrecipient = "intruder@example.org"\n'
+            'self_aliases = ["intruder@example.org"]\nquery = "jobs"\n[ingest.imap]\nuser_env = "OTHER_USER"\n')
+    env = {"JOB_APPLY__INTAKE__MAIL__SELF_ADDRESS": "intruder@example.org",
+           "JOB_APPLY__INTAKE__MAIL__SENDER": "intruder@example.org"}
+    with caplog.at_level("WARNING"):
+        s = _cfg(tmp_path, monkeypatch, user=user, proj=proj, env=env)
+    m = s.intake.mail
+    assert (m.sender, m.recipient, m.self_address, m.self_aliases) == ("self", "self", ME, [])
+    assert s.ingest.imap.user_env == "JOB_APPLY_IMAP_USER" and m.query == "jobs"    # other keys still layer
+    assert "intake.mail.self_aliases" in caplog.text and "IGNORED" in caplog.text
+    s = _cfg(tmp_path, monkeypatch, user='[intake.mail]\nself_aliases = ["avery.alt@example.net"]\n'
+                                         'sender = "avery.alt@example.net"\n', proj="", env={})
+    assert s.intake.mail.self_aliases == ["avery.alt@example.net"] and s.intake.mail.sender == "avery.alt@example.net"
+
+
+def test_untrusted_user_file_cannot_set_mail_identity(tmp_path, monkeypatch):
+    from test_approvals import _cfg
+    s = _cfg(tmp_path, monkeypatch, user='[intake.mail]\nself_aliases = ["intruder@example.org"]\n', via_env=True)
+    assert s.intake.mail.self_aliases == []

@@ -110,6 +110,11 @@ per-user assumptions.
    and `since_days`. Overrides of `sender`, `recipient`, `self_address` or `label` are errors. The configured sender
    and recipient must resolve to one of the user's own full addresses (`self` or `intake.mail.self_aliases`).
    Address matching is exact; there is no substring or domain match. Anything else fails closed.
+3b. **Mail identity is trusted-config only.** `intake.mail.sender`, `recipient`, `self_address`, `self_aliases` and
+   `ingest.imap.user_env` (the fallback source of "self") are in `config._RELAXES` as identity keys. Any change
+   from the trusted baseline counts as relaxing, so only the trusted user config file can set them. A project file,
+   an untrusted user file or `JOB_APPLY__*` is ignored with a warning. `_RELAXES` now supports dotted sections.
+   Verify: `test_mail_identity_only_from_trusted_user_config`, `test_untrusted_user_file_cannot_set_mail_identity`.
 4. **Salary bounds.** `percent` is limited to [-50, 100]. Asks, floor and base are capped at
    `intake.salary_max_multiple` (3.0) times the largest configured salary value, and the configured floor still
    wins.
