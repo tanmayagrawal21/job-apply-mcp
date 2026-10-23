@@ -3,6 +3,8 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
+import pytest
+
 spec = importlib.util.spec_from_file_location("privacy_scan", Path(__file__).parent.parent / "scripts" / "privacy_scan.py")
 ps = importlib.util.module_from_spec(spec)
 import sys
@@ -72,3 +74,66 @@ def test_diff_only_scans_added_lines(tmp_path, capsys):
     assert ps.main(["--root", str(tmp_path), "--staged"]) == 1
     out = capsys.readouterr().out
     assert "new.txt:2" in out and "old.txt" not in out and "r.docx" in out
+
+
+@pytest.fixture(autouse=True)
+def _no_real_allow_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(ps, "DEFAULT_ACCEPT_FILE", tmp_path / "absent-allow.txt")
+
+
+def _repo(tmp_path, files):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    for name, text in files.items():
+        (repo / name).write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    return repo
+
+
+def test_allow_file_accepts_and_never_prints(tmp_path, capsys):
+    repo = _repo(tmp_path, {
+        "LICENSE": "Copyright (c) 2026 Quokka Fernbrook\n",
+        "README.md": "See https://github.com/quokkaf/demo-repo for details\n",
+    })
+    terms = tmp_path / "terms.txt"
+    terms.write_text("quokka fernbrook\nquokkaf\n")
+    base = ["--root", str(repo), "--terms", str(terms)]
+    assert ps.main(base) == 1  # no allow file: unchanged behaviour
+    capsys.readouterr()
+    allow = tmp_path / "allow.txt"
+    allow.write_text("# comment\nLICENSE\t1\n@urls\n")
+    assert ps.main([*base, "--allow", str(allow)]) == 0
+    cap = capsys.readouterr()
+    out = cap.out + cap.err
+    assert "2 accepted" in out
+    assert "quokka" not in out.lower() and "fernbrook" not in out.lower()
+
+
+def test_allow_file_partial_still_fails(tmp_path, capsys):
+    repo = _repo(tmp_path, {
+        "LICENSE": "Copyright (c) 2026 Quokka Fernbrook\n",
+        "notes.md": "quokkaf outside a URL, and https://github.com/quokkaf/x\n",
+    })
+    terms = tmp_path / "terms.txt"
+    terms.write_text("quokka fernbrook\nquokkaf\n")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("LICENSE\t*\n@urls\n")
+    assert ps.main(["--root", str(repo), "--terms", str(terms), "--allow", str(allow)]) == 1
+    cap = capsys.readouterr()
+    assert "notes.md:1: [private term #2]" in cap.out and "LICENSE" not in cap.out
+    assert "1 accepted" in cap.err
+    assert "quokka" not in (cap.out + cap.err).lower()
+
+
+def test_allow_rules_scope():
+    rules = ps.AcceptRules([("docs/*.md", "2")], urls=False)
+    assert rules.accepts("docs/a.md", "private term #2", (0, 3), "abc")
+    assert not rules.accepts("docs/a.md", "private term #1", (0, 3), "abc")
+    assert not rules.accepts("src/a.md", "private term #2", (0, 3), "abc")
+    assert not rules.accepts("docs/a.md", "email address", (0, 3), "abc")
+
+
+def test_mask_merges_overlaps():
+    assert ps.mask_spans("abcdefghij", [(2, 5), (4, 8)]) == "ab***ij"

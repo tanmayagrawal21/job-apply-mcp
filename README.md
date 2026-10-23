@@ -128,4 +128,7 @@ uv run ruff check . && uv run pytest -q      # offline; live tests need JAM_LIVE
 uv run python scripts/gen_config_docs.py     # after changing config.py
 ```
 
+Privacy scan: `python scripts/privacy_scan.py --terms ~/.config/job-apply-mcp/privacy_terms.txt`. Owner-accepted
+findings go in `~/.config/job-apply-mcp/privacy_allow.txt` (outside the repo, `--allow FILE`); see ADR-0051.
+
 MIT licensed. Contributions welcome under the [Code of Conduct](CODE_OF_CONDUCT.md).

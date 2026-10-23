@@ -3,11 +3,17 @@
 
 Modes: --diff [BASE] (added lines only), --staged, --paths P [P ...], or no mode = whole tracked tree.
 Private terms (--terms FILE, one per line, case-insensitive) are never printed; findings show
-"private term #k" and a masked excerpt. Exit 1 when anything is found.
+"private term #k" and a masked excerpt.
+
+--allow FILE (default ~/.config/job-apply-mcp/privacy_allow.txt when it exists; kept outside the repo)
+accepts known, owner-approved findings. Each line is `<path-glob>\t<term-index-or-*>` or the token
+`@urls` (a private term inside an https://github.com/... URL). Accepted findings are counted, never
+printed. Exit 0 when every finding is accepted, 1 otherwise.
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import math
 import re
 import subprocess
@@ -16,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ALLOW_FILE = ".privacy-allow"
+DEFAULT_ACCEPT_FILE = Path("~/.config/job-apply-mcp/privacy_allow.txt")
+GITHUB_URL_RE = re.compile(r"https://github\.com/[^\s)\]>\"'`]*", re.IGNORECASE)
 SAFE_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "localhost", "users.noreply.github.com",
                       "noreply.github.com", "anthropic.com"}
 SAFE_EMAIL_SUFFIXES = (".example", ".test", ".invalid", ".localhost", ".example.com", ".example.org")
@@ -52,6 +60,7 @@ class Finding:
     line: int
     kind: str
     excerpt: str
+    accepted: bool = False
 
     def __str__(self) -> str:
         return f"{self.path}:{self.line}: [{self.kind}] {self.excerpt}"
@@ -72,6 +81,43 @@ def load_allow(root: Path) -> list[re.Pattern]:
             if raw and not raw.startswith("#"):
                 pats.append(re.compile(raw))
     return pats
+
+
+@dataclass
+class AcceptRules:
+    """Owner-approved findings, loaded from a file outside the repo. Holds no term values."""
+    pairs: list[tuple[str, str]]  # (path glob, term index as str or "*")
+    urls: bool = False
+
+    def accepts(self, path: str, kind: str, span: tuple[int, int], line: str) -> bool:
+        m = re.fullmatch(r"private term #(\d+)", kind)
+        if not m:
+            return False
+        if self.urls and any(u.start() <= span[0] and span[1] <= u.end() for u in GITHUB_URL_RE.finditer(line)):
+            return True
+        return any(fnmatch.fnmatchcase(path, g) and t in ("*", m.group(1)) for g, t in self.pairs)
+
+
+def load_accept(path: str | None) -> AcceptRules | None:
+    p = Path(path).expanduser() if path else DEFAULT_ACCEPT_FILE.expanduser()
+    if not p.exists():
+        if path:
+            print(f"note: allow file {path} not found; no findings accepted", file=sys.stderr)
+        return None
+    rules = AcceptRules([])
+    for no, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        raw = raw.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        if raw == "@urls":
+            rules.urls = True
+            continue
+        parts = raw.split("\t")
+        if len(parts) != 2 or not (parts[1].strip() == "*" or parts[1].strip().isdigit()):
+            print(f"note: allow file line {no} ignored (expected <path-glob><TAB><term-index-or-*>)", file=sys.stderr)
+            continue
+        rules.pairs.append((parts[0].strip(), parts[1].strip()))
+    return rules
 
 
 def load_terms(path: str | None) -> list[str]:
@@ -102,10 +148,14 @@ def phone_ok(m: re.Match) -> bool:
 
 
 def mask_spans(line: str, spans: list[tuple[int, int]]) -> str:
-    out, last = [], 0
+    merged: list[list[int]] = []
     for a, b in sorted(spans):
-        if a < last:
-            continue
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    out, last = [], 0
+    for a, b in merged:
         out += [line[last:a], "***"]
         last = b
     out.append(line[last:])
@@ -139,7 +189,8 @@ def scan_line(line: str, terms: list[str]) -> list[tuple[str, list[tuple[int, in
     return hits
 
 
-def scan_text(path: str, lines: list[tuple[int, str]], terms: list[str], allow: list[re.Pattern]) -> list[Finding]:
+def scan_text(path: str, lines: list[tuple[int, str]], terms: list[str], allow: list[re.Pattern],
+              accept: AcceptRules | None = None) -> list[Finding]:
     out: list[Finding] = []
     for no, line in lines:
         if len(line) > 2000:
@@ -151,11 +202,11 @@ def scan_text(path: str, lines: list[tuple[int, str]], terms: list[str], allow: 
             continue
         spans = [s for _, sp in hits for s in sp]
         ex = mask_spans(line, spans)
-        seen = set()
-        for kind, _ in hits:
-            if kind not in seen:
-                seen.add(kind)
-                out.append(Finding(path, no, kind, ex))
+        status: dict[str, bool] = {}
+        for kind, sp in hits:
+            ok = accept is not None and all(accept.accepts(path, kind, s, line) for s in sp)
+            status[kind] = status.get(kind, True) and ok
+        out += [Finding(path, no, kind, ex, ok) for kind, ok in status.items()]
     return out
 
 
@@ -209,11 +260,13 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--staged", action="store_true", help="scan staged additions (pre-commit)")
     g.add_argument("--paths", nargs="+", metavar="PATH", help="scan these files/dirs")
     ap.add_argument("--terms", metavar="FILE", help="private terms file (never printed)")
+    ap.add_argument("--allow", metavar="FILE",
+                    help=f"accepted-findings file outside the repo (default {DEFAULT_ACCEPT_FILE} if present)")
     ap.add_argument("--root", default=".", help="repo root (default: cwd)")
     a = ap.parse_args(argv)
 
     root = Path(git(Path(a.root), "rev-parse", "--show-toplevel").strip())
-    allow, terms = load_allow(root), load_terms(a.terms)
+    allow, terms, accept = load_allow(root), load_terms(a.terms), load_accept(a.allow)
     if a.terms and not Path(a.terms).expanduser().exists():
         print(f"note: terms file {a.terms} not found; skipping private terms", file=sys.stderr)
     findings: list[Finding] = []
@@ -227,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             diff = git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", base)
             added = git(root, "diff", "--name-only", "--diff-filter=A", base).split()
         for path, lines in parse_diff(diff).items():
-            findings += scan_text(path, lines, terms, allow)
+            findings += scan_text(path, lines, terms, allow, accept)
         for path in added:
             findings += check_file_type(path, allow)
     else:
@@ -248,15 +301,18 @@ def main(argv: list[str] | None = None) -> int:
             findings += check_file_type(rel, allow)
             lines = read_lines(f)
             if lines is not None:
-                findings += scan_text(rel, lines, terms, allow)
+                findings += scan_text(rel, lines, terms, allow, accept)
 
-    for f in findings:
+    open_ = [f for f in findings if not f.accepted]
+    n_ok = len(findings) - len(open_)
+    for f in open_:
         print(f)
-    if findings:
-        print(f"\n{len(findings)} privacy finding(s). Fix, or allowlist fictional fixtures in {ALLOW_FILE}.",
+    note = f" ({n_ok} accepted)" if n_ok else ""
+    if open_:
+        print(f"\n{len(open_)} privacy finding(s){note}. Fix, or allowlist fictional fixtures in {ALLOW_FILE}.",
               file=sys.stderr)
         return 1
-    print("privacy scan clean")
+    print(f"privacy scan clean{note}")
     return 0
 
 
