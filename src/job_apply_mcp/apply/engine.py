@@ -455,7 +455,8 @@ class ApplyEngine:
             labels = {f.key: (f.label, f.required) for f in ctx.form.fields}
             for g in country_gaps or []:
                 label, required = labels.get(g["key"], ("", False))
-                self.gaps.record_hit(f"authorization.{g['country']}.{g['fact']}", label, ref=ref, kind="unresolved",
+                gk = f"authorization.{g['country']}.{g['fact']}" if g.get("country") else f"profile.{g['fact']}"
+                self.gaps.record_hit(gk, label, ref=ref, kind="unresolved",
                                      blocked=bool(required), company=ctx.posting.company, title=ctx.posting.title)
         except Exception:  # noqa: BLE001, S110
             pass
