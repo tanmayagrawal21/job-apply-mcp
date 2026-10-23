@@ -875,7 +875,7 @@ def _mail_view(s: Settings) -> tuple:
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
     """Only the platform-default user config, owned by this user and not group/world-writable, may relax
     security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
-    default = paths.config_dir() / "config.toml"
+    default = paths.default_config_file()
     try:
         if user.resolve() != default.resolve():
             return False, "not the platform-default user config path"

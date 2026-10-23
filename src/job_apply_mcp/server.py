@@ -12,12 +12,14 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .config import load_settings
 from .core import output as _output
 from .grants.otp import assist_code, make_elicitor
 from .services import Services
 
 mcp = FastMCP("job-apply")
+mcp._mcp_server.version = __version__   # serverInfo.version: the package, not the mcp library (#83)
 _raw_tool = mcp.tool
 
 

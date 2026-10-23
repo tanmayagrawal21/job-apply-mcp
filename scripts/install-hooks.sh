@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Optional: install a local pre-commit hook that runs the privacy scan on staged changes.
-# If ~/.config/job-apply-mcp/privacy_terms.txt exists it is passed as --terms (never printed or committed).
+# If <config dir>/privacy_terms.txt (XDG-aware) exists it is passed as --terms (never printed or committed).
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 hook="$root/.git/hooks/pre-commit"
@@ -8,7 +8,7 @@ hook="$root/.git/hooks/pre-commit"
 cat > "$hook" <<'HOOK'
 #!/usr/bin/env bash
 root="$(git rev-parse --show-toplevel)"
-terms="$HOME/.config/job-apply-mcp/privacy_terms.txt"
+terms="$(PYTHONPATH="$root/src" python3 -c 'from job_apply_mcp import paths; print(paths.privacy_terms_file())')"
 args=(--staged)
 [ -f "$terms" ] && args+=(--terms "$terms")
 exec python3 "$root/scripts/privacy_scan.py" "${args[@]}"

@@ -204,3 +204,66 @@ def test_tools_doc_covers_every_registered_tool():
     doc = (Path(__file__).resolve().parents[1] / "docs" / "tools.md").read_text(encoding="utf-8")
     names = [t.name for t in asyncio.run(mcp.list_tools())]
     assert names and [n for n in names if f"`{n}`" not in doc] == []
+
+
+def _cfg_text(path, body="dry_run = true\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def test_xdg_dirs_honoured_everywhere_and_relative_ignored(monkeypatch, tmp_path):
+    for p in ("linux", "win32"):
+        monkeypatch.setattr(paths.sys, "platform", p)
+        for k in ("CONFIG", "DATA", "CACHE"):
+            monkeypatch.setenv(f"XDG_{k}_HOME", str(tmp_path / k))
+        assert paths.config_dir() == tmp_path / "CONFIG" / "job-apply-mcp"
+        assert paths.data_dir() == tmp_path / "DATA" / "job-apply-mcp"
+        assert paths.cache_dir() == tmp_path / "CACHE" / "job-apply-mcp"
+        assert paths.privacy_terms_file().parent == paths.config_dir()
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative/dir")
+    monkeypatch.setenv("XDG_CACHE_HOME", "")
+    assert paths.config_dir() == paths.Path.home() / ".config" / "job-apply-mcp"
+    assert paths.cache_dir() == paths.Path.home() / ".cache" / "job-apply-mcp"
+
+
+def test_server_and_doctor_read_the_xdg_config_not_home(monkeypatch, tmp_path):
+    from job_apply_mcp import server
+    home = tmp_path / "realhome"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG", raising=False)
+    _cfg_text(home / ".config" / "job-apply-mcp" / "config.toml", "[policy]\ndedupe_days = 11\n")
+    xdg = tmp_path / "xdg"
+    _cfg_text(xdg / "job-apply-mcp" / "config.toml", "[policy]\ndedupe_days = 22\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setattr(server, "_svc", None)
+    assert server.svc().settings.policy.dedupe_days == 22
+    checks, s = doctor._config_checks()
+    assert s is not None and s.policy.dedupe_days == 22
+    assert any(str(xdg / "job-apply-mcp" / "config.toml") in c.detail for c in checks)
+    assert not any(str(home) in c.detail for c in checks)
+    monkeypatch.setattr(server, "_svc", None)
+
+
+def test_trusted_user_config_is_the_resolved_xdg_file(monkeypatch, tmp_path):
+    from job_apply_mcp import config
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    f = xdg / "job-apply-mcp" / "config.toml"
+    _cfg_text(f)
+    assert config._user_file_trusted(f) == (True, "")
+    other = tmp_path / "elsewhere.toml"
+    _cfg_text(other)
+    assert config._user_file_trusted(other)[0] is False
+    monkeypatch.setenv("JOB_APPLY_MCP_CONFIG", str(other))      # an explicit file is never trusted to relax settings
+    assert config._user_file_trusted(paths.config_file())[0] is False
+    f.chmod(0o666)
+    monkeypatch.delenv("JOB_APPLY_MCP_CONFIG")
+    assert config._user_file_trusted(f)[0] is False             # group/world-writable
+
+
+def test_server_info_version_is_the_package_version():
+    from job_apply_mcp import server
+    opts = server.mcp._mcp_server.create_initialization_options()
+    assert opts.server_version == __version__
