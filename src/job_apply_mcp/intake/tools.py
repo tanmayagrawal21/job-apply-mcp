@@ -22,8 +22,8 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
                                messages: list[dict[str, Any]] | None = None,
                                discovery: dict[str, Any] | None = None) -> str:
         """Apply from any mix of sources in one run: explicit `links` (or `links_file`, one URL per line), job links
-        the user emailed (read-only mail; `mail` overrides {sender, recipient, query, label, since, since_days};
-        sender/recipient default to the user), and discovery (`discovery` = search_jobs arguments). Priority: links,
+        the user emailed to themselves (read-only mail; sender, recipient and label come from config only; `mail`
+        may only narrow with {query, since, since_days}), and discovery (`discovery` = search_jobs arguments). Priority: links,
         then mail, then discovery. `sources` subsets ["links","mail","discovery"]. `max_applications` caps submits
         (default intake.max_applications or run_size feedback). Every URL goes through adapter detection, plan, gates,
         dedupe and submit; unknown hosts are reported as unsupported_site. Prose is deferred: jobs needing unapproved
@@ -43,9 +43,11 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
     async def give_feedback(run_id: str, feedback: str | dict[str, Any], ref: str | None = None) -> str:
         """Feedback on a run (optionally on one `ref` of it), applied at the start of the next run. Structured:
         {"kind":"deny_company"|"deny_title", "pattern"?} (no pattern + ref = that item's company/title),
-        {"kind":"answer","pattern","value"}; authorization, demographic and attestation answers (or
-        {"kind":"profile_answer","key"|"question","value","scope":"global|company|role_family","scope_value"}) go to
-        the profile builder's answer_profile_question, pending until it is installed. {"kind":"salary",
-        "salary_floor"|"base_salary"|"default_ask"|"expected"|"delta"|"percent"}: never below the configured floor.
-        {"kind":"run_size","value"|"delta"}. Free text is stored and shown in the next run's plan_context."""
+        {"kind":"answer","pattern","value"} for plain questions only; any authorization, demographic, consent,
+        attestation, legal or AI-use question (or {"kind":"profile_answer","key"|"question","value","scope":
+        "global|company|role_family","scope_value"}) goes to the profile builder's answer_profile_question.
+        {"kind":"salary","salary_floor"|"base_salary"|"default_ask"|"expected"|"delta"|"percent"}: never below the
+        configured floor, capped at intake.salary_max_multiple. {"kind":"run_size","value"|"delta"}. Free text is
+        shown in the next run's plan_context. Answers given here (and pay changes in human approval mode) apply only
+        after the USER confirms them on a terminal: `job-apply-mcp feedback --confirm <id>`."""
         return _dump(await runner().give_feedback(run_id, ref, feedback))

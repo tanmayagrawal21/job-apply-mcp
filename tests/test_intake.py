@@ -275,7 +275,8 @@ async def test_feedback_applied_in_next_run(tmp_path):
     rid = rep["run_id"]
     assert (await r.give_feedback(rid, "https://boards.greenhouse.io/acme/jobs/1", {"kind": "deny_company"}))["id"]
     assert (await r.give_feedback(rid, None, {"kind": "deny_title", "pattern": "intern"}))["id"]
-    assert (await r.give_feedback(rid, None, {"kind": "answer", "pattern": "favorite editor", "value": "Vim"}))["id"]
+    ans = await r.give_feedback(rid, None, {"kind": "answer", "pattern": "favorite editor", "value": "Vim"})
+    assert ans["needs_confirmation"] and ans["confirm"].endswith(str(ans["id"]))
     assert (await r.give_feedback(rid, None, {"kind": "salary", "salary_floor": 90000}))["id"]
     assert (await r.give_feedback(rid, None, {"kind": "run_size", "delta": -8}))["id"]
     assert (await r.give_feedback(rid, None, "prefer robotics companies"))["kind"] == "note"
@@ -290,11 +291,16 @@ async def test_feedback_applied_in_next_run(tmp_path):
     rep2 = await r.run(links=links, sources=["links"])
     ctx = rep2["plan_context"]
     assert ctx["feedback_notes"] == ["prefer robotics companies"]
-    assert ctx["applied_feedback"][0] == "deny company ^Acme$" and len(ctx["applied_feedback"]) == 5
+    assert ctx["applied_feedback"][0] == "deny company ^Acme$" and len(ctx["applied_feedback"]) == 4
+    assert [a["id"] for a in ctx["awaiting_confirmation"]] == [ans["id"]]
     assert rep2["skipped"][0]["ref"] == links[0] and "excluded employer" in rep2["skipped"][0]["why"]
     assert rep2["counts"]["dry_run"] == 2                       # run_size 10 - 8
-    assert eng.profile.p.answers["favorite editor"] == "Vim" and r.s.policy.salary_floor == 90000
-    assert "intern" in r.s.policy.exclude_title_patterns
+    assert "favorite editor" not in eng.profile.p.answers      # a client answer is not owner authority
+    assert r.s.policy.salary_floor == 90000 and "intern" in r.s.policy.exclude_title_patterns
+    assert (await r.confirm_feedback(ans["id"], "human:cli"))["confirmed_by"] == "human:cli"
+    rep3 = await r.run(links=links[1:2], sources=["links"])
+    assert rep3["plan_context"]["applied_feedback"] == ["answer for 'favorite editor' set"]
+    assert eng.profile.p.answers["favorite editor"] == "Vim"
     rep3 = await r.run(links=links[1:2], sources=["links"])
     assert "plan_context" not in rep3 or not rep3["plan_context"].get("applied_feedback")
     assert r.s.policy.exclude_employer_patterns.count("^Acme$") == 1      # replay is idempotent
@@ -409,10 +415,99 @@ async def test_profile_answers_pending_until_builder_then_delivered(tmp_path):
     assert pend[0]["key"] == "work_authorized" and pend[1]["key"] == "veteran"
     assert "veteran status" not in eng.profile.p.answers           # never an in-memory overlay
     assert (await r.report())["plan_context"]["pending_profile_answers"] == pend
+    assert all("--confirm" in p["confirm"] for p in pend)
     got = []
     r._sink = lambda *a: got.append(a)
+    rep = await r.run(links=[], sources=["links"])
+    assert got == []                                      # unconfirmed client answers are never delivered
+    for p in pend:
+        await r.confirm_feedback(p["id"], "human:cli")
     rep = await r.run(links=[], sources=["links"])
     assert got[0] == ("work_authorized", "Yes", "company", "Acme") and len(got) == 2
     assert sum("answer_profile_question" in x for x in rep["plan_context"]["applied_feedback"]) == 2
     rep = await r.run(links=[], sources=["links"])
     assert "pending_profile_answers" not in rep["plan_context"] and len(got) == 2
+
+
+RESTRICTED = ["work permit", "legally permitted to be employed", "green card", "permanent resident", "ITAR",
+              "US person", "U.S. person", "export control", "background check", "agree to the terms", "acknowledge",
+              "consent", "SMS updates", "drug test", "arbitration", "true and complete", "nationality",
+              "military service", "Did you use AI to complete this application", "right to work",
+              "residence permit", "national insurance number", "date of birth", "marital status", "religion",
+              "criminal record", "re:visa.*status", "notice period under my contract terms"]
+
+
+@pytest.mark.parametrize("pat", RESTRICTED)
+async def test_restricted_answers_never_overlays(tmp_path, pat):
+    r, _, eng = make(tmp_path)
+    rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
+    out = await r.give_feedback(rep["run_id"], None, {"kind": "answer", "pattern": pat, "value": "Yes"})
+    assert out["kind"] == "profile_answer" and out["needs_confirmation"]
+    await r.run(links=[], sources=["links"])
+    assert eng.profile.p.answers == {}
+
+
+async def test_plain_answer_and_stop_phrase(tmp_path):
+    from job_apply_mcp.intake.feedback import is_restricted_question
+    assert not is_restricted_question("favorite editor") and not is_restricted_question("preferred team size")
+    assert is_restricted_question("my secret phrase", ["secret phrase"])
+
+
+async def test_human_mode_client_salary_waits_for_confirmation(tmp_path):
+    r, _, _ = make(tmp_path)
+    r.s.apply.approval_mode = "human"
+    r.s.policy.salary_floor = 70000
+    rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
+    fb = await r.give_feedback(rep["run_id"], None, {"kind": "salary", "salary_floor": 75000})
+    assert fb["needs_confirmation"]
+    deny = await r.give_feedback(rep["run_id"], None, {"kind": "deny_title", "pattern": "manager"})
+    assert "needs_confirmation" not in deny                   # tightening needs no confirmation
+    rep = await r.run(links=[], sources=["links"])
+    assert r.s.policy.salary_floor == 70000 and rep["plan_context"]["awaiting_confirmation"][0]["id"] == fb["id"]
+    user = await r.give_feedback(rep["run_id"], None, {"kind": "salary", "salary_floor": 72000}, origin="user")
+    assert "needs_confirmation" not in user
+    await r.run(links=[], sources=["links"])
+    assert r.s.policy.salary_floor == 72000
+
+
+async def test_salary_ceiling(tmp_path):
+    r, _, _e = make(tmp_path)
+    r.s.policy.salary_floor, r.s.policy.default_ask = 50000, 60000
+    rep = await r.run(links=["https://boards.greenhouse.io/acme/jobs/1"], sources=["links"])
+    assert "percent" in (await r.give_feedback(rep["run_id"], None, {"kind": "salary", "percent": 1000}))["error"]
+    for _ in range(4):
+        await r.give_feedback(rep["run_id"], None, {"kind": "salary", "percent": 100})
+    rep = await r.run(links=[], sources=["links"])
+    assert r.s.policy.default_ask == 180000                       # 3 x the largest configured value
+    assert any("capped at 180000" in n for n in rep["plan_context"]["notes"])
+
+
+def test_mail_filter_fails_closed():
+    s = settings()
+    s.intake.mail.self_address = ME
+    for o in ({"sender": ""}, {"recipient": ""}, {"self_address": "x@example.org"}, {"label": "Other"},
+              {"sender": "someone@example.org"}):
+        assert "not allowed per call" in resolve_filter(s.intake.mail, s.ingest.imap, overrides=o)[1]
+    flt, err = resolve_filter(s.intake.mail, s.ingest.imap, overrides={"query": "jobs", "since_days": 3})
+    assert not err and flt.query == "jobs" and flt.sender == ME
+    for bad in ("", "example.com", "someone@example.org"):
+        s.intake.mail.sender = bad
+        assert "intake.mail.sender" in resolve_filter(s.intake.mail, s.ingest.imap)[1]
+    s.intake.mail.self_aliases = ["avery.alt@example.net"]
+    s.intake.mail.sender = "avery.alt@example.net"
+    assert resolve_filter(s.intake.mail, s.ingest.imap)[0].sender == "avery.alt@example.net"
+    m = link_mail_from_dict({"id": "x", "from": "someone@example.com", "to": [ME], "body": ""})
+    assert not MailFilter(sender="example.com", recipient=ME)(m)       # no substring/domain matching
+
+
+async def test_concurrent_runs_are_serialized(tmp_path):
+    r, _, _ = make(tmp_path, adapter=MultiAdapter(delay=0.05), live=True)
+    links = ["https://boards.greenhouse.io/a/jobs/1"]
+    a, b = await asyncio.gather(r.run(links=links, sources=["links"]), r.run(links=links, sources=["links"]))
+    assert sum("error" in x for x in (a, b)) == 1
+
+
+def test_site_key():
+    from job_apply_mcp.intake.runner import site_key
+    assert site_key("boards.greenhouse.io") == site_key("job-boards.greenhouse.io") == "greenhouse.io"
+    assert site_key("careers.example.co.uk") == "example.co.uk"

@@ -79,6 +79,54 @@ writing.
    engine's rule). In human approval mode, live runs hand every ready job off with its approval id, as
    `apply_batch` does. Approvals, CAPTCHA, OTP and credential handling are untouched.
 
+## Amendment: trust boundaries (review of c3b8ea1)
+Three trust boundaries were tightened. All of the following is general-purpose: there are no per-country or
+per-user assumptions.
+
+1. **Feedback origin.** Every feedback row has an `origin`:
+   - `user`: given through `job-apply-mcp feedback` on an interactive terminal;
+   - `client`: given through the MCP tool, or through the CLI when it is not on a TTY.
+
+   Which client-origin rows wait for a human confirmation:
+   - `answer` and `profile_answer` rows always wait, so a client value never becomes an owner-authority answer.
+   - `salary` rows wait when `approval_mode = "human"`, mirroring the CLI-only `resolve_submission`.
+   - `deny_*`, `run_size` and notes only tighten the run or inform it, so they apply directly.
+
+   A human confirms with `job-apply-mcp feedback --confirm <id>`, which needs a TTY, as `approve` does. Rows still
+   waiting are listed in `plan_context.awaiting_confirmation`. `profile_answer` rows are handed to the profile
+   builder only once confirmed, so a row recorded there as `user_written` really came from the user.
+2. **`answer` is deny-by-default.** A pattern stays a plain `answer` overlay only when every check clears, for the
+   pattern itself, its regex words and a sample question label:
+   - `canonical_key` is None;
+   - `is_sensitive_question`, `_DEMOGRAPHIC_LABEL`, the engine's `_SENSITIVE_LABEL` and `_HUMAN_LABEL`
+     (attestation and AI use) do not match;
+   - no policy `stop_phrases` match;
+   - the intake list does not match. That list covers authorization, residence, nationality, export control,
+     background checks, consent and terms, messaging consent, truthfulness, AI use, demographics, health, criminal
+     record and identity numbers, phrased for any country.
+
+   Anything else becomes a `profile_answer`. Pay questions are refused, with a pointer to `salary`.
+3. **The mail filter is config-only and exact.** Per call, `mail` may only narrow the read, with `query`, `since`
+   and `since_days`. Overrides of `sender`, `recipient`, `self_address` or `label` are errors. The configured sender
+   and recipient must resolve to one of the user's own full addresses (`self` or `intake.mail.self_aliases`).
+   Address matching is exact; there is no substring or domain match. Anything else fails closed.
+4. **Salary bounds.** `percent` is limited to [-50, 100]. Asks, floor and base are capped at
+   `intake.salary_max_multiple` (3.0) times the largest configured salary value, and the configured floor still
+   wins.
+5. **Concurrency.** Only one `run_applications` can run at a time per data dir; a second call gets an error, so
+   `max_applications` cannot be doubled. The per-host submit key is the registrable domain, so two subdomains of one
+   ATS share the single per-host slot.
+
+Verify the amendment: `uv run pytest -q tests/test_intake.py`. The relevant tests are:
+- `test_restricted_answers_never_overlays` (the reviewers' list plus non-US phrasings);
+- `test_feedback_applied_in_next_run` (confirmation);
+- `test_profile_answers_pending_until_builder_then_delivered`;
+- `test_human_mode_client_salary_waits_for_confirmation`;
+- `test_salary_ceiling`;
+- `test_mail_filter_fails_closed`;
+- `test_concurrent_runs_are_serialized`;
+- `test_site_key`.
+
 ## Consequences
 - A run is one call with one compact report. Data lands in new tables in `applications.db` (own connection,
   WAL); the existing tables are unchanged.

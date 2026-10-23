@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS intake_feedback(
   payload TEXT NOT NULL,
   created_at TEXT NOT NULL,
   applied_run TEXT,
-  delivered_at TEXT
+  delivered_at TEXT,
+  origin TEXT NOT NULL DEFAULT 'client',
+  confirmed_by TEXT
 );
 """
 
@@ -73,6 +75,11 @@ class IntakeStore:
         with self._lock:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.executescript(_SCHEMA)
+            cols = {r["name"] for r in self._db.execute("PRAGMA table_info(intake_feedback)")}
+            for c, ddl in (("delivered_at", "TEXT"), ("origin", "TEXT NOT NULL DEFAULT 'client'"),
+                           ("confirmed_by", "TEXT")):
+                if c not in cols:
+                    self._db.execute(f"ALTER TABLE intake_feedback ADD COLUMN {c} {ddl}")
             self._db.commit()
 
     def _run(self, fn, *a):
@@ -155,11 +162,13 @@ class IntakeStore:
             [(k, run_id, n, _now()) for k, n in done.items()]))
 
     # -- feedback ------------------------------------------------------------------------------------
-    async def add_feedback(self, run_id: str | None, ref: str | None, kind: str, payload: dict[str, Any]) -> int:
+    async def add_feedback(self, run_id: str | None, ref: str | None, kind: str, payload: dict[str, Any],
+                           origin: str = "client") -> int:
+        assert origin in ("client", "user")
         def f():
             cur = self._db.execute(
-                "INSERT INTO intake_feedback(run_id, ref, kind, payload, created_at) VALUES(?,?,?,?,?)",
-                (run_id, ref, kind, json.dumps(payload, default=str), _now()))
+                "INSERT INTO intake_feedback(run_id, ref, kind, payload, created_at, origin) VALUES(?,?,?,?,?,?)",
+                (run_id, ref, kind, json.dumps(payload, default=str), _now(), origin))
             return int(cur.lastrowid or 0)
         return await self._a(f)
 
@@ -169,10 +178,20 @@ class IntakeStore:
             return [{**dict(r), "payload": json.loads(r["payload"])} for r in self._db.execute(q)]
         return await self._a(f)
 
+    async def confirm_feedback(self, fid: int, by: str) -> dict[str, Any] | None:
+        """A human confirmed a client-origin row (CLI on a TTY, or MCP elicitation where allowed)."""
+        def f():
+            self._db.execute("UPDATE intake_feedback SET confirmed_by=?, applied_run=NULL WHERE id=? "
+                             "AND confirmed_by IS NULL AND origin='client'", (by, fid))
+            r = self._db.execute("SELECT * FROM intake_feedback WHERE id=?", (fid,)).fetchone()
+            return {**dict(r), "payload": json.loads(r["payload"])} if r else None
+        return await self._a(f)
+
     async def pending_profile_answers(self) -> list[dict[str, Any]]:
         """profile_answer feedback not yet handed to the profile builder (answer_profile_question, ADR-0047)."""
         def f():
-            return [{"id": r["id"], **json.loads(r["payload"]), "run_id": r["run_id"], "ref": r["ref"]}
+            return [{"id": r["id"], **json.loads(r["payload"]), "run_id": r["run_id"], "ref": r["ref"],
+                     "confirmed": r["origin"] == "user" or r["confirmed_by"] is not None}
                     for r in self._db.execute("SELECT * FROM intake_feedback WHERE kind='profile_answer' "
                                               "AND delivered_at IS NULL ORDER BY id")]
         return await self._a(f)

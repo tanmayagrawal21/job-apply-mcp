@@ -360,6 +360,7 @@ run_applications (ADR-0045): explicit links, emailed links and discovery through
 | `submit_parallel` | `int` | `4` | global concurrent submits; always at most 1 per host |
 | `writing_mode` | `Literal['inline', 'deferred']` | `"deferred"` | batch runs never block on prose |
 | `report_rows` | `int` | `20` | rows per category in compact reports |
+| `salary_max_multiple` | `float` | `3.0` | feedback never raises an ask above this x the largest configured salary value (0 = off) |
 
 ## `[search.sessions]`
 
@@ -466,11 +467,12 @@ Job links the user emailed (ADR-0045). Read-only: the mailbox is never modified.
 | `enabled` | `bool` | `true` |  |
 | `source` | `str \| None` | `none` | mbox \| imap \| client; None -> ingest.source |
 | `path` | `str \| None` | `none` | mbox file or .eml directory; None -> ingest.path |
-| `sender` | `str` | `"self"` | "self" \| "" (any) \| an address or substring |
-| `recipient` | `str` | `"self"` | "self" \| "" (any) \| an address or substring |
+| `sender` | `str` | `"self"` | "self" or one of your own full addresses (self_address / self_aliases) |
+| `recipient` | `str` | `"self"` | "self" or one of your own full addresses (self_address / self_aliases) |
 | `self_address` | `str` | `""` | "" -> the profile's contact email, else $<ingest.imap.user_env> |
+| `self_aliases` | `list[str]` | `[]` | your other full addresses that count as "self" |
 | `query` | `str` | `""` | case-insensitive text the subject or body must contain (IMAP: TEXT) |
-| `label` | `str` | `""` | IMAP folder / Gmail label to EXAMINE; mbox: X-Gmail-Labels header |
+| `label` | `str` | `""` | IMAP folder / Gmail label to EXAMINE; mbox: X-Gmail-Labels header (config only) |
 | `since_days` | `int` | `14` |  |
 | `since` | `str \| None` | `none` | YYYY-MM-DD; wins over since_days |
 | `max_messages` | `int` | `200` |  |

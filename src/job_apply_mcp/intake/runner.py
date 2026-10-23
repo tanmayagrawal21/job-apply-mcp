@@ -23,11 +23,20 @@ from urllib.parse import urlsplit
 
 from ..core.concurrency import bounded_gather
 from ..core.models import Decision
-from .feedback import FeedbackError, apply_overlays, describe, normalize
+from .feedback import FeedbackError, apply_overlays, describe, needs_confirmation, normalize
 from .links import JobUrlFilter, clean_url, make_link_source, resolve_filter
 from .store import CATEGORIES, IntakeStore
 
 SOURCES = ("links", "mail", "discovery")
+_RUN_LOCKS: dict[str, asyncio.Lock] = {}   # one run at a time per data dir (process-wide)
+_SLD = {"co", "com", "ac", "org", "net", "gov", "edu", "or", "ne", "go"}
+
+
+def site_key(host: str) -> str:
+    """Registrable domain without a suffix list: last two labels, or three for a ccTLD second level (x.co.uk)."""
+    parts = host.lower().rstrip(".").split(".")
+    n = 3 if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SLD else 2
+    return ".".join(parts[-n:])
 _SUBMIT_MAP = {"submitted": "submitted", "dry_run": "dry_run", "duplicate": "skipped", "needs_human": "handed_off",
                "handoff": "handed_off", "incomplete": "handed_off", "awaiting_code": "handed_off",
                "roadblock": "unknown", "error": "failed"}
@@ -109,20 +118,30 @@ class IntakeRunner:
         return f(target) if f else None
 
     def _host(self, c: Cand) -> str:
+        """Per-host key = registrable domain, so boards.example-ats.io and job-boards.example-ats.io share one
+        slot. A platform ref without a URL keys on its platform."""
         cached = self._cached(c.target)
         url = (cached.posting.apply_url or cached.posting.url) if cached is not None else c.target
         if url.startswith(("http://", "https://")):
-            return (urlsplit(url).hostname or url).lower()
-        return ":".join(c.target.split(":")[:2])
+            return site_key(urlsplit(url).hostname or url)
+        return c.target.split(":")[0]
+
+    def _confirmed(self, r: dict[str, Any]) -> bool:
+        return r.get("origin") == "user" or r.get("confirmed_by") is not None
+
+    def _may_apply(self, r: dict[str, Any]) -> bool:
+        return self._confirmed(r) or not needs_confirmation(r["kind"], self.s.apply.approval_mode)
 
     async def _deliver_profile_answers(self, problems: list[str]) -> tuple[list[str], list[dict[str, Any]]]:
         """Hand pending authorization/demographic/attestation answers to the profile builder. Returns
         (delivered descriptions, still pending rows)."""
         pending = await self.store.pending_profile_answers()
-        if not pending or self._sink is None:
+        ready = [p for p in pending if p["confirmed"]]   # client-origin answers wait for a human confirmation
+        left = [p for p in pending if not p["confirmed"]]
+        if not ready or self._sink is None:
             return [], pending
-        done, left = [], []
-        for p in pending:
+        done = []
+        for p in ready:
             try:
                 self._sink(p["key"], p["value"], p["scope"], p.get("scope_value", ""))
                 done.append(p)
@@ -134,12 +153,16 @@ class IntakeRunner:
 
     async def _apply_feedback(self, run_id: str) -> tuple[int | None, list[str], list[str], list[str]]:
         rows = await self.store.feedback()
-        structured = [r for r in rows if r["kind"] not in ("note", "profile_answer")]
+        usable = [r for r in rows if self._may_apply(r)]
+        structured = [r for r in usable if r["kind"] not in ("note", "profile_answer")]
         run_size, problems = apply_overlays(self.s, getattr(self.engine, "profile", None), structured)
-        pending = [r for r in rows if r["applied_run"] is None]
+        pending = [r for r in usable if r["applied_run"] is None]
         applied = [describe(r["kind"], r["payload"]) for r in pending if r["kind"] not in ("note", "profile_answer")]
         notes = [r["payload"]["text"] for r in pending if r["kind"] == "note"]
         await self.store.mark_feedback_applied([r["id"] for r in pending], run_id)
+        self._awaiting = [{"id": r["id"], "will_apply": describe(r["kind"], r["payload"]),
+                           "confirm": f"job-apply-mcp feedback --confirm {r['id']}"}
+                          for r in rows if not self._may_apply(r) and r["kind"] != "profile_answer"]
         return run_size, applied, notes, problems
 
     async def _mail(self, mail: dict[str, Any] | None, messages: list[dict[str, Any]] | None,
@@ -173,7 +196,19 @@ class IntakeRunner:
                   dry_run: bool | None = None, mail: dict[str, Any] | None = None,
                   messages: list[dict[str, Any]] | None = None,
                   discovery: dict[str, Any] | None = None) -> dict[str, Any]:
+        lock = _RUN_LOCKS.setdefault(str(self.s.paths.data_dir), asyncio.Lock())
+        if lock.locked():   # max_applications is per run: two concurrent runs must not each submit n
+            return {"error": "another run_applications is in progress; wait for it, then retry"}
+        async with lock:
+            return await self._run(links=links, links_file=links_file, sources=sources,
+                                   max_applications=max_applications, dry_run=dry_run, mail=mail,
+                                   messages=messages, discovery=discovery)
+
+    async def _run(self, *, links: list[str] | None, links_file: str | None, sources: list[str] | None,
+                   max_applications: int | None, dry_run: bool | None, mail: dict[str, Any] | None,
+                   messages: list[dict[str, Any]] | None, discovery: dict[str, Any] | None) -> dict[str, Any]:
         cfg = self.s.intake
+        self._awaiting = []
         try:
             dry = self.engine._resolve_dry(dry_run)
         except PermissionError as e:
@@ -211,8 +246,11 @@ class IntakeRunner:
             rows = [c.row() for c in cands if c.target]
             await self.store.add_items(run_id, rows)
             ctx = {"applied_feedback": applied, "feedback_notes": fb_notes, "notes": notes,
-                   "pending_profile_answers": [{k: p[k] for k in ("key", "value", "scope", "scope_value") if p.get(k)}
-                                               for p in pending_pa]}
+                   "pending_profile_answers": [
+                       {**{k: p[k] for k in ("id", "key", "value", "scope", "scope_value") if p.get(k)},
+                        **({} if p["confirmed"] else {"confirm": f"job-apply-mcp feedback --confirm {p['id']}"})}
+                       for p in pending_pa],
+                   "awaiting_confirmation": getattr(self, "_awaiting", [])}
             rep = self._build(run_id, rows, cfg.report_rows)
             await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live"})
         return {**rep, "mode": "dry_run" if dry else "live", "plan_context": {k: v for k, v in ctx.items() if v}}
@@ -389,12 +427,23 @@ class IntakeRunner:
                     await self.store.set_item_status(it["id"], "confirmed")
         rep = self._build(run["run_id"], items, limit or self.s.intake.report_rows, category)
         summ = run["summary"]
-        ctx = {k: summ.get(k) for k in ("applied_feedback", "feedback_notes", "notes", "pending_profile_answers")
+        ctx = {k: summ.get(k) for k in ("applied_feedback", "feedback_notes", "notes", "pending_profile_answers",
+                                 "awaiting_confirmation")
                if summ.get(k)}
         return {**rep, "started": run["started_at"], "finished": run["finished_at"], "mode": summ.get("mode"),
                 **({"plan_context": ctx} if ctx else {})}
 
-    async def give_feedback(self, run_id: str, ref: str | None, feedback: str | dict[str, Any]) -> dict[str, Any]:
+    async def confirm_feedback(self, fid: int, by: str) -> dict[str, Any]:
+        r = await self.store.confirm_feedback(fid, by)
+        if r is None:
+            return {"error": f"unknown feedback id {fid}"}
+        return {"id": fid, "kind": r["kind"], "confirmed_by": r["confirmed_by"] or "user (CLI)",
+                "will_apply": describe(r["kind"], r["payload"]), "when": "at the start of the next run"}
+
+    async def give_feedback(self, run_id: str, ref: str | None, feedback: str | dict[str, Any],
+                            origin: str = "client") -> dict[str, Any]:
+        """origin: "client" (MCP tool) or "user" (the CLI on a TTY). Client-origin answers, and in human approval
+        mode salary changes, wait for a human confirmation before any run applies them."""
         run = await self.store.get_run(run_id) if run_id else None
         if run_id and run is None:
             return {"error": f"unknown run {run_id!r}"}
@@ -405,12 +454,19 @@ class IntakeRunner:
         cur = sizes[-1] if sizes else self.s.intake.max_applications
         try:
             kind, payload = normalize(feedback, item={"company": item["company"], "title": item["title"]} if item else None,
-                                      run_size=cur,
-                                      cap=self.s.intake.max_applications_cap)
+                                      run_size=cur, cap=self.s.intake.max_applications_cap,
+                                      stop_phrases=self.s.policy.stop_phrases)
         except FeedbackError as e:
             return {"error": str(e)}
-        fid = await self.store.add_feedback(run_id or None, ref, kind, payload)
-        when = ("at the start of the next run, via the profile builder's answer_profile_question (kept pending and "
-                "listed in run reports until it is installed)") if kind == "profile_answer" else \
-            "at the start of the next run"
-        return {"id": fid, "kind": kind, "will_apply": describe(kind, payload), "when": when}
+        fid = await self.store.add_feedback(run_id or None, ref, kind, payload, origin=origin)
+        confirm = origin == "client" and needs_confirmation(kind, self.s.apply.approval_mode)
+        when = "at the start of the next run"
+        if kind == "profile_answer":
+            when += (", via the profile builder's answer_profile_question (kept pending and listed in run reports "
+                     "until it is installed)")
+        out = {"id": fid, "kind": kind, "will_apply": describe(kind, payload), "when": when}
+        if confirm:
+            out |= {"needs_confirmation": True, "confirm": f"job-apply-mcp feedback --confirm {fid}",
+                    "why": "a client-supplied answer (or, in human approval mode, a pay change) applies only after "
+                           "the user confirms it"}
+        return out

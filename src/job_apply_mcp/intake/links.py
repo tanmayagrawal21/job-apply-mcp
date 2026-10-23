@@ -165,12 +165,11 @@ def link_mail_from_dict(d: dict[str, Any], *, query: str = "", max_links: int = 
 
 # ---------------------------------------------------------------------------------------------- filters
 def _addr_match(want: str, addrs: Iterable[str]) -> bool:
+    """Exact, case-insensitive full-address match only (never a substring or domain match)."""
     w = want.lower().strip()
-    for a in addrs:
-        a = parseaddr(a)[1].lower() or a.lower()
-        if (a == w) if "@" in w else (w in a):
-            return True
-    return False
+    if "@" not in w:
+        return False
+    return any((parseaddr(a)[1] or a).lower().strip() == w for a in addrs)
 
 
 @dataclass(slots=True)
@@ -193,21 +192,42 @@ class MailFilter:
         return m.has_query
 
 
+CALL_OVERRIDES = ("query", "since", "since_days")   # a caller may only narrow; who and where come from config
+
+
+def _full_address(v: str) -> bool:
+    return bool(re.fullmatch(r"[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+", v))
+
+
 def resolve_filter(cfg: IntakeMailCfg, imap: ImapCfg, *, self_address: str = "",
                    overrides: dict[str, Any] | None = None) -> tuple[MailFilter, str]:
-    """Build the filter from config + per-call overrides. Returns (filter, error); "self" with no known address is an
-    error (fail closed: the run never reads every message in the mailbox by accident)."""
+    """Build the filter from config + per-call overrides. Returns (filter, error). Fail closed (ADR-0045):
+    - per-call overrides may only narrow (query, since, since_days); sender, recipient, self_address and label are
+      config-only, so a caller cannot widen the read to other people's mail or other folders;
+    - sender and recipient must each resolve to one of the user's own full addresses (`self` = self_address, else
+      the profile contact email, else the IMAP user; plus intake.mail.self_aliases). Anything else is an error."""
     o = {k: v for k, v in (overrides or {}).items() if v is not None}
-    me = (o.get("self_address") or cfg.self_address or self_address or os.environ.get(imap.user_env, "")).strip()
+    bad = sorted(set(o) - set(CALL_OVERRIDES))
+    if bad:
+        return MailFilter(), f"mail overrides {bad} are not allowed per call (only {list(CALL_OVERRIDES)}); set them in config"
+    me = (cfg.self_address or self_address or os.environ.get(imap.user_env, "")).strip().lower()
+    own = {a.strip().lower() for a in [me, *cfg.self_aliases] if _full_address(a.strip())}
 
-    def who(v: str) -> tuple[str, str]:
-        v = (v or "").strip()
-        if v.lower() == "self":
-            return (me, "") if me else ("", "set intake.mail.self_address (or the profile contact email)")
+    def who(field_: str, v: str) -> tuple[str, str]:
+        v = (v or "").strip().lower()
+        if v == "self":
+            v = me
+        if not v:
+            return "", f"intake.mail.{field_}: set intake.mail.self_address (or the profile contact email)"
+        if not _full_address(v) or v not in own:
+            return "", (f"intake.mail.{field_} must be 'self' or one of your own full addresses "
+                        "(intake.mail.self_address / self_aliases)")
         return v, ""
 
-    sender, e1 = who(str(o.get("sender", cfg.sender)))
-    recipient, e2 = who(str(o.get("recipient", cfg.recipient)))
+    sender, e1 = who("sender", cfg.sender)
+    recipient, e2 = who("recipient", cfg.recipient)
+    if e1 or e2:
+        return MailFilter(), e1 or e2
     since_s = o.get("since", cfg.since)
     if since_s:
         try:
@@ -215,9 +235,12 @@ def resolve_filter(cfg: IntakeMailCfg, imap: ImapCfg, *, self_address: str = "",
         except ValueError:
             return MailFilter(), f"bad since date {since_s!r} (want YYYY-MM-DD)"
     else:
-        since = datetime.now(UTC) - timedelta(days=max(0, int(o.get("since_days", cfg.since_days))))
+        try:
+            since = datetime.now(UTC) - timedelta(days=max(0, int(o.get("since_days", cfg.since_days))))
+        except (TypeError, ValueError):
+            return MailFilter(), "since_days must be a whole number"
     return MailFilter(sender=sender, recipient=recipient, query=str(o.get("query", cfg.query)),
-                      label=str(o.get("label", cfg.label)), since=since), e1 or e2
+                      label=cfg.label, since=since), ""
 
 
 # ---------------------------------------------------------------------------------------------- sources

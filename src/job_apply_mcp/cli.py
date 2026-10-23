@@ -46,17 +46,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="restrict sources (repeatable; default intake.sources)")
     r.add_argument("--max", dest="max_applications", type=int, help="max applications this run")
     r.add_argument("--dry-run", action="store_true", help="force a dry run (never makes the run less safe)")
-    for k in ("sender", "recipient", "query", "label", "since"):
-        r.add_argument(f"--mail-{k}", help=f"emailed links: {k} (overrides intake.mail.{k})")
+    for k in ("query", "since"):   # sender, recipient and label are config-only (intake.mail.*)
+        r.add_argument(f"--mail-{k}", help=f"emailed links: narrow by {k} (overrides intake.mail.{k})")
     r.add_argument("--query", help="discovery query (overrides intake.discovery.query)")
     rp = sub.add_parser("report", help="show a run report (default: the latest run)")
     rp.add_argument("run_id", nargs="?", default="")
     rp.add_argument("--category", default="")
     rp.add_argument("--limit", type=int, default=50)
     fb = sub.add_parser("feedback", help="give feedback on a run (applied at the start of the next run)")
-    fb.add_argument("run_id")
-    fb.add_argument("feedback", help="free text, or a JSON object such as '{\"kind\":\"deny_company\"}'")
+    fb.add_argument("run_id", nargs="?", default="")
+    fb.add_argument("feedback", nargs="?", default="",
+                    help="free text, or a JSON object such as '{\"kind\":\"deny_company\"}'")
     fb.add_argument("--ref", help="the run item the feedback is about")
+    fb.add_argument("--confirm", type=int, metavar="ID",
+                    help="HUMAN ONLY (needs a TTY): confirm client-supplied feedback so the next run applies it")
     for name, h in (("approve", "HUMAN ONLY (needs a TTY): approve a pending submission"),
                     ("deny", "HUMAN ONLY (needs a TTY): deny a pending submission"),
                     ("pending", "list pending approvals"),
@@ -124,11 +127,17 @@ def _intake_cli(args: argparse.Namespace) -> int:
             if args.cmd == "report":
                 return await r.report(args.run_id, args.category, args.limit)
             if args.cmd == "feedback":
+                # a terminal user is the owner; anything else (pipes, agents) stays client-origin (ADR-0045)
+                tty = sys.stdin.isatty() and sys.stdout.isatty()
+                if args.confirm is not None:
+                    if not tty:
+                        return {"error": "--confirm needs an interactive terminal (a human)"}
+                    return await r.confirm_feedback(args.confirm, "human:cli")
                 fb: str | dict = args.feedback
                 if fb.lstrip().startswith("{"):
                     fb = json.loads(fb)
-                return await r.give_feedback(args.run_id, args.ref, fb)
-            mail = {k: getattr(args, f"mail_{k}") for k in ("sender", "recipient", "query", "label", "since")
+                return await r.give_feedback(args.run_id, args.ref, fb, origin="user" if tty else "client")
+            mail = {k: getattr(args, f"mail_{k}") for k in ("query", "since")
                     if getattr(args, f"mail_{k}") is not None}
             return await r.run(links=args.link, links_file=args.links_file, sources=args.source,
                                max_applications=args.max_applications, dry_run=True if args.dry_run else None,
