@@ -272,7 +272,6 @@ async def test_stop_phrase_inside_short_text_is_rejected():
     GOOD + " \u01c0 certify this.",                                           # U+01C0
     GOOD + " \u13a5 certify this.",                                           # U+13A5
     GOOD + " I certify this is my \u0585wn work.",                            # U+0585
-    GOOD + " Thanks\u00a0again.",                                             # no-break space
 ])
 async def test_non_allowlisted_characters_are_rejected(text):
     t, r = await _rejected(text)
@@ -308,8 +307,11 @@ def test_every_non_allowlisted_code_point_is_a_charset_hit():
         if checks.allowed_char(c):
             allowed += 1
             continue
+        if o in (0xA0, 0x2010, 0x2011):                                       # folded to space / hyphen first
+            assert checks.charset_violations(f"ok {c} ok") == []
+            continue
         assert checks.charset_violations(f"ok {c} ok") == [f"U+{o:04X}"], hex(o)
-    assert allowed == 95 + 3 + 8 + 62 + 128                                  # ASCII, ws, typographic, Latin-1, Ext-A
+    assert allowed == 95 + 3 + 8 + 62 + 128 + 7                              # ASCII, ws, typographic, Latin-1, Ext-A, symbols
 
 
 @pytest.mark.parametrize("seed", range(12))
@@ -318,7 +320,7 @@ async def test_random_non_allowlisted_code_point_leads_to_needs_review(seed):
     rng = random.Random(seed)
     while True:
         o = rng.randrange(0x80, 0x110000)
-        if not (0xD800 <= o <= 0xDFFF) and not checks.allowed_char(chr(o)):
+        if not (0xD800 <= o <= 0xDFFF) and not checks.allowed_char(chr(o)) and o not in (0xA0, 0x2010, 0x2011):
             break
     t, _ = await _rejected(GOOD + f" Thanks {chr(o)}.")
     assert t["violations"][0].startswith("[charset]") and f"U+{o:04X}" in t["violations"][0]
@@ -416,3 +418,56 @@ async def test_non_scalar_values_rejected_for_every_field_kind(value):
     res = await e.submit(POSTING.ref, {"q_src": value}, out.approval_id, dry_run=False)
     assert res.status == "needs_review" and not ad.submits
     assert res.client_tasks[0]["violations"][0].startswith("[type]")
+
+
+# ---- attestation / no-AI / consent paraphrases: the deterministic layer alone must catch them (no reviewer call)
+
+@pytest.mark.parametrize("text", [
+    "I wrote this without AI.", "Written without any AI.", "Produced without ChatGPT.", "Done without A.I.",
+    "AI was not used for this answer.", "No AI were involved; AI is never used here.", "This answer is AI-free.",
+    "It is AI free.", "An LLM-free answer.", "Zero AI was used.", "Zero Al was used.", "This is Al-free.",
+    "I solemnly declare this.", "I solemnly swear this is true.", "Sworn statement follows.", "I swear it.",
+    "This was written by me.", "Written by myself.", "I wrote this myself.", "I did it by myself.",
+    "Completed by me.", "Authored all by me.",
+    "Without\u00a0AI.", "AI\u2011free.", "AI\u2010free.",                          # NBSP, U+2011, U+2010 folded first
+    "I d\u00f8 certify this.", "I c\u00f8nfirm this.",                              # o-slash maps to o inside the scan
+])
+async def test_no_ai_swear_and_authorship_paraphrases_are_caught_without_the_reviewer(text):
+    t, r = await _rejected(GOOD + " " + text)
+    assert t["violations"][0].startswith("[attestation]") and not _reviews(r), text
+
+
+def test_nbsp_and_unicode_hyphens_are_folded_before_the_allowlist():
+    assert checks.charset_violations("Alex\u00a0Rivera \u2010 co\u2011op") == []
+    assert checks.scan_forms("AI\u2011free")[0] == "ai-free"
+    assert checks.scan_forms("Alex\u00a0Rivera")[0] == "alex rivera"
+    assert checks.scan_forms("d\u00f8")[0] == "do"
+
+
+def test_currency_degree_fraction_and_mark_symbols_are_allowed():
+    assert checks.charset_violations("\u00a350 \u20ac60 72\u00b0 \u00bd \u00a9 \u2122 5\u2032") == []
+
+
+async def test_symbols_and_nbsp_prose_passes_to_the_reviewer():
+    r = R()
+    e, _ = engine(r)
+    text = GOOD + " I managed a \u00a350k budget at 72\u00b0F\u00a0labs, a \u00bd share, in a co\u2011op."
+    res = await _submit(e, text)
+    assert res.status == "submitted" and len(_reviews(r)) == 1
+
+
+async def test_reviewer_prompt_carries_the_attestation_clause():
+    r = R()
+    e, _ = engine(r)
+    await _submit(e, GOOD)
+    assert checks.ATTEST_CLAUSE in _reviews(r)[0]
+
+
+def test_rubrics_carry_the_attestation_clause():
+    from job_apply_mcp.apply.writing import review_rubric
+    from job_apply_mcp.writing import quality
+    cfg = WritingCfg()
+    assert checks.ATTEST_CLAUSE in review_rubric(cfg, company="Acme", title="Engineer", facts=[])
+    assert checks.ATTEST_CLAUSE in quality.client_rubric([], cfg)
+    for w in ("certifies", "swears", "without AI", "consents"):
+        assert w in checks.ATTEST_CLAUSE

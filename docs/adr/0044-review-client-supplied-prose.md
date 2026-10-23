@@ -26,8 +26,9 @@ it could contradict the resume or break the writing rules and still be sent.
    "consent to", "agree to", ...). A hit is `needs_review` without a reviewer call and is never submitted.
    The scan runs on every client string, including URL slugs and select options. It is **deny by default**:
    first a character allowlist applies. Allowed are printable ASCII, tab/LF/CR, Latin-1 and Latin Extended-A
-   letters (accented names), and the typographic marks ’ ‘ “ ” – — … •. Any other code point is `[charset]`
-   `needs_review`, which covers invisibles, homoglyphs, fullwidth forms, combining marks and the no-break space. An
+   letters (accented names), and the typographic marks ’ ‘ “ ” – — … •, and the symbols £ € ° ½ © ™ ′. The no-break space and U+2010/U+2011
+   hyphens (common in pasted text) are folded to a space and `-` before the allowlist. Any other code point is `[charset]`
+   `needs_review`, which covers invisibles, homoglyphs, fullwidth forms and combining marks. An
    exact option of the field's own fixed set is form text, so it skips the allowlist, but it is still scanned. Only
    allowlisted text reaches the phrase scan. That scan runs after NFKD, removal of combining marks, casefolding,
    and mapping of ASCII look-alikes. A standalone `1`, `l`, `|` or `!` before an attest verb becomes `i`. `A.I.`,
@@ -73,7 +74,10 @@ it could contradict the resume or break the writing rules and still be sent.
 
 - Short answers ("Favorite build tool") now cost a reviewer call each in agent mode. A legitimate answer that uses
   consent wording ("I agree to relocate") is held for review; that is the intended fail-closed trade-off.
-- Paraphrases the patterns do not list are left to the strict reviewer.
+- Paraphrases the patterns do not list are left to the strict reviewer. `review_rubric` and `quality.client_rubric`
+  both carry `checks.ATTEST_CLAUSE`, which tells it to fail any attestation, no-AI or consent statement. The patterns
+  also cover "without AI", "AI was not used", "AI-free", "zero AI", solemnly/swear/sworn and "written by me/myself";
+  the scan maps ø to o. The deterministic layer alone catches these (tests do not rely on the reviewer).
 
 ## Verify
 `uv run pytest -q tests/test_client_prose_review.py tests/test_config_trust.py`: passing prose is reviewed then

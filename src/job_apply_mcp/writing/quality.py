@@ -15,6 +15,7 @@ from typing import Any
 
 from ..config import WritingCfg
 from ..profile.resume import norm
+from .checks import ATTEST_CLAUSE
 
 _SENT = re.compile(r"(?<=[.!?])\s+")
 _NUM = re.compile(r"\$?\d[\d,.]*\s?(?:%|x\b|k\b|m\b)?")
@@ -197,7 +198,7 @@ def client_rubric(refs: list[str], cfg: WritingCfg) -> str:
     need = ", ".join(f"{k}>={v}" for k, v in cfg.quality_min_scores.items())
     return (f" QUALITY BAR: compare with the user's own letters ({len(refs)} on file; style only, never their facts). "
             f"Score 1-5 ({need}) and answer 'is this at least as strong as the reference letters? why/why not?' "
-            "with sentence-level edits.")
+            "with sentence-level edits. " + ATTEST_CLAUSE)
 
 
 def read_corpus(paths: list[str], limit: int = 8, chars: int = 6000) -> list[str]:

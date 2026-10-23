@@ -153,7 +153,7 @@ def review_rubric(cfg: WritingCfg, *, company: str, title: str, facts: list[str]
     return ("Review sentence by sentence. Fail on: claims not supported by the facts; any gap, deficiency or "
             "'would need to learn' statement; enthusiasm, personal-feeling or flattery phrases "
             f"(lexicon: {', '.join(cfg.banned_phrases[:12])}); contractions; wrong company/role names "
-            f"(expected {company!r} / {title!r}); length; style mismatch. Rules: " + " ".join(cfg.rules) +
+            f"(expected {company!r} / {title!r}); length; style mismatch. " + checks.ATTEST_CLAUSE + " Rules: " + " ".join(cfg.rules) +
             " Facts: " + " | ".join(facts))
 
 

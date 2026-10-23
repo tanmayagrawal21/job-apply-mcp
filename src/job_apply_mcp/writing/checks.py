@@ -149,18 +149,20 @@ def fact_conflicts(text: str, resume: list[Fact], today: date) -> list[Hit]:
 # Extended-A letters (accented names), and a few typographic marks. Every other code point is a `[charset]` hit,
 # so the phrase scan below only ever sees text built from these characters.
 _TYPOGRAPHIC = frozenset("\u2019\u2018\u201c\u201d\u2013\u2014\u2026\u2022")
+_SYMBOLS = frozenset("\u00a3\u20ac\u00b0\u00bd\u00a9\u2122\u2032")        # £ € ° ½ © ™ ′ (prices, degrees, marks, primes)
+_FOLD = str.maketrans({"\u00a0": " ", "\u2010": "-", "\u2011": "-"})        # NBSP and Unicode hyphens (pasted text)
 _WHITESPACE = frozenset("\t\n\r")
 
 
 def allowed_char(c: str) -> bool:
     o = ord(c)
-    return (0x20 <= o <= 0x7E or c in _WHITESPACE or c in _TYPOGRAPHIC
+    return (0x20 <= o <= 0x7E or c in _WHITESPACE or c in _TYPOGRAPHIC or c in _SYMBOLS
             or (0xC0 <= o <= 0xFF and o not in (0xD7, 0xF7)) or 0x100 <= o <= 0x17F)
 
 
 def charset_violations(text: str) -> list[str]:
     """Code points outside the client prose allowlist, as U+XXXX (deduplicated, in order)."""
-    return list(dict.fromkeys(f"U+{ord(c):04X}" for c in text if not allowed_char(c)))
+    return list(dict.fromkeys(f"U+{ord(c):04X}" for c in text.translate(_FOLD) if not allowed_char(c)))
 
 
 _PUNCT = re.compile(r"[\W_]+")
@@ -168,8 +170,14 @@ _ATTEST_VERB = (r"(?:hereby\s+|also\s+|further\s+)?(?:certif|attest|affirm|decla
                 r"authori[sz])")
 _LOOKALIKE_I = re.compile(rf"(?<![\w|!])[1l|!](?=\s+{_ATTEST_VERB})")
 _AI_FORM = r"(?:a\.\s*i\.?|a\s+i|al)"
-_AI_BEFORE = re.compile(rf"\b(no|use|used|of|without|any|an|using)\s+{_AI_FORM}(?=[\W]|$)")
-_AI_AFTER = re.compile(rf"(?<![\w.]){_AI_FORM}\s*-?\s*(assisted|generated|written|tools?|used)\b")
+_AI_BEFORE = re.compile(rf"\b(no|use|used|of|without|any|an|using|zero)\s+{_AI_FORM}(?=[\W]|$)")
+_AI_AFTER = re.compile(rf"(?<![\w.]){_AI_FORM}\s*-?\s*(assisted|generated|written|tools?|used|free|(?:was|were)\s+not)\b")
+
+
+# Added to every reviewer rubric: the model backstop for attestation paraphrases the patterns cannot list (ADR-0044).
+ATTEST_CLAUSE = ("FAIL any statement, however worded, that certifies, attests, swears or affirms truth or authorship; "
+                 "says the text was written without AI, with no AI, or by the applicant alone; or consents or agrees "
+                 "to terms, contact, calls, texts or SMS. A client-supplied answer must contain none of these.")
 
 
 def scan_forms(text: str) -> list[str]:
@@ -177,8 +185,8 @@ def scan_forms(text: str) -> list[str]:
     ASCII look-alikes mapped ("l certify" / "1 certify" / "| certify" -> "i certify"; "No A.I." / "A I" / "Al"
     next to no/use/used/assisted/generated/written -> "ai"), then the same with punctuation collapsed."""
     import unicodedata
-    t = unicodedata.normalize("NFKD", text)
-    t = "".join(c for c in t if unicodedata.category(c) != "Mn").casefold()
+    t = unicodedata.normalize("NFKD", text.translate(_FOLD))
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn").casefold().replace("\u00f8", "o")   # o-slash -> o
     t = _LOOKALIKE_I.sub("i", t)
     t = _AI_AFTER.sub(r"ai \1", _AI_BEFORE.sub(r"\1 ai", t))
     return [t, " ".join(_PUNCT.sub(" ", t).split())]
