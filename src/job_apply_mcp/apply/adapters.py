@@ -38,6 +38,7 @@ class ProfileView:
         self.settings = settings
         self._fs: Any = None
         self._corpus: list[str] | None = None
+        self.persona: Any = None      # PersonaPolicy (ADR-0047); None = behave exactly as before
 
     # -- resume-first facts (ADR-0023) ------------------------------------------------------------
     @property
@@ -101,10 +102,23 @@ class ProfileView:
     _TRI: ClassVar[dict[bool, str]] = {True: "Yes", False: "No"}
 
     def _experience_spans(self) -> list[tuple[str, str]]:
-        """Resume experience entries win (ADR-0023); the profile's work list is the fallback."""
+        """Resume experience entries win (ADR-0023); the profile's work list is the fallback. With a persona, only
+        the roles its experience_counting policy counts (ADR-0047)."""
         res = [(f.start, "" if f.current else f.end) for f in self.resume_facts
                if f.section == "experience" and f.start]
-        return res or [(w.start, w.end) for w in self.p.work if w.start]
+        if self.persona is None:
+            return res or [(w.start, w.end) for w in self.p.work if w.start]
+        from ..persona import Role
+        kinds = {(w.company.lower(), w.start): w.kind for w in self.p.work}
+        roles = [Role(f.start, "" if f.current else f.end, f.title, f.org, kinds.get((f.org.lower(), f.start), ""))
+                 for f in self.resume_facts if f.section == "experience" and f.start]
+        roles = roles or [Role(w.start, w.end, w.title, w.company, w.kind) for w in self.p.work if w.start]
+        return self.persona.counted_spans(roles)
+
+    def resume_projects(self) -> list[Any]:
+        from ..persona import Project
+        return [Project(name=f.title or f.org, summary="; ".join(f.bullets[:2]))
+                for f in self.resume_facts if f.section == "projects" and (f.title or f.org)]
 
     def _structured(self, key: str) -> bool | None:
         a, pr = self.p.authorization, self.p.preferences
@@ -173,6 +187,14 @@ class ProfileView:
         return None
 
     def lookup(self, key: str) -> Any | None:
+        v = self._lookup(key)
+        if self.persona is not None and (v is None or v == "") and " " not in key:   # canonical keys only
+            s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile
+            if s is not None:
+                return s
+        return v
+
+    def _lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
                     "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:"))):
             return self._derived(key)
@@ -207,10 +229,15 @@ class ProfileView:
     def facts(self, topic: str = "", limit: int = 12) -> list[str]:
         """Only the precedence-resolved fact set (ADR-0023): never raw letters or unresolved profile text."""
         rows = list(self.fact_set.lines)
+        lead: list[str] = []
+        if self.persona is not None:
+            from ..persona.keys import is_exceptional_label
+            if is_exceptional_label(topic) and (proj := self.persona.exceptional()) is not None:
+                lead = [f"EXCEPTIONAL WORK (use this project): {proj.name}" + (f": {proj.summary}" if proj.summary else "")][:1]
         words = set(re.findall(r"[a-z]{4,}", topic.lower()))
         rows.sort(key=lambda r: (r.startswith("TIMELINE"), -len(words & set(re.findall(r"[a-z]{4,}", r.lower())))))
         keep = [r for r in rows if not r.startswith("TIMELINE")][:limit]
-        return [r[:300] for r in keep]
+        return [r[:300] for r in lead + keep][:max(limit, len(lead))]
 
 
 class PolicyGates:
