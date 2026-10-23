@@ -123,8 +123,10 @@ class ProfileDB:
 
     # -- answers -------------------------------------------------------------------------------
     def set_answer(self, key: str, value: str, scope: str = "global", scope_value: str = "",
-                   origin: str = "user_written", settle: bool = True) -> None:
-        """`settle=False` stores a suggestion (e.g. a client-origin answer to a sensitive key) and leaves the gap open."""
+                   origin: str = "user_written") -> None:
+        """Only human paths (elicitation, TTY CLI) call this; the origin is always user_written."""
+        if origin != "user_written":
+            raise ValueError("only answers given by the user are stored")
         if scope not in SCOPES:
             raise ValueError(f"scope must be one of {SCOPES}")
         if scope != "global" and not scope_value:
@@ -135,8 +137,7 @@ class ProfileDB:
                 "INSERT INTO answers(key,scope,scope_value,value,origin,ts) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(key,scope,scope_value) DO UPDATE SET value=excluded.value, origin=excluded.origin, ts=excluded.ts",
                 (key, scope, scope_value, value, origin, _now()))
-            if settle:
-                self._db.execute("UPDATE gaps SET status='answered' WHERE key=?", (key,))
+            self._db.execute("UPDATE gaps SET status='answered' WHERE key=?", (key,))
             self._db.commit()
 
     def answer(self, key: str, *, company: str = "", family: str = "") -> str | None:
@@ -155,13 +156,6 @@ class ProfileDB:
                 if r:
                     return str(r["value"]), str(r["origin"])
         return None
-
-    def suggestion(self, key: str) -> str | None:
-        """A non-human (origin != user_written) answer waiting for the human to confirm."""
-        with self._lock:
-            r = self._db.execute("SELECT value FROM answers WHERE key=? AND origin!='user_written' ORDER BY ts DESC",
-                                 (key,)).fetchone()
-            return str(r["value"]) if r else None
 
     def all_answers(self) -> list[dict[str, Any]]:
         with self._lock:

@@ -215,11 +215,11 @@ def test_demographics_come_from_profile_only_even_for_human_answers():
 def test_scoped_stored_answer_uses_posting_context():
     db = ProfileDB(":memory:")
     v = view(db=db)
-    db.set_answer("q:team size", "5", "company", "Acme Robotics")
-    f = F("t", "Team size")
+    db.set_answer("q:favorite build tool", "Bazel", "company", "Acme Robotics")
+    f = F("t", "Favorite build tool")
     assert map_fields([f], v, persona=v.persona).unresolved
     with posting_scope("Acme Robotics Inc", "Engineer"):
-        assert map_fields([f], v, persona=v.persona).answers[0].value == "5"
+        assert map_fields([f], v, persona=v.persona).answers[0].value == "Bazel"
 
 
 def test_persona_question_answers_overlay_the_policy():
@@ -339,11 +339,6 @@ async def test_tools_questions_and_answer(seeded):
     assert {"profile_questions", "answer_profile_question"} <= names
     q = json.loads((await m.call_tool("profile_questions", {"limit": 1}))[0][0].text)["questions"]
     assert len(q) == 1 and q[0]["key"] == "q:favorite build tool" and q[0]["n"] == 2
-    r = json.loads((await m.call_tool("answer_profile_question",
-                                       {"key": "q:favorite build tool", "value": "Bazel", "scope": "company:Acme"}))[0][0].text)
-    assert r["ok"] and r["origin"] == "client" and db.answer("q:favorite build tool", company="acme") == "Bazel"
-    bad = json.loads((await m.call_tool("answer_profile_question", {"key": "k", "value": "v", "scope": "company"}))[0][0].text)
-    assert bad["ok"] is False
 
 
 async def test_ask_at_start_runs_once_and_saves_answers(seeded):
@@ -395,52 +390,53 @@ def test_owner_style_profile_roundtrip_is_not_rewritten(tmp_path):
     assert f.read_bytes() == before
 
 
-# ---- review round: sensitive keys, labels and origin ------------------------------------------------------------
-SENSITIVE_KEYS = ["work_authorized", "requires_sponsorship", "us_citizen", "citizenship", "clearance", "export_control",
-                  "privacy_ack", "acknowledge_privacy_notices", "persona.salary_floor"]
-
-
-async def _agent_answer(s, key, value, scope="global"):
+# ---- review rounds: only the human writes answers; the hook has a positive allowlist ---------------------------------
+async def _call(s, name, args):
     from mcp.server.fastmcp import FastMCP
     m = FastMCP("t")
     ptools.register(m, lambda: _Svc(s))
-    return json.loads((await m.call_tool("answer_profile_question", {"key": key, "value": value, "scope": scope}))[0][0].text)
+    return json.loads((await m.call_tool(name, args))[0][0].text)
 
 
-@pytest.mark.parametrize("key", SENSITIVE_KEYS)
-async def test_agent_answer_to_sensitive_key_is_a_suggestion_never_used(seeded, key):
-    db, s = seeded
-    r = await _agent_answer(s, key, "Yes")
-    assert r["ok"] and r["origin"] == "client" and "suggestion" in r["note"]
-    v = view(db=db)
-    assert v.persona.stored(key) is None and v.lookup(key) in (None, "")
-    db.record_hit(key, "Q", ref="r9", kind="unresolved")
-    assert next(x for x in ptools.questions(s, 10) if x["key"] == key)["suggested"] == "Yes"   # shown to the human
-
-
-async def test_agent_cannot_store_demographics_and_human_mode_refuses_unconfirmed(seeded):
-    db, s = seeded
-    assert (await _agent_answer(s, "race", "x"))["ok"] is False
-    s.apply.approval_mode = "human"
-    r = await _agent_answer(s, "q:favorite build tool", "Bazel")
-    assert r["ok"] is False and db.answer("q:favorite build tool") is None
-
-
-async def test_elicited_confirmation_is_user_written(seeded, monkeypatch):
+async def test_answer_tool_takes_no_value_and_stores_nothing_without_elicitation(seeded):
     db, s = seeded
     from mcp.server.fastmcp import FastMCP
     m = FastMCP("t")
     ptools.register(m, lambda: _Svc(s))
+    tool = next(t for t in await m.list_tools() if t.name == "answer_profile_question")
+    assert "value" not in tool.inputSchema["properties"]
+    r = await _call(s, "answer_profile_question", {"key": "work_authorized"})
+    assert r["ok"] is False and db.all_answers() == []
+    assert (await _call(s, "answer_profile_question", {"key": "race"}))["ok"] is False
+    assert db.all_answers() == []
 
-    async def fake(ctx, key, value, scope, sv):
-        return "Edited by human"
-    monkeypatch.setattr(ptools, "_confirm", fake)
-    r = json.loads((await m.call_tool("answer_profile_question", {"key": "work_authorized", "value": "Yes"}))[0][0].text)
-    assert r["origin"] == "user_written" and db.answer_row("work_authorized") == ("Edited by human", "user_written")
-    assert view(db=db).persona.stored("work_authorized") == "Edited by human"
+
+async def test_answer_tool_stores_what_the_human_typed(seeded, monkeypatch):
+    db, s = seeded
+
+    async def typed(ctx, key, question, scope, sv):
+        return "typed by the human"
+    monkeypatch.setattr(ptools, "_ask_value", typed)
+    r = await _call(s, "answer_profile_question", {"key": "work_authorized", "scope": "company:Acme"})
+    assert r["origin"] == "user_written" and db.answer_row("work_authorized", company="acme") == ("typed by the human", "user_written")
+
+    async def blank(ctx, key, question, scope, sv):
+        return ""
+    monkeypatch.setattr(ptools, "_ask_value", blank)
+    assert (await _call(s, "answer_profile_question", {"key": "x"}))["ok"] is False
 
 
-BLOCKED = ["I certify that the information provided is true and complete", "Do you agree to the terms and conditions?",
+def test_db_refuses_non_human_origin():
+    with pytest.raises(ValueError):
+        ProfileDB(":memory:").set_answer("k", "v", origin="client")
+
+
+BLOCKED = ["Have you ever been charged with a crime?", "I understand that false statements may lead to termination",
+           "Do you confirm the above is accurate?", "Do you accept our code of conduct?",
+           "Do you give permission for a background screen?", "Can we contact you by WhatsApp?",
+           "Do you allow us to keep your data for 2 years?", "Did a chatbot help you write this?",
+           "Can we call your references?", "Are you willing to relocate?",
+           "I certify that the information provided is true and complete", "Do you agree to the terms and conditions?",
            "Do you consent to receive SMS messages?", "Was AI used to write this application?",
            "Have you ever been convicted of a felony?", "Are you a U.S. person as defined by ITAR?",
            "Do you identify as transgender?", "What is your race?", "Do you agree to binding arbitration?",
@@ -460,11 +456,16 @@ def test_stored_and_persona_answers_never_answer_blocked_labels(label):
         assert not r.answers, label
 
 
-def test_whole_question_match_only_for_persona_patterns():
-    p = Profile(persona=Persona(answers={"python": "Python 3"}))
-    v = view(p)
-    assert not map_fields([F("f", "Describe your Python experience")], v, persona=v.persona).answers
-    assert map_fields([F("f", "Python")], v, persona=v.persona).answers[0].value == "Python 3"
+def test_hook_allowlist_and_whole_question_match():
+    p = Profile(persona=Persona(answers={"favorite build tool": "Bazel", "favorite color": "Blue",
+                                         "what is your favorite build tool": "Bazel too"}))
+    db = ProfileDB(":memory:")
+    v = view(p, db)
+    db.set_answer("q:favorite color", "Blue", origin="user_written")
+    assert not map_fields([F("f", "Favorite color")], v, persona=v.persona).answers          # not on the allowlist
+    assert not map_fields([F("f", "Describe your favorite build tool experience")], v, persona=v.persona).answers
+    got = map_fields([F("f", "Favorite build tool", max_length=40)], v, persona=v.persona).answers
+    assert got and got[0].value == "Bazel" and got[0].source == "persona:answer"
 
 
 def test_hook_runs_after_mapper_guards_consent_rescoping():
@@ -492,3 +493,6 @@ def test_collector_skips_blocked_and_demographic_gaps():
           F("c", "Favorite build tool", FieldKind.text), F("d", "Will you require visa sponsorship?", FieldKind.text)]
     collect_gaps(db, None, None, ref="r", posting=POSTING, fields=fl, answers=[], unresolved=["a", "b", "c", "d"])
     assert {r["key"] for r in db.questions(10)} == {"q:favorite build tool", "requires_sponsorship"}
+    collect_gaps(db, None, None, ref="r2", posting=POSTING, fields=[F("t", "Which build tool do you use?")],
+                 answers=[], unresolved=["t"])
+    assert "q:which build tool do you use" in {r["key"] for r in db.questions(10)}

@@ -18,7 +18,9 @@ _EXTRA = re.compile(
     r"\bclearance|\bexport\b|\bitar\b|\bear\b|u\.?s\.? person|\btransgender|\blgbt|\bqueer|\bsexual|\bsms\b|"
     r"text messag|\bmonitor|\bnon[- ]?compete|\bbackground check|\bdrug\b|\bunder oath|\bpenalty|\bperjury|"
     r"\bsponsor|\bvisa\b|work authori[sz]|authori[sz]ed to work|\bcitizen|\bimmigra|right to work|work permit|"
-    r"\bsalary\b|\bcompensation\b", re.IGNORECASE)
+    r"\bsalary\b|\bcompensation\b|\bcharg|\bcrime|\baccurate|false statement|\baccept|\bpermission|whatsapp|"
+    r"contact you|call your|\breferences?\b|keep your data|\bretain|chatbot|\bgpt|\bllm|\bgenerated|\brelocat|"
+    r"\bbackground|\bscreen", re.IGNORECASE)
 
 # Country-agnostic: matches `work_authorized`, `work_authorized:DE`, `authorization.GB.sponsorship`, `country_answer:...`
 _SENSITIVE_KEY = re.compile(
@@ -49,3 +51,15 @@ def blocked_label(label: str, stop_phrases: Sequence[str] = ()) -> bool:
     return bool(_EXTRA.search(label) or _ATTEST_LABEL.search(label) or _AI_LABEL.search(label)
                 or _SENSITIVE_LABEL.search(label) or _DEMOGRAPHIC_LABEL.search(label)
                 or is_sensitive_question(label) or (stop_phrases and stop_phrase_hit(label, list(stop_phrases))))
+
+
+# Positive allowlist for free-form `q:` answers (ADR-0047): plain facts about tools, links and availability only.
+_PLAIN_FACT = re.compile(
+    r"\b(build tool|dev(elopment)? tools?|editor|ide|operating system|frameworks?|libraries|languages? (do you|you) "
+    r"(use|prefer)|notice period|start date|available to start|earliest start|portfolio|github|linkedin|"
+    r"personal (site|website))\b", re.IGNORECASE)
+CLAIMABLE_KEYS = frozenset({"ai_tools"})
+
+
+def plain_fact_label(label: str, stop_phrases: Sequence[str] = ()) -> bool:
+    return bool(_PLAIN_FACT.search(label)) and not blocked_label(label, stop_phrases)

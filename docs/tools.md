@@ -62,7 +62,7 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 | `tune_status` | none | backend, promoted and previous adapter, new user texts versus the threshold, last run |
 | `tune_run` | `trigger` (manual, new_data, rollback), `wait=False` | run summary; trains a LoRA on your own texts, gates it against the incumbent and promotes only if better. `wait=False` runs in the background; poll `tune_status` |
 | `profile_questions` | `limit` | top open profile gaps (questions left unresolved or answered with a default), ranked by frequency x impact; blocked applications weigh most (ADR-0047) |
-| `answer_profile_question` | `key`, `value`, `scope`, `scope_value` | store the user's answer with provenance `user_written`; scope global, company or role_family; applies to all future plans (ADR-0047) |
+| `answer_profile_question` | `key`, `scope`, `scope_value` | asks the USER (elicitation) to type the answer for a gap key; takes no value from the client; stored as `user_written`; nothing is stored if the client cannot elicit (ADR-0047) |
 | `facts_report` | none | resume-first fact precedence: counts, profile/resume conflicts, and letter facts excluded as conflicting or outdated (with the resume's version) |
 
 ## Operations and self-improvement

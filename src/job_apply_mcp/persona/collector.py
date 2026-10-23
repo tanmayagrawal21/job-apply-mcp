@@ -8,7 +8,7 @@ from ..apply.salary import is_salary_field
 from ..core.models import FieldKind
 from ..policy.gates import parse_salary
 from .gaps import ProfileDB
-from .guard import blocked_label, is_demographic_key
+from .guard import CLAIMABLE_KEYS, blocked_label, is_demographic_key, plain_fact_label
 from .keys import gap_key, is_exceptional_label
 
 # canonical authorization-type keys a human may be asked about (their answers need origin user_written)
@@ -33,7 +33,10 @@ def collect_gaps(db: ProfileDB, policy: Any, profile: Any, *, ref: str, posting:
         ck = canonical_key(f.label)
         if blocked_label(f.label) and not (ck and not is_demographic_key(ck) and ck in _ASKABLE):
             continue                        # attestations, consents, legal and EEO questions are never collected
-        add(gap_key(f.label, ck), f.label, "unresolved", bool(f.required))
+        gk = gap_key(f.label, ck)
+        if ck is None and not (gk in CLAIMABLE_KEYS or gk.startswith("persona.") or plain_fact_label(f.label)):
+            continue                        # nothing could be applied from an answer: do not ask
+        add(gk, f.label, "unresolved", bool(f.required))
 
     has_range = bool(parse_salary(getattr(posting, "salary", "") or ""))
     for a in answers:
@@ -46,7 +49,7 @@ def collect_gaps(db: ProfileDB, policy: Any, profile: Any, *, ref: str, posting:
         if ck in DEMOGRAPHIC_KEYS:
             continue                        # EEO answers come from [demographics] only; the default is not a gap
         elif src.startswith("llm:"):
-            if blocked_label(f.label):
+            if blocked_label(f.label) or not plain_fact_label(f.label):
                 continue
             add(gap_key(f.label, ck), f.label, "default", False, f"model guess: {val}")
         elif ck == "years_experience" and policy is not None and not policy.configured("experience_counting"):

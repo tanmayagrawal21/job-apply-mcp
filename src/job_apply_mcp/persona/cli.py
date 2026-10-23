@@ -36,7 +36,7 @@ def cli(argv: list[str], settings: Any, *, input_fn=input, is_tty: bool | None =
             print("profile answer is stored as written by you only from a terminal.", file=sys.stderr)
             return 2
         try:
-            print(store_answer(settings, args.key, args.value, args.scope, origin="user_written"))
+            print(store_answer(settings, args.key, args.value, args.scope))
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
@@ -61,7 +61,7 @@ def cli(argv: list[str], settings: Any, *, input_fn=input, is_tty: bool | None =
         if val.lower() == "quit":
             break
         if val:
-            db.set_answer(r["key"], val, "global", origin="user_written")
+            db.set_answer(r["key"], val, "global")
             done += 1
         else:
             db.set_status(r["key"], "skipped")

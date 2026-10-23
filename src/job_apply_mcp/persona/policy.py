@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from .gaps import ProfileDB
-from .guard import blocked_label, is_demographic_key, sensitive_key
+from .guard import CLAIMABLE_KEYS, blocked_label, is_demographic_key, plain_fact_label
 from .keys import gap_key, normalize_question, role_family
 from .models import ExceptionalWork, ExperienceCounting, Persona, Project, SalaryPolicy, pick_project
 
@@ -105,14 +105,13 @@ class PersonaPolicy:
         return _CURRENT.get() or PostingCtx()
 
     def _scoped(self, key: str) -> str | None:
-        """Stored answer for `key`. Demographic keys never come from here ([demographics] only); other sensitive
-        keys (authorization, sponsorship, citizenship, clearance, export, privacy ack, salary floor) only when the
-        human gave the answer (origin user_written). Everything else accepts client-origin answers."""
+        """Stored answer for `key`: only rows the human gave (user_written); demographic keys never come from
+        here ([demographics] only)."""
         if self.db is None or is_demographic_key(key):
             return None
         c = self.current()
         row = self.db.answer_row(key, company=c.company, family=role_family(c.title) if c.title else "")
-        if row is None or (row[1] != "user_written" and sensitive_key(key)):
+        if row is None or row[1] != "user_written":
             return None
         return row[0]
 
@@ -151,12 +150,12 @@ class PersonaPolicy:
         return self._scoped(key) or self.persona.answers.get(key)
 
     def claim(self, label: str, canonical: str | None, stop_phrases: Sequence[str] = ()) -> str | None:
-        """Free-form (non-canonical, non-sensitive) questions only: a stored or persona answer for the whole
-        normalized question. Attestation, consent, legal, EEO and stop-phrase labels are never claimed."""
+        """Positive allowlist (guard.CLAIMABLE_KEYS, plus plain-fact `q:` labels such as tools, links and notice
+        period): a stored or persona answer for the whole normalized question. Everything else is never claimed."""
         if canonical is not None or blocked_label(label, stop_phrases):
             return None
         key = gap_key(label, None)
-        if key.startswith("persona."):
+        if not (key in CLAIMABLE_KEYS or (key.startswith("q:") and plain_fact_label(label, stop_phrases))):
             return None
         if (v := self.stored(key)) is not None:
             return v
