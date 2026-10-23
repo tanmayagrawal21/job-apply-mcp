@@ -153,16 +153,24 @@ def run(coro):
 # ------------------------------------------------------------------ vault
 
 
-def test_vault_roundtrip_index_has_no_secret(vault, kr):
+def test_vault_roundtrip(vault, kr):
     vault.put(HOST, USER, Secret(PW))
     assert kr.items == {(f"job-apply-mcp-vault:{HOST}", USER): PW}
     assert vault.get(HOST, USER) == Secret(PW)
     assert vault.entries()[0]["host"] == HOST and vault.usernames(HOST) == [USER]
-    raw = vault.index_path.read_text()
-    assert PW not in raw                                       # all platforms: the index never holds a secret
-    if os.name != "nt":   # POSIX mode bits; on Windows the file inherits the per-user %LOCALAPPDATA% ACL (ADR-0046)
-        assert (vault.index_path.stat().st_mode & 0o077) == 0
     assert vault.remove(HOST) == [USER] and kr.items == {} and vault.entries() == []
+
+
+def test_vault_index_never_holds_secret(vault):
+    vault.put(HOST, USER, Secret(PW))
+    assert PW not in vault.index_path.read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits only; on Windows the index relies on the per-user "
+                                           "%LOCALAPPDATA% ACL (ADR-0046)")
+def test_vault_index_is_owner_only_on_posix(vault):
+    vault.put(HOST, USER, Secret(PW))
+    assert (vault.index_path.stat().st_mode & 0o077) == 0
 
 
 def test_host_is_exact_no_parent_or_sibling_fallback(vault):
