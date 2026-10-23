@@ -363,3 +363,82 @@ def test_us_person_never_from_answers_alone():
     p = ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera"), answers=FLAT_USP), Settings())
     assert run(ITAR_Q, p=p) is None
     assert run(USP_Q, FieldKind.select, USP_OPTS, p=p) is None
+
+
+# ---------------------------------------------------------------- live dry-run blockers (job country, office wording)
+from job_apply_mcp.apply.mapper import job_country
+
+
+@pytest.mark.parametrize("loc,others,want", [
+    ("Remote in the U.S.", ["Acme HQ Office"], "US"), ("Union Square, New York City", [], "US"),
+    ("Los Angeles - Greater Area", [], "US"), ("San Francisco", ["New York", "Seattle"], "US"),
+    ("Acme HQ Office", [], None),                                  # an office entry alone never confirms
+    ("Remote in the U.S.", ["Toronto Office, Canada"], None), ("San Jose", [], None),   # San Jose: also Costa Rica
+    ("Remote in the U.S.", ["EMEA Office"], None)])
+def test_job_country_hubs_and_office_entries(loc, others, want):
+    assert job_country(loc, ["US"], others) == want
+
+
+AUTH_FOR = "Are you authorized to work in the U.S. for Acme Robotics?"
+IMMIG = "Will you now or in the future require immigration sponsorship?"
+JOB_IN = "Are you legally authorized to work in the country in which the job you're applying for is located?"
+SP_IN = ("Will you  require employment visa sponsorship to work in the country in which the job you're applying for "
+         "is located (either now or in the future)?")
+
+
+def test_auth_wordings_on_a_confirmed_us_job():
+    assert run(AUTH_FOR, FieldKind.text, None) == ("Yes", "rule:work_authorized")
+    assert run(IMMIG, FieldKind.text, None) == ("Yes", "rule:requires_sponsorship")
+    assert run(JOB_IN) == (True, "rule:work_authorized")
+    assert run(SP_IN) == (True, "rule:requires_sponsorship")
+    for q in (AUTH_FOR, IMMIG, JOB_IN, SP_IN):
+        assert run(q, job=None) is None and run(q, job="CA") is None
+
+
+def test_first_and_last_legal_name():
+    assert run("First and Last Legal Name", FieldKind.text, None) == ("Alex Rivera", "rule:full_name")
+
+
+OFFICE5 = ["Yes", "No", "Yes, but require relocation"]
+
+
+def test_named_office_questions_use_onsite_and_residence():
+    q = "Are you open to working out of our Torrance (LA) Office 5 Days a Week?"
+    far = view(city="Flagstaff", region="AZ")
+    assert run(q, FieldKind.multiselect, OFFICE5, p=far, locs=["Los Angeles - Greater Area"]) == (
+        [OFFICE5[2]], "rule:open_to_onsite")
+    local = view(city="Los Angeles", region="CA")
+    assert run(q, FieldKind.multiselect, OFFICE5, p=local, locs=["Los Angeles - Greater Area"])[0] == ["Yes"]
+    no_onsite = view(prefs=Preferences(willing_to_relocate=True, open_to_onsite=False))
+    assert run(q, FieldKind.multiselect, OFFICE5, p=no_onsite, locs=["Los Angeles, CA"])[0] == ["No"]
+    stay = view(city="Flagstaff", region="AZ", prefs=Preferences(willing_to_relocate=False, open_to_onsite=True))
+    assert run(q, FieldKind.multiselect, OFFICE5, p=stay, locs=["Los Angeles, CA"]) is None
+    nyc = "Will you be able to work from our office in Union Square, NYC?"
+    assert run(nyc, p=far, locs=["Union Square, New York City"]) == (True, "rule:open_to_onsite")
+    assert run(nyc, p=stay, locs=["Union Square, New York City"]) == (False, "rule:open_to_onsite")
+
+
+def test_one_of_our_offices_select_with_residence_options():
+    q = "Are you able to work in one of our offices?"
+    opts = ["Yes, and I already live in the location listed on the job.",
+            "Yes, but I don't live near an office and need to relocate.", "No, I need to work remotely."]
+    far = view(city="Flagstaff", region="AZ")
+    assert run(q, FieldKind.select, opts, p=far, locs=["San Francisco"]) == (opts[1], "rule:residence_here")
+    sf = view(city="San Francisco", region="CA")
+    assert run(q, FieldKind.select, opts, p=sf, locs=["San Francisco"])[0] == opts[0]
+
+
+def test_office_location_pick():
+    q = ("Our offices are located in San Francisco, CA and New York City. Please indicate which location you are "
+         "interested in?")
+    opts = ["San Francisco, CA", "New York, NY", "Remote"]
+    far = view(city="Flagstaff", region="AZ")
+    assert run(q, FieldKind.select, opts, p=far, locs=["San Francisco", "New York"]) == (opts[0], "rule:office_location")
+    ny = view(city="New York", region="NY")
+    assert run(q, FieldKind.select, opts, p=ny, locs=["San Francisco", "New York"])[0] == opts[1]
+    stay = view(city="Flagstaff", region="AZ", prefs=Preferences(willing_to_relocate=False, open_to_onsite=True))
+    assert run(q, FieldKind.select, opts, p=stay, locs=["San Francisco"]) is None
+
+
+def test_nyc_spellings_match_a_new_york_residence():
+    assert residence_match(view(city="New York", region="NY"), ["Union Square, New York City"]) is True

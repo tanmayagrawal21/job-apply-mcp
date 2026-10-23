@@ -88,6 +88,22 @@ the facts.
    mapping call as its answers (the cached or fresh plan). It also returns them as `unresolved`. Blocking still
    requires a required field without an answer.
 
+10. **Live dry-run blockers (owner request).**
+    - **Job country.** A location whose last part is a major US city with a single state ("Union Square, New York
+      City", "Los Angeles - Greater Area", "San Francisco") confirms the US when the structured country is US. A
+      company office entry that names no place we can parse ("<Company> HQ Office") defers to the single structured
+      country, but only next to a confirmed entry and only when it names no other country or region. San Jose
+      (also in Costa Rica) is not a hub.
+    - **Authorization wording.** "In (the) country in which the job you're applying for is located" is the confirmed
+      job country. "Either" joins the vocabulary.
+    - **Named-office questions.** "Work from our office in X", "work out of our X office" and "one of our offices"
+      use `[preferences].open_to_onsite`/`open_to_hybrid`. A Yes also needs a residence match or
+      `willing_to_relocate`. On a confirmed mismatch, a relocation-qualified "Yes, but require relocation" option is
+      chosen, and a plain Yes only on a match.
+    - **Office-location picks.** "Which of our office locations are you interested in?" takes the office where the
+      owner lives. Otherwise, when the owner is willing to relocate and open to on-site or hybrid work, it takes the
+      posting's primary location. "Remote" is never chosen by this rule.
+
 ## Consequences
 The Harvey hybrid question gets the relocate option when the owner lives in another state. It is unresolved (never
 "based here") when residence cannot be compared. More education, name and prior-employment fields come from the
