@@ -121,6 +121,10 @@ def _state_check(s: Settings) -> Check:
         return Check("state_dir", FAIL, f"{e}; submissions are REFUSED until this is fixed",
                      "Close other job-apply-mcp processes, make the old data dir readable, or merge it by hand; "
                      "nothing was moved or deleted (ADR-0054).")
+    from .migrate import pending_message, pending_old_state
+    if old := pending_old_state(s):
+        return Check("state_dir", FAIL, pending_message(old),
+                     "Run the printed `migrate --from` command in a terminal; it imports only blocking records.")
     return Check("state_dir", OK, f"{d} (approvals, consents, grants, quota log)")
 
 

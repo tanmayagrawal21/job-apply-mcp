@@ -12,7 +12,7 @@ from pathlib import Path
 from . import __version__
 
 COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "consent",
-            "vault", "profile", "run", "report", "feedback"}
+            "migrate", "vault", "profile", "run", "report", "feedback"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,6 +83,10 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or (argv[0] not in COMMANDS and argv[0] not in ("-h", "--help", "--version")):
         argv.insert(0, "serve")
+    if argv[0] == "migrate":
+        from .config import load_settings
+        from .migrate import cli as migrate_cli
+        raise SystemExit(migrate_cli(argv[1:], load_settings()))
     if argv[0] in ("grant", "consent"):
         # argparse.REMAINDER drops a leading option (`consent --for 24h`), so these pass argv through verbatim
         from .config import load_settings

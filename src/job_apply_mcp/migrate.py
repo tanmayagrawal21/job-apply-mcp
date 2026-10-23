@@ -266,3 +266,106 @@ def ensure_state(settings: Any, new: Path) -> None:
         msg = f"could not merge existing approval/quota/consent state into {new}: {type(e).__name__}: {e}"
         _done[key] = msg
         raise StateMigrationError(msg) from e
+
+
+# ---------------------------------------------------------------- ignored (untrusted) dirs: block, never import silently
+def _untrusted_dirs(settings: Any, new: Path) -> list[Path]:
+    """Env/XDG/project-chosen dirs that earlier releases may have used. NEVER imported automatically."""
+    trusted = {p for p in old_data_dirs(settings, new)}
+    files = [paths.config_file(), paths.config_dir() / "config.toml", Path.cwd() / "job-apply-mcp.toml"]
+    cands = [Path(settings.paths.data_dir).expanduser(), paths.data_dir()]
+    for f in files:
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            d = tomllib.loads(f.read_text(encoding="utf-8")).get("paths", {}).get("data_dir")
+            if isinstance(d, str) and d:
+                cands.append(Path(d).expanduser())
+    out: list[Path] = []
+    for c in cands:
+        with contextlib.suppress(OSError):
+            r = c.resolve()
+            if r != new.resolve() and r not in trusted and r not in out and r.is_dir():
+                out.append(r)
+    return out
+
+
+def _ro(db: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5)
+
+
+def _blocking_refs(d: Path) -> set[str]:
+    from .apply.approvals import BLOCKING
+    from .store.sqlite import SEEN_STATUSES
+    refs: set[str] = set()
+    n_b, n_s = ",".join("?" * len(BLOCKING)), ",".join("?" * len(SEEN_STATUSES))
+    specs = [("approvals.db", f"SELECT ref FROM submissions WHERE state IN ({n_b})", BLOCKING),
+             ("applications.db", f"SELECT ref FROM applications WHERE status IN ({n_s})", SEEN_STATUSES)]
+    for fn, q, args in specs:
+        f = d / fn
+        if not f.is_file():
+            continue
+        try:
+            con = _ro(f)
+            try:
+                refs |= {r[0] for r in con.execute(q, tuple(args))}
+            finally:
+                con.close()
+        except sqlite3.Error:
+            refs.add(f"<unreadable {fn}>")             # cannot prove it is empty: treat as pending
+    return refs
+
+
+def pending_old_state(settings: Any) -> list[tuple[Path, int]]:
+    """[(dir, n)] for ignored dirs holding blocking submission/dedupe records the state dir does not have.
+    Live submits are refused while this is non-empty; `job-apply-mcp migrate --from DIR` (TTY) resolves it."""
+    from .config import state_path
+    new = state_path(settings)
+    have = _blocking_refs(new)
+    out = []
+    for d in _untrusted_dirs(settings, new):
+        missing = _blocking_refs(d) - have
+        if missing:
+            out.append((d, len(missing)))
+    return out
+
+
+def pending_message(pending: list[tuple[Path, int]]) -> str:
+    d = pending[0][0]
+    return (f"old state found at {d}; run `job-apply-mcp migrate --from {d}` in a terminal to import its blocking "
+            f"records (live submits are blocked until then)")
+
+
+def cli(argv: list[str], settings: Any, *, stdin: Any = None, stdout: Any = None) -> int:
+    """HUMAN-ONLY: `job-apply-mcp migrate --from DIR` imports blocking submission/dedupe records and quota lines."""
+    import argparse
+    import sys
+
+    from .config import state_path
+    stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
+    p = argparse.ArgumentParser(prog="job-apply-mcp migrate", description=cli.__doc__)
+    p.add_argument("--from", dest="src", required=True, type=Path)
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as e:
+        return int(e.code or 2)
+    if not (getattr(stdin, "isatty", lambda: False)() and getattr(stdout, "isatty", lambda: False)()):
+        print("refused: `migrate` is human-only and needs an interactive terminal (stdin and stdout must be a TTY)",
+              file=stdout)
+        return 3
+    new = state_path(settings)
+    src = a.src.expanduser()
+    if not _safe_source(src):
+        print(f"refused: {src} is not a real directory owned by you (no symlinks)", file=stdout)
+        return 1
+    src = src.resolve()
+    try:
+        if (src / "approvals.db").is_file():
+            _merge_approvals(src / "approvals.db", new / "approvals.db")
+        if (src / "applications.db").is_file():
+            _merge_applications(src / "applications.db", new / "applications.db")
+        _merge_audit_log([src / "control_audit.jsonl.1", src / "control_audit.jsonl"], new / "control_audit.jsonl")
+    except (sqlite3.Error, OSError) as e:
+        print(f"migrate failed: {type(e).__name__}: {e}", file=stdout)
+        return 1
+    print(f"imported blocking submission/dedupe records and quota lines from {src} (approvals, consents, grants and "
+          f"keys are never imported)", file=stdout)
+    return 0

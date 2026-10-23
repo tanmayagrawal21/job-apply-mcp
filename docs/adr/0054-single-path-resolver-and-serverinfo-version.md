@@ -58,3 +58,11 @@ The trusted config and the security-state stores must not follow an environment 
   fixed key; forged and revoked rows are dropped.
 - Any failure raises `StateMigrationError`: the stores refuse to open (no submit) and `doctor` reports `state_dir`
   FAIL with the reason. A marker file records merged sources so reruns are cheap.
+
+## Amendment: ignored dirs block live submits until a human imports them
+An install whose old stores were only in an env/XDG/project-chosen dir is not migrated automatically (those dirs are
+not trusted). So that this cannot cause a double submit, the engine refuses LIVE submits (dry runs still work) and
+`doctor` reports `state_dir` FAIL while such a dir holds blocking submission or dedupe records the state dir lacks:
+"old state found at <dir>; run `job-apply-mcp migrate --from <dir>` in a terminal". `migrate --from` is TTY-only
+(like `consent`), requires a real, user-owned, symlink-free dir, and imports only blocking submission states,
+really-sent applications and quota lines (never `submit_release`, approvals, consents, grants or keys).

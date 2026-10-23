@@ -540,3 +540,67 @@ def test_migration_failure_blocks_submit_and_doctor_says_why(tmp_path):
         state_path(s)
     chk = doctor._state_check(s)
     assert chk.status == doctor.FAIL and "REFUSED" in chk.detail
+
+
+class _Tty:
+    def __init__(self, tty):
+        self._t = tty
+        self.buf = []
+
+    def isatty(self):
+        return self._t
+
+    def write(self, x):
+        self.buf.append(x)
+
+    def flush(self):
+        pass
+
+    def readline(self):
+        return ""
+
+
+async def test_ignored_dir_with_submitted_record_blocks_live_submit_until_tty_migrate(tmp_path):
+    from apply_fakes import POSTING
+    from test_approvals import EXTRA, make
+
+    from job_apply_mcp import migrate
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    migrate._done.clear()
+    e, ad = make(book=ApprovalBook(tmp_path / "state"))
+    envdir = tmp_path / "envdata"
+    e.s.paths.data_dir, e.s.paths.state_dir = str(envdir), str(tmp_path / "state")
+    ob = ApprovalBook(envdir)
+    ob.set_state(POSTING.ref, "submitted", url="https://x.example/1")
+    ob._db.close()
+    out = await e.plan(POSTING.ref)
+    dry = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=True)       # dry runs still work
+    assert "old state found" not in (dry.detail or "")
+    r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert r.status == "error" and "migrate --from" in r.detail and str(envdir.resolve()) in r.detail
+    assert not [x for x in ad.submits if not x[2]]                                # nothing live was sent
+    assert doctor._state_check(e.s).status == doctor.FAIL
+    assert migrate.cli(["--from", str(envdir)], e.s, stdin=_Tty(False), stdout=_Tty(False)) == 3   # non-TTY refused
+    assert migrate.pending_old_state(e.s)
+    assert migrate.cli(["--from", str(envdir)], e.s, stdin=_Tty(True), stdout=_Tty(True)) == 0
+    assert migrate.pending_old_state(e.s) == [] and doctor._state_check(e.s).status == doctor.OK
+    r = await e.submit(POSTING.ref, EXTRA, out.approval_id, dry_run=False)
+    assert "old state found" not in (r.detail or "")
+    assert not [x for x in ad.submits if not x[2]]                               # blocked by the imported record
+
+
+def test_tty_migrate_imports_only_blocking_state_and_quota(tmp_path):
+    from job_apply_mcp import migrate
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    migrate._done.clear()
+    s = Settings()
+    s.paths.state_dir = str(tmp_path / "state")
+    src = tmp_path / "envdata"
+    b = ApprovalBook(src)
+    _sub(b, "g:a:1", "submitted")
+    _sub(b, "g:a:2", "approved")
+    b.issue("g:a:3", "u", "c", "t", {})
+    b._db.close()
+    assert migrate.cli(["--from", str(src)], s, stdin=_Tty(True), stdout=_Tty(True)) == 0
+    nb = ApprovalBook(tmp_path / "state")
+    assert nb.state("g:a:1")["state"] == "submitted" and nb.state("g:a:2") is None and nb.pending() == []
