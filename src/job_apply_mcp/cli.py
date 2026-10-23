@@ -1,4 +1,5 @@
-"""Command line: ``job-apply-mcp [serve] | init | doctor | version | grant | consent | vault`` (ADR-0020).
+"""Command line: ``job-apply-mcp [serve] | init | doctor | version | grant | consent | vault | run | report |
+feedback`` (ADR-0020, ADR-0045, ADR-0048).
 
 With no subcommand the server starts on stdio, exactly like 0.1, so existing MCP client configs keep working.
 """
@@ -11,7 +12,7 @@ from pathlib import Path
 from . import __version__
 
 COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "consent",
-            "vault", "profile"}
+            "vault", "profile", "run", "report", "feedback"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,27 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--offline", action="store_true", help="skip network probes of model servers")
 
     sub.add_parser("version", help="print the version")
+    r = sub.add_parser("run", help="apply from explicit links, emailed links and discovery (ADR-0045)")
+    r.add_argument("--links", dest="links_file", help="file with one job URL per line (# comments allowed)")
+    r.add_argument("--link", action="append", default=[], help="a job URL (repeatable)")
+    r.add_argument("--source", action="append", choices=["links", "mail", "discovery"],
+                   help="restrict sources (repeatable; default intake.sources)")
+    r.add_argument("--max", dest="max_applications", type=int, help="max applications this run")
+    r.add_argument("--dry-run", action="store_true", help="force a dry run (never makes the run less safe)")
+    for k in ("query", "since"):   # sender, recipient and label are config-only (intake.mail.*)
+        r.add_argument(f"--mail-{k}", help=f"emailed links: narrow by {k} (overrides intake.mail.{k})")
+    r.add_argument("--query", help="discovery query (overrides intake.discovery.query)")
+    rp = sub.add_parser("report", help="show a run report (default: the latest run)")
+    rp.add_argument("run_id", nargs="?", default="")
+    rp.add_argument("--category", default="")
+    rp.add_argument("--limit", type=int, default=50)
+    fb = sub.add_parser("feedback", help="give feedback on a run (applied at the start of the next run)")
+    fb.add_argument("run_id", nargs="?", default="")
+    fb.add_argument("feedback", nargs="?", default="",
+                    help="free text, or a JSON object such as '{\"kind\":\"deny_company\"}'")
+    fb.add_argument("--ref", help="the run item the feedback is about")
+    fb.add_argument("--confirm", type=int, metavar="ID",
+                    help="HUMAN ONLY (needs a TTY): confirm client-supplied feedback so the next run applies it")
     for name, h in (("approve", "HUMAN ONLY (needs a TTY): approve a pending submission"),
                     ("deny", "HUMAN ONLY (needs a TTY): deny a pending submission"),
                     ("pending", "list pending approvals"),
@@ -94,6 +116,8 @@ def main(argv: list[str] | None = None) -> None:
         from .consent.cli import cli as consent_cli
 
         raise SystemExit(consent_cli(args.rest, load_settings()))
+    elif args.cmd in ("run", "report", "feedback"):
+        raise SystemExit(_intake_cli(args))
     elif args.cmd == "profile":
         from .config import load_settings
         from .persona.cli import cli as profile_cli
@@ -117,6 +141,44 @@ def main(argv: list[str] | None = None) -> None:
             run_http(mcp, args.host, args.port)
         else:
             mcp.run()
+
+
+def _intake_cli(args: argparse.Namespace) -> int:
+    import asyncio
+    import json
+
+    from .config import load_settings
+    from .intake.runner import IntakeRunner
+    from .services import Services
+
+    async def go() -> dict:
+        svc = Services(load_settings())
+        try:
+            r = IntakeRunner.from_services(svc)
+            if args.cmd == "report":
+                return await r.report(args.run_id, args.category, args.limit)
+            if args.cmd == "feedback":
+                # a terminal user is the owner; anything else (pipes, agents) stays client-origin (ADR-0045)
+                tty = sys.stdin.isatty() and sys.stdout.isatty()
+                if args.confirm is not None:
+                    if not tty:
+                        return {"error": "--confirm needs an interactive terminal (a human)"}
+                    return await r.confirm_feedback(args.confirm, "human:cli")
+                fb: str | dict = args.feedback
+                if fb.lstrip().startswith("{"):
+                    fb = json.loads(fb)
+                return await r.give_feedback(args.run_id, args.ref, fb, origin="user" if tty else "client")
+            mail = {k: getattr(args, f"mail_{k}") for k in ("query", "since")
+                    if getattr(args, f"mail_{k}") is not None}
+            return await r.run(links=args.link, links_file=args.links_file, sources=args.source,
+                               max_applications=args.max_applications, dry_run=True if args.dry_run else None,
+                               mail=mail or None, discovery={"query": args.query} if args.query else None)
+        finally:
+            await svc.aclose()
+
+    out = asyncio.run(go())
+    print(json.dumps(out, indent=2, default=str))
+    return 1 if "error" in out else 0
 
 
 def init_main() -> None:

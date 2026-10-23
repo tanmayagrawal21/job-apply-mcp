@@ -42,6 +42,7 @@ Optional extras: `[browser]` (Playwright), `[agent]`, `[jobspy]`, `[mlx]`, `[hf]
 |---|---|
 | Discovery | Parallel search over Greenhouse, Lever, Ashby, SmartRecruiters, Workday and JobSpy boards, paginated |
 | Policy gates | Skip by sponsorship, citizenship, clearance, experience, graduation window, salary floor, employer patterns |
+| Runs | `run_applications` / `job-apply-mcp run`: links you pass, job links you emailed yourself (read-only mail) and discovery in one run, a run report and feedback applied to the next run |
 | Applying | Platform API where possible, browser driver otherwise, generic LLM-assisted adapter for other sites |
 | Local LLM routing | Complexity-scored tiers (small/medium/large/narrative), fallbacks, optional cloud, your MCP client as last resort |
 | Writing | Cover letters and answers with style rules, banned phrases and gap-avoidance checks |

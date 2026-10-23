@@ -35,6 +35,14 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 `needs_human` is returned for CAPTCHAs, verification codes, account creation, attestation checkboxes that match
 `policy.stop_phrases`, and unresolved required fields. See the safety model in the [README](../README.md#safety-model).
 
+## Application runs (ADR-0045)
+
+| Tool | Inputs | Output |
+|---|---|---|
+| `run_applications` | `links=None`, `links_file=None`, `sources=None` (links, mail, discovery), `max_applications=None`, `dry_run=None`, `mail=None` (narrowing only: {query, since, since_days}; sender, recipient and label are config-only), `messages=None` (client mail source), `discovery=None` (search_jobs arguments) | the run report: `run_id`, `counts`, rows per category with `why`, and `plan_context` (feedback applied, notes). Priority: explicit links, emailed links, discovery. Unknown hosts are `unsupported_site` rows |
+| `run_report` | `run_id=""` (latest), `category=""`, `limit=20` | submitted, dry_run, confirmed, handed_off, unknown, skipped, unsupported_site and failed rows, each with `why` |
+| `give_feedback` | `run_id`, `feedback` (free text or {kind: deny_company, deny_title, answer, profile_answer, salary, run_size, ...}), `ref=None` | the stored feedback and what the next run will apply. Salary feedback never goes below the configured floor; any sensitive answer goes to `answer_profile_question`; client-supplied answers (and pay changes in human approval mode) apply only after `job-apply-mcp feedback --confirm <id>` on a terminal |
+
 ## Control layer and mail dedupe
 
 | Tool | Inputs | Output | Notes |

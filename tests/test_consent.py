@@ -61,6 +61,7 @@ def cfg(tmp_path):
     s.paths.data_dir = str(tmp_path / "data")
     s.grants.use_keyring = False
     s.verification.trusted_authserv_ids = ["mx.example.com"]
+    s._otp_mail_trusted = True
     return s
 
 
@@ -320,6 +321,7 @@ def esettings(tmp_path, mode="human"):
     s.grants.use_keyring = False
     s.grants.otp_unattended_wait_s = 0
     s.verification.trusted_authserv_ids = ["mx.example.com"]
+    s._otp_mail_trusted = True
     return s
 
 
@@ -858,3 +860,20 @@ def test_confirmation_lists_each_granted_scope_and_its_real_effect(cfg, tmp_path
 def test_scope_descriptions_are_accurate():
     assert "Nothing uses" not in " ".join(CONSENT_SCOPES.values())
     assert "generated passwords" in CONSENT_SCOPES["credentials"] and "`mail`" in CONSENT_SCOPES["otp_unattended"]
+
+
+async def test_mail_trust_defaults_to_false_until_verified(tmp_path, monkeypatch):
+    assert Settings()._otp_mail_trusted is False                 # programmatic Settings: not verified
+    assert load_settings()._otp_mail_trusted is True              # load_settings verified the (default) user baseline
+    s = esettings(tmp_path)
+    s2 = Settings.model_validate(s.model_dump())                  # a copy built outside load_settings
+    assert s2._otp_mail_trusted is False
+    consent.store_for(s2).issue_consent(600)
+    mail = Mail(_mail("Zx81Qa7P"))
+    monkeypatch.setattr("job_apply_mcp.ingest.sources.make_source", lambda *a, **k: mail)
+    drv = AutoCodeDriver("Zx81Qa7P")
+    e, book = engine(tmp_path, s2, drv)
+    r = await _submit(e)
+    assert r.status == "roadblock" and "trusted user config" in r.detail
+    assert mail.fetches == 0 and drv.entered == [] and book.state(POSTING.ref)["state"] == "unknown"
+    assert consent.status(s2)["otp_unattended"].startswith("off:")
