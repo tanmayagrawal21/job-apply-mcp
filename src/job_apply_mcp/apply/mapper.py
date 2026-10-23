@@ -83,7 +83,7 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("current_title", (r"^current (job )?title$",)),
     ("work_authorized", (r"authorized to work", r"legally authorized", r"eligible to work", r"work authorization",
                          r"authori[sz]ation to work", r"(permitted|allowed) to work", r"right to work")),
-    ("requires_sponsorship", (r"sponsorship", r"require.* visa")),
+    ("requires_sponsorship", (r"sponsorship", r"require.* visa", r"\bsponsor(s|ed|ing)?\b")),
     ("willing_to_relocate", (r"relocat",)),
     ("open_to_hybrid", (r"\bhybrid\b",)),
     ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",)),
@@ -1302,6 +1302,103 @@ def privacy_ack_value(f: FormField, stop_phrases: Sequence[str] = (), company: s
     return None
 
 
+# ---- messaging / marketing opt-ins (ADR-0049) -------------------------------------------------------
+# Fail closed: a WhatsApp, SMS/text, phone-messaging or marketing opt-in is never Yes unless the owner stored Yes for
+# that exact channel ([answers] key "optin:<channel>"). Otherwise a required field gets the No option, and an optional
+# one is left empty (omitted: never a task, never a model). No flat [answers] pattern, persona or LLM ever sees it.
+_OPTIN_CHANNELS: list[tuple[str, re.Pattern[str]]] = [
+    ("whatsapp", re.compile(r"\bwhats ?app\b")),
+    ("sms", re.compile(r"\bsms\b|\bmms\b|\btext (?:messag\w*|alerts?|updates|notifications?|reminders?|me)\b|"
+                       r"\btexts\b|\btexting\b|\b(?:by|via|over) text\b")),
+    ("phone", re.compile(r"\b(?:phone|mobile|cell(?:ular)?) (?:messag\w*|notifications?|alerts?|updates)\b|"
+                         r"\bmessaging\b|\bautomated (?:calls?|messages?)\b|"
+                         r"\b(?:telegram|wechat|viber|imessage|signal messag\w*|rcs)\b|\bpush notifications?\b")),
+    ("marketing", re.compile(r"\bmarketing\b|\bnewsletters?\b|\bpromotion(?:s|al)?\b")),
+]
+# what makes the label an opt-in rather than a question that merely names a channel
+_OPTIN_STRONG = re.compile(r"\bopt(?:ing|ed)? ?in\b|\breceive\b|\bsubscri\w*|\bsign(?: me)? up\b|\bconsent\w*|"
+                           r"\bwould you like\b|\b(?:wish|want|like) to (?:be|get|hear|receive|join)\b|\benroll\w*|"
+                           r"\b(?:send|text|message|contact|email) (?:me|you)\b|\bcontact(?:ed)? (?:by|via|through|on)\b|"
+                           r"\bcan we\b|\bmay we\b|\bpermission\b|\ballow (?:us|\w+) to\b|\bagree to\b")
+_OPTIN_WEAK = re.compile(r"\bupdates?\b|\bnotif\w*|\balerts?\b|\bmessages?\b|\bcommunicat\w*|\breminders?\b")
+_OPTIN_NOT = re.compile(r"\bexperience\b|\bskills?\b|\byears?\b|\bworked\b|\bproficien\w*|\bfamiliar\b|\bbackground in\b")
+_OPTOUT = re.compile(r"\bopt(?:ing|ed)? ?out\b|\bunsubscri\w*|\bstop receiving\b|\b(?:do not|don t|never) "
+                     r"(?:want|wish) to (?:receive|be contacted)\b")
+
+
+_OPTIN_BUNDLED = re.compile(r"acknowledg|privacy|gdpr|attest|certif|\bterms\b|conditions|polic(?:y|ies)|\btrue\b|"
+                            r"accura|arbitrat|background|record(?:ed|ing)?\b|transcri")
+
+
+def optin_channels(f: FormField) -> list[str] | None:
+    """The messaging/marketing channels a choice field asks the user to opt in to, or None when it is not one.
+    A text field naming a channel ("WhatsApp number") is not an opt-in; a text field that IS one returns []."""
+    n = normalize(f.label)
+    chans = [c for c, rx in _OPTIN_CHANNELS if rx.search(n)]
+    if not chans:
+        return None
+    choice = f.kind in (FieldKind.boolean, FieldKind.select, FieldKind.multiselect) or bool(f.options)
+    if _OPTIN_NOT.search(n):
+        return None                     # "Do you have marketing experience?" is not an opt-in
+    messaging = [c for c in chans if c != "marketing"]
+    if not (_OPTIN_STRONG.search(n) or (messaging and _OPTIN_WEAK.search(n))):
+        return None
+    if _OPTOUT.search(n) or _OPTIN_BUNDLED.search(n):
+        return []                       # opt-out wording, or bundled with a notice/terms/attestation: the owner decides
+    return chans if choice else []
+
+
+def _no_option(options: Sequence[str]) -> str | None:
+    hits = [o for o in options if tokens(o)[:1] == ["no"]] or \
+        [o for o in options if _OPTOUT.search(normalize(o)) or re.search(r"\b(?:do not|don t) (?:want|wish|opt)\b",
+                                                                          normalize(o))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def optin_value(f: FormField, chans: list[str], profile: ProfileLike) -> Any | None:
+    """Yes only if the owner stored Yes for every named channel; else No when required, else None (left empty)."""
+    if not chans:
+        return None
+    stored = [_truth(profile.lookup(f"optin:{c}")) for c in chans]
+    if all(v is True for v in stored):
+        want = True
+    elif any(v is False for v in stored) or f.required:
+        want = False
+    else:
+        return None
+    if f.kind == FieldKind.boolean:
+        return want
+    if not f.options:
+        return None
+    pick = (next((o for o in f.options if tokens(o)[:1] == ["yes"]), None) if want else _no_option(f.options))
+    if pick is None:
+        return None
+    return [pick] if f.kind == FieldKind.multiselect else pick
+
+
+# ---- flat [answers] and authorization (ADR-0049) -----------------------------------------------------------
+# Since ADR-0040 a job outside the home country takes only [authorization.<CC>] facts or a stored
+# authorization.<CC>.* answer. A flat [answers] pattern ("now or in the future", "require sponsorship") states a
+# home-country fact, so it may answer an authorization/sponsorship question only on a confirmed home-country job.
+_AUTH_TOPIC = re.compile(r"sponsor|\bvisas?\b|authori[sz]|eligib\w* to work|right to work|work permit|work rights|"
+                         r"permitted to work|allowed to work|legally (?:able|entitled) to work|immigra|"
+                         r"\bh ?1 ?b\b|\bopt\b(?! (?:in|out)\b)|\bcpt\b|\bead\b|leave to remain|blue card")
+
+
+def is_auth_question(f: FormField) -> bool:
+    return any(_AUTH_TOPIC.search(normalize(t)) for t in (f.label, *f.options))
+
+
+def flat_auth_allowed(f: FormField, profile: ProfileLike, job_country: str | None) -> bool:
+    """True only when the question's country (the one it names, else the job's confirmed country) is the home country."""
+    named = named_countries(f.label)
+    if len(named) > 1 or (named and named[0] is None):
+        return False
+    country = named[0] if named else job_country
+    home = str(profile.lookup("home_country") or "US").upper()
+    return country is not None and country == home
+
+
 def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_preference: list[str] | None = None,
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
                stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
@@ -1344,6 +1441,16 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             eeo_keys.add(f.key)
             ok(f, v, f"rule:{ek or 'eeo'}")
             continue
+        chans = optin_channels(f)
+        if chans is not None:            # ADR-0049: messaging/marketing opt-in, before every answer source
+            ov = optin_value(f, chans, profile)
+            if ov is not None:
+                res.answers.append(Answer(key=f.key, value=ov, source="rule:messaging_optin"))
+            elif f.required or not chans:
+                res.unresolved.append(f)  # owner decides (no clean No option, opt-out wording, text box)
+            else:
+                res.omitted.append(f)     # optional: left empty, never a task
+            continue
         ck = canonical_key(f.label)
         if ck == "privacy_ack" and is_sensitive_question(f.label):   # "Gender (see our Privacy Notice)" (ADR-0038)
             ck = canonical_key(f.label, skip=("privacy_ack",))
@@ -1383,6 +1490,11 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                 else:
                     res.answers.append(Answer(key=f.key, value=c, source=f"rule:{ck}"))
                 continue
+        if is_auth_question(f) and not flat_auth_allowed(f, profile, job_country):
+            res.unresolved.append(f)     # ADR-0049: no flat/global answer for a foreign or unconfirmed-country job
+            if ck in ("work_authorized", "requires_sponsorship") or ck is None:
+                gaps.append({"country": None, "fact": None, "key": f.key})
+            continue
         value: Any | None = profile.lookup(ck) if ck else None
         persona_src = False
         if value is None and ck is None and persona is not None:   # ADR-0047: after every sensitive guard above

@@ -131,7 +131,7 @@ _INJECT_TEXT = re.compile(
     r"previous|prior)\b|<<<|>>>",
     re.IGNORECASE)
 # Consent / opt-in labels: like attestations, never set by the client in agent mode (ADR-0044).
-_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|marketing|opt[\s-]?in|subscribe|newsletter|"
+_CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|whats ?app|marketing|opt[\s-]?in|subscribe|newsletter|"
                             r"terms (?:and|&) conditions|i agree|i accept", re.IGNORECASE)
 _EXACT_VALUE = re.compile(
     r"(?:https?://|www\.)\S+|[+-]?\d[\d,]*(?:\.\d+)?\s?%?|\d{4}-\d{2}(?:-\d{2})?|\d{1,2}/\d{1,2}/\d{2,4}|"

@@ -204,6 +204,9 @@ class ProfileView:
         return None
 
     def lookup(self, key: str) -> Any | None:
+        if key.startswith("optin:"):      # ADR-0049: only the owner's exact [answers] key, never a stored/persona answer
+            want = key.lower()
+            return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
         v = self._lookup(key)
         if self.persona is not None and (v is None or v == "") and " " not in key:   # canonical keys only
             s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile

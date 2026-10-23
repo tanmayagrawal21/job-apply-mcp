@@ -1,0 +1,138 @@
+"""ADR-0049 (#70): messaging/marketing opt-ins fail closed; flat [answers] never answer authorization or sponsorship
+on a foreign or unconfirmed-country job. Fictional profile only (Alex Rivera, Springfield)."""
+import pytest
+from apply_fakes import F
+
+from job_apply_mcp.apply.adapters import ProfileView
+from job_apply_mcp.apply.mapper import map_fields, optin_channels
+from job_apply_mcp.config import Settings
+from job_apply_mcp.core.models import FieldKind
+from job_apply_mcp.profile import Authorization, Contact, Profile
+
+YN = ["Yes", "No"]
+# flat patterns a real profile may hold: "opt" is the US work program, "now or in the future" a sponsorship answer
+FLAT = {"opt": "Yes", "now or in the future": "Yes", "require sponsorship": "Yes", "sms": "No",
+        "text message": "No", "recruiting": "Yes", "receive": "Yes", "whatsapp": "Yes"}
+
+
+def view(answers=None, **auth):
+    a = {"work_authorized": True, "requires_sponsorship": True} | auth
+    return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city="Springfield"),
+                               authorization=Authorization.model_validate(a), answers=dict(FLAT) | (answers or {})),
+                       Settings())
+
+
+def run(label, kind=FieldKind.select, options=YN, required=True, p=None, job="US"):
+    f = F("q", label, kind, required=required, options=list(options) if options else None)
+    r = map_fields([f], p or view(), company="Acme Robotics", job_country=job)
+    got = {a.key: (a.value, a.source) for a in r.answers}.get("q")
+    return got, [x.key for x in r.unresolved], [x.key for x in r.omitted]
+
+
+WHATSAPP = [
+    "Do you opt-in to receive WhatsApp messages from Acme Recruiting?",
+    "Do you opt in to receive Whatsapp messages from Acme Recruiting?",
+    "Opt-in to WhatsApp updates",
+    "I would like to receive updates via WhatsApp",
+    "Can we contact you on Whats App about your application?",
+    "WHATSAPP: may we message you about this role?",
+]
+OTHER_CHANNELS = [
+    "Do you consent to receive SMS messages about your application?",
+    "I agree to receive text messages from Acme Robotics",
+    "Can we send you text alerts about interview scheduling?",
+    "Would you like to receive recruiting updates by text?",
+    "Opt in to mobile messaging from our recruiting team",
+    "Sign me up for the Acme newsletter",
+    "Would you like to receive marketing communications from Acme?",
+    "Do you opt-in to receive Telegram messages from Acme?",
+]
+
+
+@pytest.mark.parametrize("label", WHATSAPP + OTHER_CHANNELS)
+@pytest.mark.parametrize("job", ["US", "CA", None])
+def test_required_optin_is_no_never_yes(label, job):
+    assert run(label, job=job)[0] == ("No", "rule:messaging_optin")
+    assert run(label, FieldKind.boolean, options=None, job=job)[0] == (False, "rule:messaging_optin")
+    assert run(label, options=["Yes, opt me in", "No, thank you"], job=job)[0] == ("No, thank you",
+                                                                                   "rule:messaging_optin")
+
+
+@pytest.mark.parametrize("label", WHATSAPP + OTHER_CHANNELS)
+def test_optional_optin_is_left_empty(label):
+    assert run(label, required=False) == (None, [], ["q"])
+    assert run(label, FieldKind.boolean, options=None, required=False) == (None, [], ["q"])
+
+
+def test_only_an_exact_channel_yes_opts_in():
+    yes_wa = view({"optin:whatsapp": "Yes"})
+    assert run(WHATSAPP[0], p=yes_wa)[0] == ("Yes", "rule:messaging_optin")
+    assert run(WHATSAPP[0], FieldKind.boolean, options=None, required=False, p=yes_wa)[0] == (True,
+                                                                                              "rule:messaging_optin")
+    # a Yes for one channel never opts in to another, or to a question naming two channels
+    assert run(OTHER_CHANNELS[0], p=yes_wa)[0] == ("No", "rule:messaging_optin")
+    assert run("Do you agree to receive WhatsApp and SMS messages?", p=yes_wa)[0] == ("No", "rule:messaging_optin")
+    # flat patterns that merely contain the channel word are not that key
+    assert run(WHATSAPP[0], p=view({"opt in whatsapp": "Yes", "re:whatsapp": "Yes"}))[0] == ("No",
+                                                                                          "rule:messaging_optin")
+
+
+def test_optout_and_unclear_options_stay_with_the_owner():
+    assert run("Do you want to opt out of WhatsApp messages?") == (None, ["q"], [])
+    assert run("Do you opt-in to receive WhatsApp messages?", options=["Sure", "Maybe later"]) == (None, ["q"], [])
+
+
+@pytest.mark.parametrize("label,kind", [
+    ("WhatsApp number", FieldKind.text),
+    ("Do you have marketing experience?", FieldKind.select),
+    ("How many years of SMS gateway experience do you have?", FieldKind.select),
+])
+def test_channel_word_alone_is_not_an_optin(label, kind):
+    assert optin_channels(F("q", label, kind, options=YN if kind == FieldKind.select else None)) is None
+
+
+def test_flat_opt_pattern_never_matches_opt_in():
+    p = view()
+    assert p.p.answer_for("Do you opt-in to the Acme talent survey?") is None
+    assert p.p.answer_for("Are you on OPT?") == "Yes"
+
+
+# ---------------------------------------------------------------- sponsorship on a non-home-country job
+SPONSOR = ("Will you require Acme to sponsor you for a work permit now or in the future for the location(s) you "
+           "selected in your previous response?")
+
+
+@pytest.mark.parametrize("label", [
+    SPONSOR,
+    "Will you now or in the future require sponsorship to work in this role?",
+    "Do you need a visa to work here, now or in the future?",
+    "Would you require Acme to sponsor you?",
+])
+@pytest.mark.parametrize("job", ["CA", None])
+def test_flat_answers_never_answer_sponsorship_on_foreign_or_unconfirmed_job(label, job):
+    got, unresolved, _ = run(label, job=job)
+    assert got is None and unresolved == ["q"]
+
+
+def test_canada_job_uses_only_canada_facts():
+    p = view(CA={"work_authorized": True, "requires_sponsorship": False})
+    assert run("Will you now or in the future require sponsorship to work in this role?", p=p, job="CA")[0] == \
+        ("No", "rule:requires_sponsorship")
+    assert run("Would you require Acme to sponsor you?", p=p, job="CA")[:2] == (None, ["q"])   # company name: owner
+
+
+def test_non_yes_no_sponsorship_options_on_a_foreign_job_stay_unresolved():
+    opts = ["I will need sponsorship", "I hold an open work permit"]
+    assert run("Visa sponsorship status", options=opts, job="CA")[:2] == (None, ["q"])
+
+
+def test_home_country_job_still_uses_profile_facts():
+    assert run("Will you now or in the future require sponsorship to work in this role?", job="US")[0] == \
+        ("Yes", "rule:requires_sponsorship")
+
+
+def test_optin_bundled_with_a_notice_or_recording_consent_stays_with_the_owner():
+    for label in ("I acknowledge the privacy notice and agree to receive WhatsApp messages",
+                  "Do you consent to interview recording and to receive SMS reminders?"):
+        assert run(label, options=["I acknowledge", "I do not acknowledge"]) == (None, ["q"], [])
+        assert run(label) == (None, ["q"], [])
