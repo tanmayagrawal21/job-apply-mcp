@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from ..config import Settings
+from ..config import Settings, state_path
 from .agent import ControlAgent, Reviewer
 
 log = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
         settings = get_settings()
         st = get_agent(settings).status()
         try:
-            lr = await last_run_info(settings.paths.data_dir)
+            lr = await last_run_info(state_path(settings))
             if lr:
                 st["last_run"] = lr    # st["dry_run"] is the global setting; this is the run's effective mode
         except Exception as e:  # noqa: BLE001
@@ -70,7 +70,7 @@ def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
             from ..apply.approvals import ApprovalBook
             from ..ingest.reconcile import pending_summary
 
-            book = ApprovalBook(settings.paths.data_dir, reconcile_delays_min=settings.ingest.reconcile_delays_min)
+            book = ApprovalBook(state_path(settings), reconcile_delays_min=settings.ingest.reconcile_delays_min)
             summary = pending_summary(book)
             book._db.close()
             if summary["open"]:

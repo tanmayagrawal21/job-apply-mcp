@@ -15,7 +15,7 @@ async def _submit(a, ref, plat="lever"):
 
 
 def agent(tmp_path, apply=None, quota=None):
-    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path)}, "apply": apply or {},
+    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)}, "apply": apply or {},
                                  "control": {"params": {"quota": quota} if quota else {}}})
     return ControlAgent(s)
 
@@ -56,7 +56,7 @@ async def test_legacy_quota_params_win_and_zero_is_off(tmp_path):
 
 async def test_status_counts_respect_release_and_window(tmp_path):
     now = [1_000_000.0]
-    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path)},
+    s = Settings.model_validate({"dry_run": False, "paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)},
                                  "apply": {"daily_limit": 5, "daily_limit_per_platform": 3, "run_limit": 4}})
     a = ControlAgent(s, clock=lambda: now[0])
     r1 = await _submit(a, "r1")
@@ -76,12 +76,12 @@ async def test_status_counts_respect_release_and_window(tmp_path):
 
 async def test_control_status_and_doctor(tmp_path):
     from job_apply_mcp import doctor
-    s = Settings.model_validate({"paths": {"data_dir": str(tmp_path)}, "apply": {"daily_limit": 0}})
+    s = Settings.model_validate({"paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)}, "apply": {"daily_limit": 0}})
     out = json.loads(json.dumps(ControlAgent(s).status(), default=str))
     assert out["daily_limit"]["limit"]["day"] is None
     chk = doctor._daily_limit_check(s)
     assert chk.status == doctor.WARN and "no limit" in chk.detail
-    assert doctor._daily_limit_check(Settings.model_validate({"paths": {"data_dir": str(tmp_path)}})).status == doctor.OK
+    assert doctor._daily_limit_check(Settings.model_validate({"paths": {"data_dir": str(tmp_path), "state_dir": str(tmp_path)}})).status == doctor.OK
 
 
 def test_env_and_project_cannot_loosen_but_can_tighten(tmp_path, monkeypatch, caplog):
