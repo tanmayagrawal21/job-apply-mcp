@@ -106,6 +106,13 @@ unattended action covered right now?"
   trusted authserv id, DKIM/DMARC pass, trusted mail settings); none is registered yet, so sign-ups that need email
   verification stay `pending_verification`.
 
+## Review amendment (round 4, control agent): informed consent
+- Scope descriptions are accurate: `credentials` = sign in with vault passwords and create accounts with generated
+  passwords on job sites (creation also needs `accounts.auto_create`); `otp_unattended` (alias `mail`) = read
+  verification codes from your mail and enter them, after Submit and for new-account email confirmation.
+- Before the phrase prompt, the TTY confirmation prints `Scopes granted (N): ...`, each granted scope with what it
+  unlocks, and the scopes not granted. The default stays one consent for every scope; `--scopes` narrows it.
+
 ## Consequences
 - An unattended run needs one terminal command per period; review happens afterwards (`list_applications`, the
   approvals audit `consent:<id>` actor, `consent_audit.jsonl`).

@@ -30,12 +30,14 @@ CONSENT_SCOPES: dict[str, str] = {
     "captcha_attempt": ("On pages whose ONLY bot check is a passive/invisible widget, Submit is clicked once, "
                         "like a person (ADR-0036 rules). A visible CAPTCHA challenge always stays a handoff and "
                         "is never solved."),
-    "otp_unattended": ("When a site asks for an emailed code after Submit, the newest message from the expected "
-                       "sender (last few minutes) is read through your read-only mail source, the code is entered "
-                       "once, and confirmation detection continues. The code is never logged, stored or returned. "
-                       "No mail in time -> the application is marked unknown and never retried."),
-    "credentials": ("Reserved for the credential vault (separate change): sign in to ATS accounts you already "
-                    "have. Nothing uses this scope yet."),
+    "otp_unattended": ("Read verification codes from your mail and enter them: after Submit, and when a new "
+                       "job-site account asks you to confirm its email (also called `mail`). Only the newest "
+                       "message from the expected sender, verified by your mail server, is read; the code is "
+                       "entered once and never logged, stored or returned. No usable mail -> unknown, never "
+                       "retried."),
+    "credentials": ("Sign in with vault passwords and create accounts with generated passwords on job sites "
+                    "(ADR-0046). Passwords go from the OS keychain straight into the page, never to the model. "
+                    "Account creation also needs accounts.auto_create = true in your user config."),
 }
 DEFAULT_SCOPES: tuple[str, ...] = tuple(CONSENT_SCOPES)
 MODES = ("window", "per_run")

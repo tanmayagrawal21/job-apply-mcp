@@ -14,7 +14,7 @@ from .store import CONSENT_SCOPES, DEFAULT_SCOPES, ConsentStore, store_for
 
 def _scopes(raw: list[str] | None) -> list[str]:
     if not raw:
-        return list(DEFAULT_SCOPES)
+        return sorted(DEFAULT_SCOPES)
     out = [s.strip() for item in raw for s in item.split(",") if s.strip()]
     bad = sorted(set(out) - set(CONSENT_SCOPES))
     if bad:
@@ -75,8 +75,11 @@ def cli(argv: list[str], settings: Any, *, stdin: Any = None, stdout: Any = None
         return 2
     span = "this run" if a.per_run else fmt_dur(secs)
     print("Unattended applying. Inside this consent nothing asks you first; review the results afterwards.\n")
+    print(f"Scopes granted ({len(scopes)}): {', '.join(scopes)}")
     for s in scopes:
-        print(f"  {s}\n      {CONSENT_SCOPES[s]}")
+        print(f"  {s}\n      unlocks: {CONSENT_SCOPES[s]}")
+    left = sorted(set(CONSENT_SCOPES) - set(scopes))
+    print("Not granted: " + (", ".join(left) if left else "none (narrow with --scopes)"))
     print(f"\nCovers:      {span}" + (f" (and at most {fmt_dur(secs)})" if a.per_run else "")
           + f"\nSubmissions: {a.max if a.max else 'unlimited (your daily/run caps still apply)'}"
           + f"\nOS user:     {os_user()}\nUnchanged:   dry_run, policy gates, stop phrases, caps, dedupe. "

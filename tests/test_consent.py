@@ -833,3 +833,28 @@ def test_vault_status_serializes_with_an_open_window(cfg):
 def test_the_adr_0046_stub_module_is_gone():
     import job_apply_mcp.consent as c
     assert Path(c.__file__).name == "__init__.py" and callable(c.use) and callable(c.status)
+
+
+@pytest.mark.parametrize("scopes", [None, ["credentials"], ["otp_unattended", "approve_submissions"]])
+def test_confirmation_lists_each_granted_scope_and_its_real_effect(cfg, tmp_path, capsys, scopes):
+    st = mk(tmp_path)
+    argv = ["--for", "24h"] + (["--scopes", *scopes] if scopes else [])
+    shown = []
+    assert cli(argv, cfg, stdin=TTY(), stdout=TTY(), store=st,
+               input_fn=lambda p: shown.append(capsys.readouterr().out) or "no") == 1   # printed BEFORE the prompt
+    text = shown[0]
+    granted = sorted(scopes or CONSENT_SCOPES)
+    assert f"Scopes granted ({len(granted)}): {', '.join(granted)}" in text
+    effects = {"credentials": "Sign in with vault passwords and create accounts with generated passwords on job sites",
+               "otp_unattended": "Read verification codes from your mail and enter them",
+               "approve_submissions": "approved automatically", "captcha_attempt": "visible CAPTCHA"}
+    for s in granted:
+        assert f"  {s}\n      unlocks: {CONSENT_SCOPES[s]}" in text and effects[s] in text
+    for s in set(CONSENT_SCOPES) - set(granted):
+        assert f"  {s}\n" not in text and s in text.split("Not granted:")[1]
+    assert "Nothing uses this scope" not in text and st.status() == []
+
+
+def test_scope_descriptions_are_accurate():
+    assert "Nothing uses" not in " ".join(CONSENT_SCOPES.values())
+    assert "generated passwords" in CONSENT_SCOPES["credentials"] and "`mail`" in CONSENT_SCOPES["otp_unattended"]
