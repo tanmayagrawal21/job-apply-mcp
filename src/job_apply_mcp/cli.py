@@ -1,4 +1,4 @@
-"""Command line: ``job-apply-mcp [serve] | init | doctor | version`` (ADR-0020).
+"""Command line: ``job-apply-mcp [serve] | init | doctor | version | grant | vault`` (ADR-0020).
 
 With no subcommand the server starts on stdio, exactly like 0.1, so existing MCP client configs keep working.
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 
-COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "profile"}
+COMMANDS = {"serve", "init", "doctor", "version", "approve", "deny", "pending", "resolve", "grant", "vault", "profile"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
                    ).add_argument("rest", nargs=argparse.REMAINDER)
     sub.add_parser("profile", help="build your profile: ask | list | answer (open gaps the tool collected)"
                    ).add_argument("rest", nargs=argparse.REMAINDER)
+    sub.add_parser("vault", help="HUMAN ONLY (needs a TTY): ATS logins in the OS keychain (add, list, rm)"
+                   ).add_argument("rest", nargs=argparse.REMAINDER)
     return p
 
 
@@ -80,6 +82,11 @@ def main(argv: list[str] | None = None) -> None:
         from .persona.cli import cli as profile_cli
 
         raise SystemExit(profile_cli(args.rest, load_settings()))
+    elif args.cmd == "vault":
+        from .accounts.cli import cli as vault_cli
+        from .config import load_settings
+
+        raise SystemExit(vault_cli(args.rest, load_settings()))
     elif args.cmd == "doctor":
         from .doctor import run_doctor
 
