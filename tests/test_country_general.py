@@ -1,0 +1,152 @@
+"""ADR-0040: country-general authorization. Per-country profile facts, job_country() for any country, data-driven
+location matching. Fictional profile only (Alex Rivera, Springfield)."""
+import pytest
+from apply_fakes import F, FakeProfile
+
+from job_apply_mcp.apply.adapters import ProfileView
+from job_apply_mcp.apply.mapper import job_country, location_in_country, location_is_us, map_fields, never_llm
+from job_apply_mcp.apply.places import ambiguous_codes, country_iso
+from job_apply_mcp.config import Settings
+from job_apply_mcp.core.models import FieldKind
+from job_apply_mcp.profile import Authorization, Contact, Profile
+
+YN = ["Yes", "No"]
+
+
+def view(**auth):
+    return ProfileView(Profile(contact=Contact(first_name="Alex", city="Springfield"),
+                               authorization=Authorization.model_validate(auth)), Settings())
+
+
+def ans(label, p, job=None, options=YN):
+    r = map_fields([F("q", label, FieldKind.select, options=list(options))], p, job_country=job)
+    return {a.key: a.value for a in r.answers}.get("q"), r.profile_gaps
+
+
+# ---------------------------------------------------------------- locations, any country
+@pytest.mark.parametrize("country,yes,no", [
+    ("CA", ["Toronto, ON", "Toronto, Ontario, Canada", "Montreal, QC", "Remote - Canada", "Remote (Canada)",
+            "Vancouver, British Columbia", "Saskatoon, SK", "Calgary, AB", "Vancouver, BC", "Victoria, BC"],
+     ["Toronto, CA", "Vancouver, WA", "Regina", "Halifax, NS, USA", "Ottawa, ON (also London)",
+      "London, ON", "Remote", "Toronto, ON; New York, NY", "Remote - US"]),
+    ("GB", ["London, UK", "London, England", "Manchester, United Kingdom", "Edinburgh, Scotland", "Remote - UK",
+            "Cardiff, Wales"],
+     ["London", "London, ON", "Cambridge, MA", "London, UK (also Paris)", "Remote", "Dublin, Ireland"]),
+    ("IN", ["Bengaluru, Karnataka, India", "Bengaluru, KA", "Mumbai, MH", "Pune, Maharashtra", "Hyderabad, TG",
+            "Remote - India", "New Delhi, Delhi"],
+     ["Bengaluru, IN", "Chennai", "Kochi, KL, USA", "Nagpur, MH", "Remote", "Mumbai, India / Dubai"]),
+    ("AU", ["Sydney, New South Wales", "Melbourne, Victoria", "Brisbane, QLD", "Perth, Western Australia",
+            "Adelaide, SA", "Remote - Australia", "Hobart, TAS", "Perth, WA", "Melbourne, VIC", "Sydney, NSW"],
+     ["Sydney, NSW, USA", "Darwin", "Remote", "Seattle, WA", "Perth, WA, US"]),
+])
+def test_location_in_country(country, yes, no):
+    for loc in yes:
+        assert location_in_country(loc, country), (country, loc)
+    for loc in no:
+        assert not location_in_country(loc, country), (country, loc)
+
+
+def test_us_alias_and_ambiguity_data():
+    assert location_is_us("Seattle, WA") and not location_is_us("Perth, WA") and not location_is_us("Toronto, CA")
+    assert "wa" in ambiguous_codes("US") and "wa" in ambiguous_codes("AU") and "on" not in ambiguous_codes("CA")
+    assert "sa" in ambiguous_codes("AU") and "ka" not in ambiguous_codes("IN")
+    assert country_iso("United States") == "US" and country_iso("Canada") == "CA" and country_iso("UK") == "GB"
+    assert country_iso("CA", allow_codes=False) is None and country_iso("Atlantis") is None
+
+
+@pytest.mark.parametrize("loc", ["Remote (US) + Remote (UK)", "Remote (US) and Remote (UK)", "Remote (US) Remote (UK)",
+                                 "Remote (US) + Toronto", "Remote (US) + Remote (Canada)", "New York (US) + London (UK)",
+                                 "New York, NY (also London)", "New York, NY (London possible)"])
+def test_parentheticals_and_joined_places_never_confirm(loc):
+    assert job_country(loc, ["US"]) is None
+
+
+def test_job_country_any_country():
+    assert job_country("Toronto, ON", ["CA"]) == "CA"
+    assert job_country("London, UK", ["GB"]) == "GB"
+    assert job_country("Bengaluru, Karnataka", ["IN"], ["Mumbai, MH"]) == "IN"
+    assert job_country("Sydney, NSW", ["AU"]) == "AU"
+    assert job_country("New York, NY (HQ)", ["US"]) == "US"
+    for loc, cs in [("Toronto, ON", ["US"]), ("Toronto, ON", []), ("Toronto, ON", ["CA", "US"]),
+                    ("Toronto, ON", ["UNCONFIRMED"]), ("London, UK", ["GB"] * 1 + ["UNCONFIRMED"]),
+                    ("Remote - EMEA", ["GB"]), ("Toronto, ON", ["XX"])]:
+        assert job_country(loc, cs) is None, (loc, cs)
+
+
+# ---------------------------------------------------------------- per-country authorization facts
+def test_flat_keys_are_the_home_country():
+    p = view(work_authorized=True, requires_sponsorship=False)            # old config: home_country defaults to US
+    assert ans("Will you require sponsorship?", p, "US")[0] == "No"
+    assert ans("Are you authorized to work in the United States?", p)[0] == "Yes"
+    assert ans("Will you require sponsorship?", p, "CA") == (None, [{"country": "CA", "fact": "requires_sponsorship",
+                                                                    "key": "q"}])
+    q = view(home_country="CA", work_authorized=True, requires_sponsorship=False)
+    assert ans("Will you require sponsorship?", q, "CA")[0] == "No"
+    assert ans("Will you require sponsorship?", q, "US")[0] is None
+
+
+def test_per_country_tables_answer_their_own_country():
+    p = view(US={"work_authorized": True, "requires_sponsorship": True},
+             CA={"work_authorized": True, "requires_sponsorship": False}, GB={"work_authorized": False})
+    assert ans("Will you require sponsorship?", p, "US")[0] == "Yes"
+    assert ans("Will you require sponsorship?", p, "CA")[0] == "No"
+    assert ans("Are you authorized to work?", p, "GB")[0] == "No"
+    # a question naming a country uses that country's facts, whatever the job's country
+    assert ans("Are you legally authorized to work in Canada?", p, "US")[0] == "Yes"
+    assert ans("Do you require sponsorship to work in Canada?", p)[0] == "No"
+    assert ans("Do you have the right to work in the UK?", p, "US")[0] == "No"
+    # unknown country facts: unresolved and recorded as a profile gap
+    got, gaps = ans("Will you require sponsorship?", p, "AU")
+    assert got is None and gaps == [{"country": "AU", "fact": "requires_sponsorship", "key": "q"}]
+    got, gaps = ans("Do you need sponsorship to work in Germany?", p, "US")
+    assert got is None and gaps[0]["country"] == "DE"
+
+
+def test_country_visa_lexicons():
+    p = view(US={"work_authorized": True, "requires_sponsorship": True},
+             CA={"work_authorized": True, "requires_sponsorship": True})
+    assert ans("Will you require sponsorship (e.g., H-1B, TN)?", p, "US")[0] == "Yes"
+    assert ans("Will you require sponsorship (e.g., LMIA, PGWP)?", p, "CA")[0] == "Yes"
+    assert ans("Will you require sponsorship (e.g., H-1B, TN)?", p, "CA")[0] is None    # US visas on a Canadian job
+    assert ans("Will you require sponsorship (e.g., LMIA)?", p, "US")[0] is None
+    assert ans("Will you require sponsorship (e.g., H-1B)?", p)[0] is None                # job country unknown
+
+
+def test_place_less_and_contradictions_stay_unresolved():
+    p = view(US={"work_authorized": True, "requires_sponsorship": False},
+             CA={"work_authorized": True, "requires_sponsorship": False})
+    assert ans("Will you require sponsorship?", p)[0] is None
+    assert ans("Are you authorized to work in the US or Canada?", p, "US")[0] is None
+    assert ans("Are you authorized to work in the EU?", p, "US")[0] is None
+    assert ans("Are you authorized to work in this country?", p, "CA")[0] == "Yes"
+    assert ans("Are you authorized to work in this country?", p)[0] is None
+    assert ans("Are you a U.S. person under ITAR?", p, "US")[0] is None                  # legal: never answered
+
+
+def test_fake_profiles_keep_working():
+    class P(FakeProfile):
+        VALUES = {"work_authorized": "Yes", "requires_sponsorship": "No"}   # noqa: RUF012
+    r = map_fields([F("q", "Will you require sponsorship?", FieldKind.select, options=YN)], P(), job_in_us=True)
+    assert [a.value for a in r.answers] == ["No"]
+
+
+def test_never_llm_control_round_two():
+    for label in ["Have you ever been charged with a crime?", "Any pending charges?", "Do you have a DUI?",
+                  "Are you willing to undergo a background screen?", "Are you a Canadian PR?",
+                  "Do you have a Schengen permit?", "Do you have indefinite leave to remain?", "Do you need a Blue Card?",
+                  "Are you legally able to start work immediately?", "Are you fine working from Austin?"]:
+        assert never_llm(F("k", label, FieldKind.text, max_length=80)), label
+
+
+async def test_engine_plan_lists_profile_gaps():
+    from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeStore, settings
+
+    from job_apply_mcp.apply.engine import ApplyEngine
+    from job_apply_mcp.core.models import ApplicationForm
+    form = ApplicationForm(ref=POSTING.ref, fields=[
+        F("q", "Do you require sponsorship to work in Canada?", FieldKind.select, options=YN)])
+    e = ApplyEngine(settings(), resolve_adapter=lambda ref: FakeAdapter(form=form), profile=FakeProfile(), router=None,
+                    gates=FakeGates(), store=FakeStore(), driver_factory=lambda n: None)
+    out = await e.plan(POSTING.ref)
+    assert out.compact()["profile_gaps"] == [{"country": "CA", "fact": "requires_sponsorship", "key": "q"}]
+    assert "q" in out.plan.unresolved

@@ -62,7 +62,7 @@ class LeverAdapter(BaseAdapter):
 
     def _countries(self, d: dict, cat: dict) -> list[str]:
         """Lever's `country` covers the primary location only; any other location makes the set unconfirmed, so
-        job_is_us() is False (deny-by-default, ADR-0040)."""
+        job_country() is None (deny-by-default, ADR-0040)."""
         c = self.country_code(d.get("country"))
         raw = cat.get("allLocations") or []
         if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):

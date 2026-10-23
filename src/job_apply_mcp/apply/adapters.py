@@ -136,6 +136,18 @@ class ProfileView:
     def _derived(self, key: str) -> Any | None:
         if key == "derived:region":                 # ADR-0040: state/region for the continental-US rule
             return self.p.contact.region or None
+        if key == "home_country":
+            return self.p.authorization.home_country.upper()
+        if key.startswith("auth:"):                 # ADR-0040: "auth:<ISO-2>:<fact>" per-country authorization facts
+            _, cc, fact = key.split(":", 2)
+            a = self.p.authorization
+            facts = a.facts_for(cc)
+            v = getattr(facts, fact, None)
+            if v is None and fact == "citizen" and (c := self._citizenship_country()):
+                from .places import country_iso
+                iso = country_iso(c)
+                v = (iso == cc.upper()) if iso else None
+            return None if v is None else self._TRI[v]
         if key == "citizenship_country":
             return self._citizenship_country()
         if key.startswith("gpa:"):
@@ -177,7 +189,8 @@ class ProfileView:
     def lookup(self, key: str) -> Any | None:
         if (key in ("years_experience", "skill_years", "languages", "us_citizen", "open_to_onsite", "relocation_support",
                     "open_to_hybrid", "citizenship_country", "acknowledge_privacy_notices") or key.startswith(("referral:", "gpa:", "employer:", "country_answer:",
-                                                                        "derived:"))):
+                                                                        "derived:", "auth:"))
+                or key == "home_country"):
             return self._derived(key)
         if key in self._ANSWER_PHRASES and (v := self._derived(key)) is not None:
             return v

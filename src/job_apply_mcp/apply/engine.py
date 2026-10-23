@@ -41,7 +41,7 @@ from .mapper import (
     canonical_key,
     eeo_class,
     geo_kind,
-    job_is_us,
+    job_country,
     looks_fabricated,
     map_fields,
     never_llm,
@@ -91,6 +91,7 @@ class PlanOut(BaseModel):
     approval_id: str | None = None
     timings: dict[str, int] = Field(default_factory=dict)
     skipped_voluntary: dict[str, str] = Field(default_factory=dict)   # key -> label (ADR-0040)
+    profile_gaps: list[dict[str, Any]] = Field(default_factory=list)  # per-country facts to ask the owner (ADR-0040)
 
     def compact(self) -> dict[str, Any]:
         d: dict[str, Any] = {"ref": self.plan.ref, "gate": self.plan.gate.decision.value}
@@ -107,6 +108,8 @@ class PlanOut(BaseModel):
             d["client_tasks"] = self.client_tasks
         if self.skipped_voluntary:
             d["skipped_voluntary"] = self.skipped_voluntary
+        if self.profile_gaps:
+            d["profile_gaps"] = self.profile_gaps
         if self.approval_id:
             d["approval_id"] = self.approval_id
         if self.timings:
@@ -276,8 +279,8 @@ class ApplyEngine:
                                 company=ctx.posting.company, top_languages=self.s.apply.top_languages,
                                 stop_phrases=self.s.policy.stop_phrases,
                                 company_aliases=self._company_aliases(ctx.posting.company),
-                                job_in_us=job_is_us(ctx.posting.location, ctx.posting.countries,
-                                                    ctx.posting.locations))
+                                job_country=job_country(ctx.posting.location, ctx.posting.countries,
+                                                        ctx.posting.locations))
         answers = sal_answers + list(mapped.answers)
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
         voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
@@ -299,11 +302,13 @@ class ApplyEngine:
         else:
             long_ += short
         long_ += owner_only
-        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary)
+        return self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
+                              profile_gaps=mapped.profile_gaps)
 
     def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
                   tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,
-                  voluntary: dict[str, str] | None = None) -> PlanOut:
+                  voluntary: dict[str, str] | None = None,
+                  profile_gaps: list[dict[str, Any]] | None = None) -> PlanOut:
         """Cache the plan, issue the server-held approval, and list unresolved fields as client_tasks.
         Only `answers` are ever approved/submitted; drafts inside client_tasks never are (ADR-0041)."""
         hints = hints or {}
@@ -328,7 +333,7 @@ class ApplyEngine:
         return PlanOut(plan=ApplicationPlan(ref=ref, gate=gate, answers=answers, unresolved=unresolved_keys,
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}),
-                       skipped_voluntary=voluntary or {})
+                       skipped_voluntary=voluntary or {}, profile_gaps=list(profile_gaps or []))
 
     def _company_aliases(self, company: str) -> list[str]:
         """dedupe.company_aliases names that are the same employer as the posting company (ADR-0038)."""

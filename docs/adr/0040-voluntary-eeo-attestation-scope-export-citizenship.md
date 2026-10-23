@@ -67,17 +67,30 @@ A QA round (issues #47, #48, #51) found:
   ambiguous code (CA, IN, DE, LA, WA, MI, ...) counts only with a city from a small explicit US city table, and
   well-known shared city names (Perth, Melbourne, Sydney, London, Paris, Birmingham, Cambridge, Hamilton, Victoria,
   Vancouver, Kingston) need an explicit US marker. No location, "Remote" or any non-US part -> the "this country" wording stays unresolved.
-- **Confirmed-US job (one conjunctive rule).** The `[authorization]` facts are US facts. `job_is_us` is True only if
-  (a) the structured adapter countries are exactly ["US"], with every location entry parsed (Lever `country` +
-  `allLocations`, Ashby `addressCountry` of the primary and every secondary location, Greenhouse every office
-  location ending in "United States"); a non-dict, malformed, country-less or additional entry is "UNCONFIRMED";
-  (b) every available location string (posting location, office locations, allLocations, secondaryLocations) passes
-  `location_is_us` (last comma component decides; "(US)" kept as a marker); and (c) no location string names a
-  region or several places (americas, latam, emea, apac, europe, global, worldwide, international, anywhere,
-  multiple, "or", ";", "/", "&"). There is no text fallback and text never overrides a structured value.
-  Unless the job is confirmed, an authorization/sponsorship question is answered only when it names the US as the
-  PLACE of work ("in the US", "within the United States"), after visa example clauses are dropped; "(e.g., H-1B)",
-  "OPT/CPT" and "work for US" alone leave it unresolved.
+- **Country-general authorization (Amendment 2).** The tool is not US-centred.
+  - *Profile.* `[authorization.<ISO-2>]` tables hold `work_authorized`, `requires_sponsorship` and `citizen` per
+    country. The flat `[authorization]` keys are an alias for `home_country` (default "US"), so old profiles behave
+    as before.
+  - *Job country.* `job_country(location, countries, locations) -> ISO-2 | None` is one strict conjunctive rule for any
+    country: (a) the structured adapter countries are exactly one ISO-2 code, with every location entry parsed (Lever
+    `country` + `allLocations`, Ashby `addressCountry` of every location, Greenhouse every office location ending in a
+    full country name); a non-dict, malformed, country-less or additional entry is "UNCONFIRMED"; (b) every location
+    string is in that country by `location_in_country`; (c) no location string names a region or several places
+    (americas, latam, emea, apac, europe, global, worldwide, international, anywhere, multiple, and, also, plus,
+    possible, "or", ";", "/", "&", "+"). No text fallback; a contradiction gives None. `job_is_us` is an alias.
+  - *Locations.* `location_in_country(text, code)` is data-driven (`apply/places.py`): country names, subdivision
+    names and codes (US, CA, AU, IN, GB), ambiguous codes derived from ISO-3166 and the other countries' codes plus
+    explicit extras, a small city table for ambiguous codes, and shared city names with their usual country. Only the
+    last comma component decides; "(US)"/"(Canada)" become a component, an allowlisted note ("(HQ)", "(Hybrid)",
+    time zones) is dropped, and any other parenthetical is its own location that must also be in the country.
+    `location_is_us` is an alias.
+  - *Answering.* A question that names one country uses that country's facts (else the owner's `[answers]` pattern
+    naming it); a place-less question, or "this country", uses the job's confirmed country. The allow-list runs with
+    that country's name and visa lexicon (`VISA_LEXICON`: US H-1B/OPT/TN..., CA LMIA/PGWP..., GB Skilled Worker..., AU
+    482/485...), so a US visa example never makes a Canadian question answerable. Several countries, a region (EU),
+    an unknown job country or missing facts leave the field unresolved; missing facts are recorded as
+    `profile_gaps` ({country, fact, key}) in the plan output for the profile builder. Export control and "U.S. person"
+    remain legal, never-LLM and unresolved by default.
 - **Legal-status block.** The authorization and sponsorship rules never answer a field whose label, help text or
   options mention ITAR/EAR, "U.S. person", export control, citizen/citizenship, permanent resident, green card,
   security clearance or deemed export (`auth_legal_blocked`); such a field stays with the owner and never goes to an
