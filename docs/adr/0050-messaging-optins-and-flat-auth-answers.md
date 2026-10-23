@@ -14,33 +14,29 @@ QA (#70) found two wrong answers on Greenhouse postings:
    "now or in the future".
 
 ## Decision
-1. **Contact-permission questions: a broad owner-only marker and a narrow answer rule.**
-   - **Broad (owner-only).** On a choice or boolean field, a label that names a contact channel or contact word
+1. **Contact, messaging and marketing permission questions are owner-only (descoped after five review rounds).**
+   - **Broad classifier.** On a choice or boolean field, a label that names a contact channel or contact word
      (text/SMS/MMS, call/phone, email, WhatsApp, Signal, Telegram, WeChat, LINE, Viber, iMessage/RCS, push,
-     marketing/newsletter/future roles/talent community/job alerts, or generic contact/reach/message/updates/alerts)
-     and addresses the candidate is owner-only (`contact_permission_channels`). The engine refuses client answers for
-     it, it is never sent to a model (`never_llm`), and it stays unresolved. This marker never decides an answer.
+     marketing/newsletter/promotions/talent community/job alerts, or generic contact/reach/message/updates/alerts)
+     and addresses the candidate is owner-only (`contact_permission_channels`). The older `marketing_optin` key is
+     owner-only too. Such a field is never Yes and never an automatic No. The engine refuses client answers, it is
+     never sent to a model (`never_llm`), no flat `[answers]`, persona or alias-phrase answer applies, and it stays
+     unresolved (optional fields are left empty like any unresolved optional field).
    - **Exceptions remove only their own words.** Skills/experience phrases ("WhatsApp experience", "experience with
-     Twilio SMS", "built SMS gateways", "managed email campaigns"), past contact ("have you been contacted by us"),
-     other people (references, employer, manager, emergency contact), "on call", "phone screen", "availability",
-     "tools", "platform" and similar are cut out of the label. Whatever remains is checked again, so "Do you have
-     WhatsApp experience, and may we message you there?" stays owner-only. An authorization, EEO or own-rule
-     question keeps its rule unless another clause still asks permission to contact (then the owner decides).
-   - **Narrow (answered).** Only a permission wording that names a delivery (`_PERMISSION_ASK`): "opt in to",
-     "subscribe to", "sign me up for", "consent/agree to receive" or "to be contacted/texted/...", "permission to
-     text/call/... you", "(may|can) we|recruiters (contact|text|call|email|message|reach) you", "ok to (text|call|
-     email|contact) you", "would you like to receive/get/hear", "join our talent community/mailing list". It must come
-     with a **named messaging channel** (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`, `viber`,
-     `imessage`) or a **marketing communication** (`marketing`: marketing emails/messages/communications/offers,
-     newsletters, promotional emails, mailing list, talent community, job alerts, "about future roles"). A bare
-     "would you like", "consent" or "permission", and bare "marketing" or "promotion" (a job topic: "Would you like
-     to join our marketing team?"), never count; such labels stay owner-only. Only these narrow asks are answered,
-     by `rule:messaging_optin`. The answer is Yes only when the owner stored Yes for every named channel under the
-     exact `[answers]` key `optin:<channel>` (the keys above plus `phone`, `email`, `push`). Otherwise it is No when
-     required and left empty when optional. The bare phone/call, email, push and generic contact channels are never
-     auto-answered.
-   - **No flat answer, ever.** A choice field whose label names any channel never takes a flat `[answers]`, persona
-     or alias-phrase answer. Only `optin:<channel>` can opt the user in.
+     Twilio SMS", "built SMS gateways"), past contact, other people (references, employer, manager, emergency
+     contact), "on call", "phone screen", "availability", "tools", "platform" and similar are cut out of the label,
+     and the remainder is checked again. So "Do you have WhatsApp experience, and may we message you there?" stays
+     owner-only, and an authorization, EEO or own-rule question keeps its rule unless another clause asks to contact.
+   - **The one exception: the owner's own answer.** If the owner stored `optin:<channel>` (Yes or No) in `[answers]`
+     for every named channel (`whatsapp`, `sms`, `signal`, `telegram`, `wechat`, `line`, `viber`, `imessage`,
+     `marketing`, plus `phone`, `email`, `push`), that value answers a **narrow** permission question:
+     delivery wording (`_PERMISSION_ASK`: "opt in to", "subscribe to", "sign me up for", "consent/agree to receive",
+     "(may|can) we|recruiters text/call/email/message/reach you", "ok to text you", "would you like to receive", "join
+     our talent community") with a named messaging channel or a marketing communication, and a contact as the thing
+     delivered (messages, texts, updates, emails, newsletters ... or "text you"). "Would you like to receive WhatsApp
+     training?" or "Are you comfortable making cold calls?" never take a stored value.
+   - **Automatic declines move out.** A safe automatic No for required opt-ins is left to the planned autonomy-level
+     `safe_default` mode; this rule never decides one.
    - Opt-out wording, unclear options, or bundling with a notice, terms, attestation or recording consent stay
      unresolved. On a free-text field only explicit opt-in wording counts (unresolved); "WhatsApp number" does not.
 2. **"opt-in" is one token** in `normalize_question` (`optin` / `optout`), so a flat `opt` pattern never matches it.

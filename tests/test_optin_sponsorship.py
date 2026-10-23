@@ -51,32 +51,41 @@ OTHER_CHANNELS = [
 ]
 
 
+def owner_only(label, p, **kw):
+    """Owner-only: never answered, unresolved whether required or optional (ADR-0050, descoped)."""
+    for req in (True, False):
+        assert run(label, p=p, required=req, **kw)[:2] == (None, ["q"]), (label, req)
+        assert run(label, FieldKind.boolean, options=None, p=p, required=req, **kw)[:2] == (None, ["q"]), (label, req)
+
+
 @pytest.mark.parametrize("label", WHATSAPP + OTHER_CHANNELS)
 @pytest.mark.parametrize("job", ["US", "CA", None])
-def test_required_optin_is_no_never_yes(label, job):
-    assert run(label, job=job)[0] == ("No", "rule:messaging_optin")
-    assert run(label, FieldKind.boolean, options=None, job=job)[0] == (False, "rule:messaging_optin")
-    assert run(label, options=["Yes, opt me in", "No, thank you"], job=job)[0] == ("No, thank you",
-                                                                                   "rule:messaging_optin")
+def test_optin_without_stored_answer_is_owner_only_never_yes_or_no(label, job):
+    owner_only(label, view(), job=job)
+    assert run(label, options=["Yes, opt me in", "No, thank you"], job=job)[:2] == (None, ["q"])
 
 
-@pytest.mark.parametrize("label", WHATSAPP + OTHER_CHANNELS)
-def test_optional_optin_is_left_empty(label):
-    assert run(label, required=False) == (None, [], ["q"])
-    assert run(label, FieldKind.boolean, options=None, required=False) == (None, [], ["q"])
+@pytest.mark.parametrize("label", ["Do you opt-in to receive WhatsApp messages from Acme Recruiting?",
+                                   "Opt-in to WhatsApp updates",
+                                   "Can we contact you on Whats App about your application?"])
+def test_stored_optin_is_the_owners_own_answer(label):
+    assert run(label, p=view({"optin:whatsapp": "Yes"}))[0] == ("Yes", "rule:messaging_optin")
+    assert run(label, p=view({"optin:whatsapp": "No"}), required=False)[0] == ("No", "rule:messaging_optin")
+    assert run(label, FieldKind.boolean, options=None, p=view({"optin:whatsapp": "No"}))[0] == \
+        (False, "rule:messaging_optin")
+    assert run(label, options=["Yes, opt me in", "No, thank you"], p=view({"optin:whatsapp": "No"}))[0] == \
+        ("No, thank you", "rule:messaging_optin")
 
 
-def test_only_an_exact_channel_yes_opts_in():
+def test_only_an_exact_channel_value_counts():
     yes_wa = view({"optin:whatsapp": "Yes"})
-    assert run(WHATSAPP[0], p=yes_wa)[0] == ("Yes", "rule:messaging_optin")
-    assert run(WHATSAPP[0], FieldKind.boolean, options=None, required=False, p=yes_wa)[0] == (True,
-                                                                                              "rule:messaging_optin")
-    # a Yes for one channel never opts in to another, or to a question naming two channels
-    assert run(OTHER_CHANNELS[0], p=yes_wa)[0] == ("No", "rule:messaging_optin")
-    assert run("Do you agree to receive WhatsApp and SMS messages?", p=yes_wa)[0] == ("No", "rule:messaging_optin")
-    # flat patterns that merely contain the channel word are not that key
-    assert run(WHATSAPP[0], p=view({"opt in whatsapp": "Yes", "re:whatsapp": "Yes"}))[0] == ("No",
-                                                                                          "rule:messaging_optin")
+    owner_only(OTHER_CHANNELS[0], yes_wa)                                      # SMS question, WhatsApp key
+    owner_only("Do you agree to receive WhatsApp and SMS messages?", yes_wa)   # every channel needs its own value
+    assert run("Do you agree to receive WhatsApp and SMS messages?",
+               p=view({"optin:whatsapp": "Yes", "optin:sms": "Yes"}))[0] == ("Yes", "rule:messaging_optin")
+    assert run("Do you agree to receive WhatsApp and SMS messages?",
+               p=view({"optin:whatsapp": "Yes", "optin:sms": "No"}))[0] == ("No", "rule:messaging_optin")
+    owner_only(WHATSAPP[0], view({"opt in whatsapp": "Yes", "re:whatsapp": "Yes"}))   # flat patterns never count
 
 
 def test_optout_and_unclear_options_stay_with_the_owner():
@@ -212,26 +221,24 @@ CONTROL_LABELS = [
 ]
 
 
+# labels whose stored optin value is used (narrow ask about a contact); the rest stay owner-only even when stored
+STORED_APPLIES = {"Is it OK to text you?", "May we text your mobile?", "Can we send you a text?",
+                  "Can we text you about interview scheduling?", "Can recruiters call or text you?",
+                  "Okay to WhatsApp you?", "Can we reach you on Signal?", "Can we email you about future roles?"}
+
+
 @pytest.mark.parametrize("label,chans", CONTROL_LABELS)
 def test_control_labels_fail_closed(label, chans):
-    p = view(CONTROL_FLAT)
     f = F("q", label, FieldKind.select, options=YN)
     assert optin_channels(f) == chans
-    # no named messaging channel, or no delivery verb ("Would you like Signal updates?"): owner-only, never answered
-    if chans == ["contact"] or label == "Would you like Signal updates?":
-        for q in (p, view(CONTROL_FLAT | {f"optin:{c}": "Yes" for c in chans})):
-            assert run(label, p=q)[:2] == (None, ["q"])
-            assert run(label, p=q, required=False)[:2] == (None, ["q"])
-        return
-    assert run(label, p=p)[0] == ("No", "rule:messaging_optin")
-    assert run(label, FieldKind.boolean, options=None, p=p)[0] == (False, "rule:messaging_optin")
-    assert run(label, p=p, required=False) == (None, [], ["q"])
-    assert run(label, FieldKind.boolean, options=None, p=p, required=False) == (None, [], ["q"])
-    yes = view(CONTROL_FLAT | {f"optin:{c}": "Yes" for c in chans})
-    assert run(label, p=yes)[0] == ("Yes", "rule:messaging_optin")
-    if len(chans) > 1:                  # every named channel needs its own Yes
-        part = view(CONTROL_FLAT | {f"optin:{chans[0]}": "Yes"})
-        assert run(label, p=part)[0] == ("No", "rule:messaging_optin")
+    owner_only(label, view(CONTROL_FLAT))
+    stored = view(CONTROL_FLAT | {f"optin:{c}": "Yes" for c in chans})
+    if label in STORED_APPLIES:
+        assert run(label, p=stored)[0] == ("Yes", "rule:messaging_optin")
+        if len(chans) > 1:              # every named channel needs its own Yes
+            assert run(label, p=view(CONTROL_FLAT | {f"optin:{chans[0]}": "Yes"}))[:2] == (None, ["q"])
+    else:
+        owner_only(label, stored)
 
 
 @pytest.mark.parametrize("label", [
@@ -319,20 +326,11 @@ CONTROL_12 = [
 ]
 
 
-@pytest.mark.parametrize("label,want", CONTROL_12)
-def test_compound_labels_never_yes_without_optin(label, want):
-    p = view(EVERY_FLAT)
-    got, unresolved, _ = run(label, p=p)
-    if want == "No":
-        assert got == ("No", "rule:messaging_optin")
-        assert run(label, p=p, required=False) == (None, [], ["q"])
-    else:
-        assert (got, unresolved) == (None, ["q"])
-        assert run(label, p=p, required=False)[:2] == (None, ["q"])
-    assert run(label, FieldKind.boolean, options=None, p=p, required=False)[0] in (None,)
-    f = F("q", label, FieldKind.select, options=YN)
+@pytest.mark.parametrize("label,_was", CONTROL_12)
+def test_compound_labels_are_owner_only(label, _was):
+    owner_only(label, view(EVERY_FLAT))
     from job_apply_mcp.apply.mapper import never_llm
-    assert never_llm(f)                 # owner-only: never a model
+    assert never_llm(F("q", label, FieldKind.select, options=YN))   # owner-only: never a model
 
 
 def test_narrow_optin_with_stored_yes_for_every_channel():
@@ -371,5 +369,19 @@ def test_marketing_and_sms_job_questions_stay_unresolved(label):
     "Sign me up for the Acme newsletter",
     "Opt in to WhatsApp updates",
 ])
-def test_delivery_verb_permission_asks_are_still_declined(label):
-    assert run(label)[0] == ("No", "rule:messaging_optin")
+def test_permission_asks_are_never_auto_declined(label):
+    owner_only(label, view())
+
+
+# control round 5: ordinary questions that look like opt-ins (and the older marketing_optin rule) stay unresolved
+@pytest.mark.parametrize("label", ["Would you like to receive WhatsApp training?",
+                                   "Do you have experience writing newsletters?"])
+def test_round5_labels_stay_unresolved(label):
+    owner_only(label, view(EVERY_FLAT | {"newsletters": "Yes", "training": "Yes"}))
+    owner_only(label, view(EVERY_FLAT | {"optin:whatsapp": "Yes", "optin:marketing": "Yes"}))
+
+
+@pytest.mark.parametrize("label", ["Would you like to join our talent network?", "Sign up for our newsletter",
+                                   "Select 'Yes' to join Acme Robotics's Talent Community and receive newsletters"])
+def test_older_marketing_optin_rule_no_longer_answers(label):
+    owner_only(label, view())
