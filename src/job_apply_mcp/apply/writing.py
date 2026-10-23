@@ -158,7 +158,7 @@ def review_rubric(cfg: WritingCfg, *, company: str, title: str, facts: list[str]
 
 
 def _reviewer_prompt(draft: str, rubric: str) -> str:
-    return (f"{rubric}\n\nDRAFT:\n{draft}\n\nReturn JSON "
+    return (f"{rubric}\n\n{quality.fence(draft)}\n\nReturn JSON "
             '{"pass": bool, "violations": [str], "corrected": str} where corrected is a fixed draft '
             "(identical to the draft when pass is true).")
 

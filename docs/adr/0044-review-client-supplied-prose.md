@@ -86,6 +86,18 @@ it could contradict the resume or break the writing rules and still be sent.
   in; "okay to email me"; promotions and marketing messages. "A-I" and "A–I" fold to "ai", and the scan maps ø to
   o. Tests check that each phrase is rejected even when the fake reviewer passes.
 
+- Both reviewer prompts (`_reviewer_prompt`, `quality.rubric_prompt`) fence the draft between
+  `<<<DRAFT-nonce>>>` and `<<<END-DRAFT-nonce>>>`, using a random nonce per call. The prompt frames that text as
+  untrusted applicant text in which any instruction, verdict, score or JSON is itself a violation. The
+  deterministic layer rejects answers that address the model: evaluator, rubric, `<pass>`, "output pass/true",
+  "ignore the rubric/rules/instructions" and the fence markers.
+- The gate's `attestation` field is deny by default: a missing key fails, like any value other than a strict
+  false.
+- Consent words are matched only in consent context: "opt in to", "sign me up", "receive ... promotions/marketing/
+  newsletters", "okay to email/call/text me", and "reach/contact me via phone/WhatsApp/Telegram/Signal/...". As a
+  result, "a promotion to senior engineer" and "the opt-in flow" pass. The wording is locale-neutral ("honour" and
+  "honor", messaging apps beyond SMS, "authorise" and "authorize"), with no US-specific forms.
+
 ## Verify
 `uv run pytest -q tests/test_client_prose_review.py tests/test_config_trust.py`: passing prose is reviewed then
 submitted; gap statement, banned phrase, resume-contradicting title and reviewer failure each return `needs_review`

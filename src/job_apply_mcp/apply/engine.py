@@ -99,15 +99,29 @@ _ATTEST_TEXT = re.compile(
     # pledges, completeness statements and other consent/contact wording
     r"\b(?:i|we)\s+(?:hereby\s+)?(?:pledge|vouch|guarantee|warrant|promise)\b|"
     r"\b(?:accurate|true|correct)\s+and\s+(?:complete|accurate|correct|true)\b|"
-    r"\baccept\s+the\s+(?:privacy|terms|policy|conditions)\b|\bprivacy\s+policy\b|\bopt\W?in\b|"
-    r"\b(?:okay|ok|fine|happy|free)\s+to\s+(?:email|e\W?mail|call|text|contact|message)\s+me\b|\bpromotions?\b|"
-    r"\bmarketing\s+(?:messages?|emails?|communications?|texts?)\b",
+    r"\baccept\s+the\s+(?:privacy|terms|policy|conditions)\b|\bprivacy\s+(?:policy|notice)\b|"
+    r"\bopt\W?in\s+to\b|\bopt\s+me\s+in\b|\bsign\s+me\s+up\b|\bsubscribe\s+me\b|"
+    r"\b(?:okay|ok|fine|happy|free|welcome)\s+to\s+(?:email|e\W?mail|call|ring|phone|text|contact|message)\s+me\b|"
+    r"\b(?:receive|get|send\s+me|email\s+me)\s+(?:\w+\s+){0,3}?(?:promotions?|promotional|marketing|offers|newsletters?)\b|"
+    # meaning-level paraphrases (general wording, any locale)
+    r"\b(?:ai|llms?|chatgpt|generative\s+ai|language\s+models?)\s+(?:involvement|usage|use|assistance)\s*[:=-]\s*"
+    r"(?:none|nil|no|zero|0|n/?a)\b|\buse\s+of\s+(?:ai|llms?|language\s+models?)\s*[:=-]\s*(?:none|nil|no|zero|0)\b|"
+    r"\b(?:ai|llms?)\s*[:=-]\s*(?:none|nil|zero|0)\b|\bno\s+generative\s+tools?\b|"
+    r"\bzero\s+use\s+of\s+(?:ai|llms?|language\s+models?)\b|\bnot\s+(?:generated|written|produced)\s+by\s+(?:a\s+)?"
+    r"(?:machine|computer|bot|model|ai)\b|\bsole\s+(?:author|writer|creator)\b|\b(?:penned|authored)\s+by\s+me\b|"
+    r"\b(?:authentically|genuinely|wholly|truly)\s+(?:mine|my\s+own)\b|\bon\s+my\s+(?:honou?r|word)\b|"
+    r"\b(?:i\s+)?give\s+(?:you\s+)?my\s+word\b|\bfalse\s+(?:statements?|information)\s+(?:may|will|could|can)\b|"
+    r"\b(?:reach|contact|message)\s+me\s+(?:by|via|on|at|through)\s+(?:phone|telephone|mobile|cell|whatsapp|"
+    r"telegram|signal|viber|wechat|line|sms|text)\b",
     re.IGNORECASE)
 # Text aimed at the reviewer model rather than the employer (ADR-0044).
 _INJECT_TEXT = re.compile(
     r"[{\[]\s*\"?\s*(?:pass|violations|scores|at_least_as_strong|corrected)\b|(?:^|[\n.!?]\s*)(?:dear\s+)?(?:reviewer|"
     r"grader|evaluator|assistant|system|note to (?:the\s+)?(?:reviewer|model|ai))\s*[:,]|\bignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
-    r"(?:instructions|rules|text)|\b(?:respond|reply|answer)\s+with\b|\breturn\s+json\b|\bpass\s*[:=]\s*true\b",
+    r"(?:instructions|rules|text)|\b(?:respond|reply|answer)\s+with\b|\breturn\s+json\b|\bpass\s*[:=]\s*true\b|"
+    r"\bevaluator\b|\brubric\b|</?\s*(?:pass|verdict|score)\s*>|\boutput\s+(?:a\s+)?[\"']?(?:pass|true)\b|"
+    r"\bignore\s+(?:the\s+|all\s+|any\s+|your\s+)?(?:rubric|rules|instructions|criteria|checks?|guidelines|above|"
+    r"previous|prior)\b|<<<|>>>",
     re.IGNORECASE)
 # Consent / opt-in labels: like attestations, never set by the client in agent mode (ADR-0044).
 _CONSENT_LABEL = re.compile(r"consent|\bsms\b|text messag|marketing|opt[\s-]?in|subscribe|newsletter|"
