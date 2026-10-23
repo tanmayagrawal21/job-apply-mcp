@@ -338,138 +338,205 @@ def test_server_info_version_is_the_package_version():
     assert opts.server_version == __version__
 
 
-# ---- migration of the security-state stores into the fixed state dir (ADR-0054)
-def _old_world(tmp_path, monkeypatch):
-    """An install whose stores lived in a custom data dir; the new state dir (the fixed default) starts empty."""
+# ---- migration of the security-state stores into the fixed state dir (ADR-0054): imports only TIGHTEN
+def _old_world(tmp_path):
+    """The previous default dir (a trusted source) holds the old stores; the new state dir (set by the trusted
+    config) starts empty."""
     from job_apply_mcp import migrate
     migrate._done.clear()
-    old = tmp_path / "olddata"
+    old = paths.state_dir()
+    old.mkdir(parents=True)
     s = Settings()
-    s.paths.data_dir = str(old)
-    s.paths.state_dir = None
-    return s, old
+    s.paths.state_dir = str(tmp_path / "newstate")
+    return s, old, tmp_path / "newstate"
 
 
-def test_migration_keeps_submitted_posting_deduped(tmp_path, monkeypatch):
+def _sub(book, ref, state):
+    book.set_state(ref, state, url="https://x.example/" + ref)
+    book._db.commit()
+
+
+def test_migration_keeps_submitted_posting_blocked(tmp_path):
     from job_apply_mcp.apply.approvals import ApprovalBook
     from job_apply_mcp.config import state_path
-    s, old = _old_world(tmp_path, monkeypatch)
+    s, old, new = _old_world(tmp_path)
     b = ApprovalBook(old)
-    b.set_state("greenhouse:acme:1", "submitted", url="https://x.example/1")
-    b.set_state("greenhouse:acme:2", "unknown", url="https://x.example/2")
+    _sub(b, "g:a:1", "submitted")
+    _sub(b, "g:a:2", "unknown")
+    _sub(b, "g:a:3", "planned")
     b._db.close()
-    new = state_path(s)
-    assert new != old
+    assert state_path(s) == new
     nb = ApprovalBook(new)
-    assert nb.state("greenhouse:acme:1")["state"] == "submitted"
-    ok, st = nb.begin_submit("greenhouse:acme:1", None)
-    assert ok is False and st == "submitted"               # still refused: no double submit
-    assert nb.state("greenhouse:acme:2")["state"] == "unknown"
-    assert ApprovalBook(old).state("greenhouse:acme:1")["state"] == "submitted"   # copied, not moved
+    assert nb.begin_submit("g:a:1", None) == (False, "submitted")
+    assert nb.state("g:a:2")["state"] == "unknown"
+    assert nb.state("g:a:3") is None                                  # permissive state is not imported
+    assert ApprovalBook(old).state("g:a:1")["state"] == "submitted"   # copied, not moved
 
 
-def test_migration_union_most_restrictive_state_wins(tmp_path, monkeypatch):
+def test_migration_most_restrictive_state_wins(tmp_path):
     from job_apply_mcp.apply.approvals import ApprovalBook
     from job_apply_mcp.config import state_path
-    s, old = _old_world(tmp_path, monkeypatch)
+    s, old, new = _old_world(tmp_path)
     ob = ApprovalBook(old)
-    ob.set_state("a:b:1", "submitting", url="u")
+    _sub(ob, "a:b:1", "submitting")
     ob._db.close()
-    nb0 = ApprovalBook(paths.state_dir())
-    nb0.set_state("a:b:1", "planned", url="u")
-    nb0.set_state("a:b:2", "approved", url="u2")
+    nb0 = ApprovalBook(new)
+    _sub(nb0, "a:b:1", "planned")
     nb0._db.close()
-    nb = ApprovalBook(state_path(s))
-    assert nb.state("a:b:1")["state"] == "submitting" and nb.state("a:b:2")["state"] == "approved"
+    state_path(s)
+    assert ApprovalBook(new).state("a:b:1")["state"] == "submitting"
 
 
-def test_migration_carries_over_todays_quota(tmp_path, monkeypatch):
+def test_planted_approved_row_does_not_approve(tmp_path):
+    from job_apply_mcp.apply.approvals import ApprovalBook
+    from job_apply_mcp.config import state_path
+    s, old, new = _old_world(tmp_path)
+    nb = ApprovalBook(new)
+    aid = nb.issue("g:a:7", "https://x.example/7", "Acme", "Eng", {"q": "a"})
+    nb._db.close()
+    ob = ApprovalBook(old)
+    ob._db.execute("INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (aid, "g:a:7", "https://x.example/7", "Acme", "Eng", "h", "f", "{}", "approved", "attacker", 1.0, 9e12))
+    ob._db.execute("INSERT INTO approvals VALUES('planted-2','g:a:8','u','c','t','h','f','{}','used','x',1.0,9e12)")
+    ob._db.commit()
+    ob._db.close()
+    state_path(s)
+    nb = ApprovalBook(new)
+    assert nb.get(aid).status == "pending"                            # not upgraded
+    assert nb.get("planted-2") is None                                # nothing inserted, not even `used`
+
+
+def test_migration_carries_over_quota_but_not_planted_release(tmp_path):
     import json
     import time
 
     from job_apply_mcp.config import state_path
     from job_apply_mcp.control.agent import ControlAgent
-    s, old = _old_world(tmp_path, monkeypatch)
-    old.mkdir()
+    from job_apply_mcp.control.controls import RELEASE
+    s, old, new = _old_world(tmp_path)
     now = time.time()
     rows = [{"ts": round(now - 60 * i, 2), "a": "submit", "d": "pass", "ref": f"g:c:{i}", "plat": "greenhouse",
              "co": "c", "dry": False, "run": "r", "n": 1, "id": f"e{i}", "v": [], "w": []} for i in range(3)]
+    rows.append({"ts": round(now, 2), "a": RELEASE, "d": "release", "ref": "g:c:0", "plat": "greenhouse", "co": "c",
+                 "dry": False, "run": "r", "n": 1, "id": "e0", "v": [], "w": []})
     (old / "control_audit.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     a = ControlAgent(s)
-    assert a.audit_path.parent == state_path(s)
-    assert len([e for e in a.state.events if e.action == "submit"]) == 3
-    ControlAgent(s)._replay()                                            # idempotent: no double counting
-    assert len((state_path(s) / "control_audit.jsonl").read_text().splitlines()) == 3
+    assert a.audit_path.parent == state_path(s) == new
+    evs = [e for e in a.state.events if e.action == "submit"]
+    assert len(evs) == 3 and not [e for e in a.state.events if e.action == RELEASE]
 
 
-def test_migration_keeps_revoked_consent_revoked(tmp_path, monkeypatch):
+def test_planted_key_is_not_adopted(tmp_path, monkeypatch):
+    from job_apply_mcp.config import state_path
+    s, _old, _new = _old_world(tmp_path)
+    xdg = tmp_path / "xdgcfg"
+    (xdg / "job-apply-mcp").mkdir(parents=True)
+    (xdg / "job-apply-mcp" / "grant.key").write_text("ab" * 32)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    state_path(s)
+    assert not (paths.fixed_config_dir() / "grant.key").exists()
+
+
+def test_forged_consent_is_dropped_and_none_is_added(tmp_path):
+    import json
+
+    from job_apply_mcp.consent.store import ConsentStore
+    from job_apply_mcp.migrate import _merge_signed_rows
+    _s, old, new = _old_world(tmp_path)
+    key = b"k" * 32
+    nst = ConsentStore(new, secret=key, hwm_file=tmp_path / "h.json")
+    c = nst.issue_consent(3600, max_uses=2)
+    ost = ConsentStore(old, secret=key, hwm_file=tmp_path / "h.json")
+    legit = ost.issue_consent(7200)                                   # signed, but not in the new store
+    forged = {**json.loads(c.payload()), "expires": c.expires + 99999, "used": 0, "sig": "00" * 32}
+    ost._write_all([*ost._read_all(), forged])
+    before = nst._read_all()
+    _merge_signed_rows(ConsentStore, old, new, secret=key, hwm_file=tmp_path / "h.json")
+    after = ConsentStore(new, secret=key, hwm_file=tmp_path / "h.json")._read_all()
+    assert after == before and not any(r["id"] == legit.id for r in after)
+
+
+def test_revoked_consent_stays_revoked_through_migration(tmp_path):
     import shutil
 
     from job_apply_mcp.consent.store import ConsentStore
-    _s, old = _old_world(tmp_path, monkeypatch)
-    key = b"k" * 32
-    st_old = ConsentStore(old, secret=key)
-    c = st_old.issue_consent(3600)
-    newdir = paths.state_dir()
-    shutil.copytree(old, newdir)                                          # stale pre-revoke copy in the new place
-    st_new = ConsentStore(newdir, secret=key)
-    st_new.revoke(c.id)                                                   # tombstone, row gone
-    shutil.copytree(old, tmp_path / "restore")                            # old dir still holds the signed row
-    st_old2 = ConsentStore(old, secret=key)
-    assert any(r.get("id") == c.id for r in st_old2._read_all())
-    from job_apply_mcp import migrate
-    migrate._merge_signed_rows(ConsentStore, old, newdir, secret=key)
-    assert ConsentStore(newdir, secret=key).active() == []
-    assert not any(r.get("id") == c.id for r in ConsentStore(newdir, secret=key)._read_all())
+    from job_apply_mcp.migrate import _merge_signed_rows
+    _s, old, new = _old_world(tmp_path)
+    key, h = b"k" * 32, tmp_path / "h.json"
+    st = ConsentStore(new, secret=key, hwm_file=h)
+    c = st.issue_consent(3600)
+    shutil.copytree(new, old, dirs_exist_ok=True)                     # old copy still holds the signed row
+    st.revoke(c.id)
+    _merge_signed_rows(ConsentStore, old, new, secret=key, hwm_file=h)
+    assert ConsentStore(new, secret=key, hwm_file=h).active() == []
 
 
-def test_migration_consent_conflict_takes_earliest_expiry_and_most_uses(tmp_path):
+def test_consent_conflict_tightens_expiry_and_uses(tmp_path):
     import shutil
 
-    from job_apply_mcp import migrate
     from job_apply_mcp.consent.store import ConsentStore
-    key = b"k" * 32
+    from job_apply_mcp.migrate import _merge_signed_rows
+    key, h = b"k" * 32, tmp_path / "h.json"
     a, b = tmp_path / "a", tmp_path / "b"
-    sa = ConsentStore(a, secret=key, hwm_file=tmp_path / "h.json")
+    sa = ConsentStore(a, secret=key, hwm_file=h)
     c = sa.issue_consent(7200, max_uses=5)
     shutil.copytree(a, b)
-    sb = ConsentStore(b, secret=key, hwm_file=tmp_path / "h.json")
-    sb._resign(c, used=3, expires=c.expires - 3600)
-    migrate._merge_signed_rows(ConsentStore, b, a, secret=key, hwm_file=tmp_path / "h.json")
-    row = next(r for r in ConsentStore(a, secret=key)._read_all() if r["id"] == c.id)
+    ConsentStore(b, secret=key, hwm_file=h)._resign(c, used=3, expires=c.expires - 3600)
+    _merge_signed_rows(ConsentStore, b, a, secret=key, hwm_file=h)
+    row = next(r for r in ConsentStore(a, secret=key, hwm_file=h)._read_all() if r["id"] == c.id)
     assert row["used"] == 3 and row["expires"] == c.expires - 3600
-    ConsentStore(a, secret=key)._verify_row(row)                          # re-signed validly
+    ConsentStore(a, secret=key, hwm_file=h)._verify_row(row)
 
 
-def test_migration_failure_blocks_submit_and_doctor_says_why(tmp_path, monkeypatch):
-    import pytest
-
+def test_symlinked_and_env_derived_sources_are_ignored(tmp_path):
+    from job_apply_mcp import migrate
+    from job_apply_mcp.apply.approvals import ApprovalBook
     from job_apply_mcp.config import state_path
-    from job_apply_mcp.migrate import StateMigrationError
-    s, old = _old_world(tmp_path, monkeypatch)
-    old.mkdir()
-    (old / "approvals.db").write_bytes(b"this is not a sqlite database" * 50)
-    with pytest.raises(StateMigrationError):
-        state_path(s)
-    with pytest.raises(StateMigrationError):                              # stays failed: never silently starts empty
-        state_path(s)
-    chk = doctor._state_check(s)
-    assert chk.status == doctor.FAIL and "REFUSED" in chk.detail
+    s, old, new = _old_world(tmp_path)
+    old.rmdir()
+    real = tmp_path / "attacker"
+    real.mkdir()
+    b = ApprovalBook(real)
+    _sub(b, "g:a:5", "submitted")
+    b._db.close()
+    old.symlink_to(real, target_is_directory=True)                    # the default dir is a symlink: refused
+    env_dir = tmp_path / "envdata"
+    env_dir.mkdir()
+    b = ApprovalBook(env_dir)
+    _sub(b, "g:a:6", "submitted")
+    b._db.close()
+    s.paths.data_dir = str(env_dir)                                   # env/project-derived: ignored too
+    migrate._done.clear()
+    state_path(s)
+    nb = ApprovalBook(new)
+    assert nb.state("g:a:5") is None and nb.state("g:a:6") is None
 
 
-def test_migration_keeps_applications_deduped(tmp_path, monkeypatch):
+def test_migration_keeps_applications_deduped(tmp_path):
     import asyncio
 
     from job_apply_mcp.config import state_path
     from job_apply_mcp.store.sqlite import SqliteStore
-    s, old = _old_world(tmp_path, monkeypatch)
+    s, old, new = _old_world(tmp_path)
     old_store = SqliteStore(old)
     asyncio.run(old_store.record(type("R", (), {"ref": "greenhouse:acme:9", "company": "Acme", "title": "Engineer",
                                                 "status": "submitted", "via": "t", "confirmation": None,
-                                                "detail": ""})(),
-                                company="Acme", title="Engineer"))
+                                                "detail": ""})(), company="Acme", title="Engineer"))
     old_store.close()
-    new = state_path(s)
-    assert new != old and (new / "applications.db").is_file()
-    st = SqliteStore(new)
-    assert asyncio.run(st.seen("Acme", "Engineer", ref="greenhouse:acme:9"))
+    assert state_path(s) == new
+    assert asyncio.run(SqliteStore(new).seen("Acme", "Engineer", ref="greenhouse:acme:9"))
+
+
+def test_migration_failure_blocks_submit_and_doctor_says_why(tmp_path):
+    import pytest
+
+    from job_apply_mcp.config import state_path
+    from job_apply_mcp.migrate import StateMigrationError
+    s, old, _new = _old_world(tmp_path)
+    (old / "approvals.db").write_bytes(b"this is not a sqlite database" * 50)
+    with pytest.raises(StateMigrationError):
+        state_path(s)
+    with pytest.raises(StateMigrationError):                          # stays failed: never silently starts empty
+        state_path(s)
+    chk = doctor._state_check(s)
+    assert chk.status == doctor.FAIL and "REFUSED" in chk.detail

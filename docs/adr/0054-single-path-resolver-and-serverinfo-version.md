@@ -46,13 +46,15 @@ The trusted config and the security-state stores must not follow an environment 
 ## Amendment: migration and the dedupe store
 - `applications.db` (dedupe store and intake tables) joins the fixed state dir: a project file or env that sets
   `paths.data_dir` can no longer hide already-submitted postings.
-- `job_apply_mcp.migrate.ensure_state` runs the first time the state dir is resolved. It discovers old locations
-  read-only and never trusts them: the effective `paths.data_dir`, `paths.data_dir` named in any config file (fixed,
-  XDG, `JOB_APPLY_MCP_CONFIG`, project), the XDG-honouring data dir, the default dir, and the old XDG config dir
-  (for `grant.key` and high-water files). Missing state is copied, never moved or deleted; existing state is UNIONED.
-  Most restrictive wins: `confirmed > submitted > unknown > submitting > ... > planned` per ref; `used`/`denied`
-  approvals beat `pending`/`approved`; a posting that really went out wins in `applications`; the quota log is
-  merged by line (replay is by event id); consents/grants take the earliest expiry and highest use count (re-signed
-  with the install key); revoked ids are never revived.
+- `job_apply_mcp.migrate.ensure_state` runs the first time the state dir is resolved. A project file or the
+  environment can point a data dir anywhere, so an import may only TIGHTEN and only from TRUSTED sources: the old
+  default dir under the account home and `paths.data_dir` of the trusted user config. Each must be a real directory
+  owned by this user with no symlinked files; env- and project-derived dirs (including `XDG_DATA_HOME`) are ignored.
+  Imported: submissions with a blocking state (`submitting`, `unknown`, `submitted`, `confirmed`, ...; most
+  restrictive per ref), applications with a really-sent status, and quota-log lines except `submit_release`
+  (which gives quota back). Never imported: approvals of any status, `grant.key` (a missing fixed key stays
+  missing, so old grants fail closed), high-water files, and any new grant or consent. An existing grant/consent
+  is tightened (earliest expiry, most uses, re-signed) only from an old row whose HMAC verifies against the
+  fixed key; forged and revoked rows are dropped.
 - Any failure raises `StateMigrationError`: the stores refuse to open (no submit) and `doctor` reports `state_dir`
   FAIL with the reason. A marker file records merged sources so reruns are cheap.
