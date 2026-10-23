@@ -60,6 +60,7 @@ def cfg(tmp_path):
     s = Settings()
     s.paths.data_dir = str(tmp_path / "data")
     s.grants.use_keyring = False
+    s.verification.trusted_authserv_ids = ["mx.example.com"]
     return s
 
 
@@ -318,6 +319,7 @@ def esettings(tmp_path, mode="human"):
     s.paths.data_dir = str(tmp_path / "data")
     s.grants.use_keyring = False
     s.grants.otp_unattended_wait_s = 0
+    s.verification.trusted_authserv_ids = ["mx.example.com"]
     return s
 
 
@@ -688,14 +690,16 @@ async def test_forged_from_never_supplies_a_code(tmp_path, monkeypatch, auth):
 ])
 def test_authentication_results_parsing(hdr, ok):
     m = Message(f"a@{DOMAIN}", "s", None, "", auth_results=(hdr,))
-    assert cotp.authenticated(m, DOMAIN) is ok
+    assert cotp.authenticated(m, DOMAIN, ["mx.example.com"]) is ok
 
 
 def test_trusted_authserv_ids_pick_the_receiving_servers_header():
     forged_top = "attacker.example.net; dkim=pass header.d=" + DOMAIN
     m = Message(f"a@{DOMAIN}", "s", None, "", auth_results=(forged_top, "mx.example.com; dkim=fail header.d=x"))
-    assert cotp.authenticated(m, DOMAIN) is True                     # without ids: topmost header only
+    assert cotp.authenticated(m, DOMAIN) is False                    # empty list: nothing is trusted
     assert cotp.authenticated(m, DOMAIN, ["mx.example.com"]) is False
+    forged_as_ours = Message(f"a@{DOMAIN}", "s", None, "", auth_results=(f"mx.example.com; dkim=pass header.d={DOMAIN}",))
+    assert cotp.authenticated(forged_as_ours, DOMAIN, []) is False   # even a perfect-looking header
     good = Message(f"a@{DOMAIN}", "s", None, "", auth_results=("other; none", f"mx.example.com; dkim=pass header.d={DOMAIN}"))
     assert cotp.authenticated(good, DOMAIN, ["MX.example.com"]) is True
 
@@ -703,13 +707,13 @@ def test_trusted_authserv_ids_pick_the_receiving_servers_header():
 def test_client_supplied_messages_never_carry_authentication():
     m = Message.from_dict({"sender": f"a@{DOMAIN}", "subject": "code", "snippet": "123456",
                            "auth_results": [AR[0]], "Authentication-Results": AR[0]})
-    assert m.auth_results == () and not cotp.authenticated(m, DOMAIN)
+    assert m.auth_results == () and not cotp.authenticated(m, DOMAIN, ["mx.example.com"])
 
 
 def test_raw_mail_parses_authentication_results():
     from job_apply_mcp.ingest.sources import message_from_bytes
     m = message_from_bytes(_eml(f"a@{DOMAIN}", 1, "code 77778888"))
-    assert m.auth_results == AR and cotp.authenticated(m, DOMAIN)
+    assert m.auth_results == AR and cotp.authenticated(m, DOMAIN, ["mx.example.com"])
 
 
 def _write_user_config(text):
@@ -768,3 +772,37 @@ def test_mail_scope_alias_for_sibling_modules(cfg):
     assert consent.active(cfg, "mail") is not None and consent.use(cfg, "mail", "ref=x") is not None
     with pytest.raises(ValueError):
         consent.active(cfg, "mailbox")
+
+
+
+# ------------------------------------------------------------------ review round 3: no trusted authserv id -> off
+
+async def test_forged_header_with_empty_trusted_list_is_refused(tmp_path, monkeypatch):
+    s = esettings(tmp_path)
+    s.verification.trusted_authserv_ids = []
+    consent.store_for(s).issue_consent(600)
+    forged = (f"mx.example.com; dkim=pass header.d={DOMAIN}; dmarc=pass header.from={DOMAIN}",)
+    mail = Mail(_forged("Fq4Rg8Ht", forged))
+    monkeypatch.setattr("job_apply_mcp.ingest.sources.make_source", lambda *a, **k: mail)
+    drv = AutoCodeDriver("Fq4Rg8Ht")
+    e, book = engine(tmp_path, s, drv)
+    r = await _submit(e)
+    assert r.status == "awaiting_code" and r.pending_id == "pend1"          # held for the human path
+    assert "otp: needs_human" in r.detail and "trusted_authserv_ids" in r.detail
+    assert mail.fetches == 0 and drv.entered == [] and book.state(POSTING.ref)["state"] == "awaiting_code"
+    assert "Fq4Rg8Ht" not in json.dumps(r.model_dump())
+    res = await cotp.fetch_code(s, sender_domain=DOMAIN, clicked_at=datetime.now(UTC) - timedelta(seconds=30),
+                                source=mail)
+    assert res.status == "unauthenticated" and res.code is None
+
+
+def test_status_explains_how_to_enable_unattended_codes(cfg):
+    assert "otp_unattended" not in consent.status(cfg)
+    cfg.verification.trusted_authserv_ids = []
+    st = consent.status(cfg)
+    assert st["otp_unattended"].startswith("off:") and "trusted_authserv_ids" in st["otp_unattended"]
+
+
+def test_trusted_authserv_ids_cannot_come_from_a_project_file(tmp_path):
+    (tmp_path / "job-apply-mcp.toml").write_text('[verification]\ntrusted_authserv_ids = ["mx.example.com"]\n')
+    assert load_settings(tmp_path)._otp_mail_trusted is False

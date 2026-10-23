@@ -23,7 +23,8 @@ Supported versions: the latest release and `main`.
   minted a consent window with `otp_unattended` from an interactive terminal (ADR-0048); the code is never logged,
   stored or returned. A visible CAPTCHA challenge is always a human handoff, under every setting. Unattended codes are
   taken only from mail your server DKIM/DMARC-verified for the expected sender, with mail settings from the trusted
-  user config.
+  user config; your server's Authentication-Results id must be listed in `verification.trusted_authserv_ids`
+  (empty by default = unattended codes off).
 - Residual risk of grants and consent windows: the TTY check and typed phrase stop an agent acting through MCP, not a
   local process with shell access (it can allocate a pseudo-terminal, e.g. `script`, or read the file-fallback HMAC
   key when no OS keychain is available). Do not give agents an unrestricted shell as your OS user if you rely on

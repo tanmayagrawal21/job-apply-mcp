@@ -61,4 +61,10 @@ def end_run(settings: Any) -> list[str]:
 
 
 def status(settings: Any) -> dict[str, Any]:
-    return {"active": store_for(settings).status(), "scopes": sorted(CONSENT_SCOPES)}
+    out: dict[str, Any] = {"active": store_for(settings).status(), "scopes": sorted(CONSENT_SCOPES)}
+    if not any(i.strip() for i in settings.verification.trusted_authserv_ids):
+        from .otp import OTP_SETUP_HINT
+        out["otp_unattended"] = f"off: {OTP_SETUP_HINT}"
+    elif not getattr(settings, "_otp_mail_trusted", False):
+        out["otp_unattended"] = "off: mail settings must come from the trusted user config"
+    return out

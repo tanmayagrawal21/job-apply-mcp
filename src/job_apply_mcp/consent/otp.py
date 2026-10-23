@@ -1,6 +1,7 @@
 """otp_unattended (ADR-0048): fetch an emailed verification code with no human in the loop, inside a consent window.
 
-The newest message must be DKIM- or DMARC-verified for that domain by YOUR mail server (`Authentication-Results`),
+The newest message must be DKIM- or DMARC-verified for that domain by YOUR mail server: an `Authentication-Results`
+header whose authserv-id is in `verification.trusted_authserv_ids` (empty = unattended codes are off),
 else the flow stops (`unknown`); a forged From never supplies a code. The mail settings themselves must come from the
 trusted user config (`Settings._otp_mail_trusted`).
 
@@ -104,12 +105,17 @@ def parse_auth_results(header: str) -> tuple[str, list[tuple[str, str, dict[str,
 
 def authenticated(msg: Any, domain: str, trusted_ids: list[str] | tuple[str, ...] = ()) -> bool:
     """Did the RECEIVING server verify this mail for `domain`? Needs `dkim=pass` with header.d (or header.i) equal
-    to or under `domain`, or `dmarc=pass` with header.from equal to or under it. Only the topmost
-    Authentication-Results header counts (the one your server added; lower ones may come from the sender), or, when
-    `verification.trusted_authserv_ids` is set, only headers carrying one of those ids. Anything else: False."""
+    to or under `domain`, or `dmarc=pass` with header.from equal to or under it. ONLY headers whose authserv-id is
+    in `verification.trusted_authserv_ids` (your own mail server, set in the trusted user config) count, and of
+    those only the topmost; any sender can write an Authentication-Results header. Empty list, or anything else:
+    False (fail closed)."""
     headers = list(getattr(msg, "auth_results", ()) or ())
     ids = {i.strip().lower() for i in trusted_ids if i.strip()}
-    picked = [h for h in headers if parse_auth_results(h)[0] in ids] if ids else headers[:1]
+    if not ids:
+        return False
+    # The topmost header with a trusted id is the one your server added; anything below it predates your server
+    # (a sender can copy your id into a planted header, and not every server strips those).
+    picked = [h for h in headers if parse_auth_results(h)[0] in ids][:1]
     for h in picked:
         for method, result, props in parse_auth_results(h)[1]:
             if result != "pass":
@@ -120,6 +126,11 @@ def authenticated(msg: Any, domain: str, trusted_ids: list[str] | tuple[str, ...
             if method == "dmarc" and _under(props.get("header.from", ""), domain):
                 return True
     return False
+
+
+OTP_SETUP_HINT = ("unattended codes are off until you list your mail server's Authentication-Results id in the "
+                  "user config: [verification] trusted_authserv_ids = [\"mx.example.com\"] (the first token of the "
+                  "Authentication-Results header your server adds)")
 
 
 @dataclass

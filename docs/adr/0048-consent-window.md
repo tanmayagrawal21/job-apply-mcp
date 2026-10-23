@@ -90,6 +90,14 @@ unattended action covered right now?"
   not a local process with shell access that can allocate a pseudo-terminal, nor one that can read the file-fallback
   HMAC key. Same accepted risk as grants (ADR-0027/0037).
 
+## Review amendments (round 3, control agent; final)
+- **No trusted authserv id, no unattended code.** Any sender can write an `Authentication-Results` header, so a
+  header counts ONLY when its authserv-id is listed in `verification.trusted_authserv_ids`, and of those only the
+  topmost (the one your server added last). The list is empty by default and only the trusted user config may set
+  it (`_otp_mail_trusted`). With an empty list, otp_unattended does not read mail at all: the prompt stays
+  `awaiting_code` for the human / `otp_assist` path, its detail says `otp: needs_human` and how to configure the id,
+  and `consent_status` reports `otp_unattended: off: ...`. This supersedes the round-2 "topmost header" default.
+
 ## Consequences
 - An unattended run needs one terminal command per period; review happens afterwards (`list_applications`, the
   approvals audit `consent:<id>` actor, `consent_audit.jsonl`).

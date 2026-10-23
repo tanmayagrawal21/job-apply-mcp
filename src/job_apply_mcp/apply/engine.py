@@ -20,6 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..consent.otp import OTP_SETUP_HINT
 from ..control.builtin import _NOT_SENT
 from ..core.concurrency import bounded_gather
 from ..core.interfaces import BrowserDriver, PlatformAdapter, Store
@@ -1074,6 +1075,10 @@ class ApplyEngine:
         c = consent.use(self.s, "otp_unattended", f"ref={ref}")
         if c is None:
             return res
+        if not any(i.strip() for i in self.s.verification.trusted_authserv_ids):   # fail closed: human path
+            self.approvals.audit("code_unattended_off", ref=ref, actor=f"consent:{c.id}",
+                                 detail="verification.trusted_authserv_ids is empty")
+            return res.model_copy(update={"detail": f"{res.detail or ''}; otp: needs_human ({OTP_SETUP_HINT})"[:500]})
         drv = next((d for d in self._code_drivers() if d.pending_info(pid)), None)
         if drv is None:
             return res
