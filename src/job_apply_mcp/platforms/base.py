@@ -23,6 +23,11 @@ class NotSupported(AdapterError):
     pass
 
 
+class PostingClosed(AdapterError):
+    """The platform API says the posting is gone or closed (404 / unlisted / no posting). Reported as `skipped`
+    (closed), never as an owner action (ADR-0056)."""
+
+
 def iso_date(ms_or_str: Any) -> str | None:
     """Epoch milliseconds / ISO string -> 'YYYY-MM-DD' (None when unknown)."""
     if ms_or_str in (None, "", 0):

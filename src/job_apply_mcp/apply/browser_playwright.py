@@ -30,6 +30,7 @@ from ..config import Settings
 from ..core import registry
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
 from ..core.secrets import redact
+from .closed import CHALLENGE_REASON, challenge_label, closed_text
 from .geo import location_queries, pick_location
 from .mapper import (
     _DEMOGRAPHIC_LABEL,
@@ -425,6 +426,14 @@ _HYDRATED_JS = """() => { if (document.readyState !== 'complete') return false;
   const e = document.querySelector('form input:not([type=hidden]), form textarea, form select');
   return !!e && Object.keys(e).some(k => k.startsWith('__react')); }"""
 _CHOICE = "input[type=checkbox], input[type=radio]"
+# Ashby-style autocomplete (ADR-0056): input[role=combobox][aria-autocomplete] outside any react-select control; its
+# listbox floats elsewhere in the DOM and is named by aria-controls. Option texts / click are scoped to THAT listbox.
+_ARIA_COMBO_JS = """e => e.tagName === 'INPUT' && e.getAttribute('role') === 'combobox' && e.hasAttribute('aria-autocomplete')
+  && !e.closest('[class*=select__control]')"""
+_COMBO_LISTBOX = """const lb = (e => { const id = e.getAttribute('aria-controls') || e.getAttribute('aria-owns');
+    return id ? document.getElementById(id) : null; })(e);
+  const opts = lb ? [...lb.querySelectorAll('[role=option]')].filter(o => o.offsetWidth || o.offsetHeight || o.getClientRects().length) : [];"""
+_COMBO_OPTIONS_JS = "e => { " + _COMBO_LISTBOX + " return opts.map(o => (o.innerText || o.textContent || '').trim()); }"
 _IS_GROUP_JS = """e => !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.tagName)
   && !!e.querySelector('input[type=checkbox], input[type=radio]')"""
 # A choice group's members THAT BELONG TO THE FIELD (ADR-0039): when some member's name/id carries the field key, only
@@ -501,6 +510,19 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   const out = [], seen = new Set(), done = new Set();
   document.querySelectorAll('[data-jam-group]').forEach(x => x.removeAttribute('data-jam-group'));
   let gi = 0;
+  // LEVER (ADR-0056): Lever renders every required question with real markup (a `.required` ✱ inside the question's
+  // own .application-label, `required` on the input, or a .required-field wrapper), so the question container
+  // (.application-question) is the unit: its label is the GROUP label (never an option's text or a sentence beside
+  // it), and a choice group is required only when that markup or the API says so. Unmarked groups (pronouns,
+  // future-opportunity consent) and native selects (demographic survey) are optional. Fail closed: any marker -> required.
+  const LEVER = a.ats === 'lever';
+  const LQ = '.application-question';
+  const leverHead = q => q && q.querySelector('.application-label');
+  const leverText = h => { if (!h) return ''; const c = h.cloneNode(true);
+    c.querySelectorAll('.required, input, ul, select, textarea').forEach(x => x.remove()); return c.textContent; };
+  const leverReq = (q, members) => !!q && (members.some(m => m.required || m.getAttribute('aria-required') === 'true')
+    || !!q.querySelector('.application-label .required, .required-field, [data-qa*=required i]')
+    || /[*✱]/.test((leverHead(q) || {}).textContent || ''));
   // INVERTED RULE (ADR-0039): a visible choice group/set with NOTHING selected is a gap unless the API form marks
   // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
   const emit = (members, container, text, idCands, consent, headEl) => {
@@ -518,6 +540,21 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     out.push({id, label: (clean(text) || 'unlabelled choice set ' + id).slice(0, 80), text: clean(text).slice(0, 1500),
               rs: false, group: gid, kind: members[0].type, consent: !!consent, opts, exempt});
   };
+  if (LEVER) {
+    const qs = new Map();
+    for (const e of document.querySelectorAll(CH)) { const q = e.closest(LQ); if (!q || e.disabled) continue;
+      if (!qs.has(q)) qs.set(q, []); qs.get(q).push(e); }
+    for (const [q, members] of qs) {
+      members.forEach(m => done.add(m));
+      if (!members.some(m => vis(m) || vis(m.closest('label') || m.parentElement))) continue;
+      const names = members.flatMap(m => [m.name, m.id]);
+      if (!leverReq(q, members) && !apiRequired(names)) continue;          // no required markup: optional
+      const head = leverHead(q);
+      let text = leverText(head);
+      if (!clean(text) && members.length === 1) text = (members[0].closest('label') || {}).textContent || '';
+      emit(members, q, text, [members[0].name], false, head);
+    }
+  }
   for (const g of document.querySelectorAll(GS)) {
     const members = [...g.querySelectorAll(CH)].filter(m => m.closest(GS) === g && !m.disabled);
     if (!members.length || !vis(g)) continue;
@@ -581,15 +618,21 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
     const rs = e.getAttribute('role') === 'combobox' && e.closest('[class*=select__control]');
     if (!vis(e) && !rs) continue;
     const native = e.tagName === 'SELECT';
+    const lq = LEVER ? e.closest(LQ) : null;
+    const fpk = (e.closest('[data-field-path]') || {getAttribute: () => ''}).getAttribute('data-field-path');
+    const isReq = req(e) || (lq && leverReq(lq, [e])) || (!!fpk && REQK.has(fpk));
     // native selects follow the inverted rule too: empty -> gap unless the API marks the field required:false
-    if (!(native ? (req(e) || !apiOptional([e.id, e.name])) : req(e))) continue;
+    // (Lever: markup only, ADR-0056)
+    if (!(native && !LEVER ? (isReq || !apiOptional([e.id, e.name])) : isReq)) continue;
     let empty = false;
     if (rs) { const sh = e.closest('[class*=select__control]').parentElement;
       empty = !sh.querySelector('[class*=select__single-value], [class*=select__multi-value]'); }
     else if (native) empty = !e.value;
     else empty = !(e.value || '').trim();
     if (!empty) continue;
-    const lab = clean(labelOf(e)) || e.id; const sk = e.id || lab; if (seen.has(sk)) continue; seen.add(sk);
+    const fpl = fpk ? (e.closest('[data-field-path]').querySelector('label') || {}).textContent : '';
+    const lab = clean(lq ? leverText(leverHead(lq)) : '') || clean(labelOf(e)) || clean(fpl) || fpk || e.id;
+    const sk = e.id || lab; if (seen.has(sk)) continue; seen.add(sk);
     out.push({id: e.id || '', label: lab.slice(0, 80), rs: !!rs,
               exempt: native && !req(e) && !apiRequired([e.id, e.name]) && CONSENT.test(lab)});
   }
@@ -674,6 +717,7 @@ class PlaywrightDriver(VerificationMixin):
         self._tasks: dict[int, list[asyncio.Task]] = {}
         self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
         self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
+        self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
 
     # -- lifecycle ------------------------------------------------------------------------------
     async def _context(self):
@@ -731,6 +775,8 @@ class PlaywrightDriver(VerificationMixin):
         finally:
             self._api_keys.pop(id(page), None)
             self._exempt.pop(id(page), None)
+            for k in [k for k in self._combo if k[0] == id(page)]:
+                self._combo.pop(k, None)
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
@@ -745,9 +791,17 @@ class PlaywrightDriver(VerificationMixin):
             await page.wait_for_selector("form input, form textarea, form select, input[type=file]", state="attached",
                                          timeout=self.b.timeout_s * 1000)
         except Exception:
+            try:
+                body = await page.locator("body").inner_text()
+            except Exception:
+                body = ""
+            if (m := closed_text(body)):                # ADR-0056: a closed posting is skipped, not an owner action
+                return SubmitResult(ref=ref, status="skipped", via="browser", detail=f"closed: page says '{m}'")
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail="form did not render")
         await self._await_hydration(page)
         scope = await self._form_text(page)
+        if (m := closed_text(scope)):
+            return SubmitResult(ref=ref, status="skipped", via="browser", detail=f"closed: page says '{m}'")
         blk = detect_blocker(scope)
         creds = consent.active(self.s, "credentials")       # ADR-0046: without consent, behavior is unchanged
         if creds and (blk == "login" or (blk is None and await self._password_visible(page))):
@@ -767,12 +821,16 @@ class PlaywrightDriver(VerificationMixin):
                 blk = "login"
         if blk in ("captcha", "verification", "login"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} before filling")
+        if challenge_label(scope):                      # comprehension check: never answered (ADR-0056)
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=CHALLENGE_REASON.format(labels="on the page"))
         if (hit := stop_phrase_hit(scope, self.s.policy.stop_phrases)):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"attestation: '{hit}'")
 
         self._api_keys[id(page)] = {"req": [f.key for f in form.fields if f.required and f.kind != FieldKind.file],
                                     "opt": [f.key for f in form.fields if not f.required],
-                                    "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases)}
+                                    "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases),
+                                    "ats": ats.name}
         steps = fill_order(form, answers, files)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
@@ -1120,6 +1178,8 @@ class PlaywrightDriver(VerificationMixin):
         fp = f'[data-field-path="{key}"]'
         own = (f'label[for="{key}"], input[name="{key}"], input[name$="_{key}"], input[id*="_{key}-labeled-"]')
         cands += [page.locator(f"{fp} :is(fieldset, [role=radiogroup], [role=group]):has({own})")]
+        # Ashby location / autocomplete: an id-less input[role=combobox] inside the field entry (ADR-0056)
+        cands += [page.locator(f"{fp} input[role=combobox][aria-autocomplete]")]
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
         cands.append(page.get_by_label(re.compile(rf"^\s*{re.escape(label)}\s*\*?\s*$", re.IGNORECASE)))
         cands.append(page.get_by_label(re.compile(re.escape(label), re.IGNORECASE)))
@@ -1203,6 +1263,8 @@ class PlaywrightDriver(VerificationMixin):
             return False
         if await self._is_group(loc):            # checkbox / radio group (Greenhouse multi_value_*, Ashby fieldsets)
             return await self._check_in_group(loc, value, f)
+        if await self._is_aria_combo(loc):       # Ashby location autocomplete (ADR-0056)
+            return await self._combo_commit(page, f, loc, value)
         marked = False
         try:
             marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
@@ -1258,6 +1320,82 @@ class PlaywrightDriver(VerificationMixin):
         if not committed:
             await self._close_menu(page)
         return committed
+
+    @staticmethod
+    async def _is_aria_combo(loc) -> bool:
+        """An ARIA autocomplete combobox that is NOT a react-select (Ashby's location field): the committed value is
+        the input's own text, and the listbox is a floating element named by aria-controls."""
+        try:
+            return bool(loc is not None and await loc.evaluate(_ARIA_COMBO_JS))
+        except Exception:
+            return False
+
+    async def _combo_options(self, page, loc, deadline: float) -> list[str]:
+        """Wait (bounded) until THIS combobox's listbox shows options and their texts stop changing (the list is
+        fetched per keystroke; an early read can be a stale result). [] when nothing showed in time."""
+        last: list[str] | None = None
+        while time.monotonic() < deadline:
+            try:
+                texts = list(await loc.evaluate(_COMBO_OPTIONS_JS))
+            except Exception:
+                texts = []
+            if texts and texts == last:
+                return texts
+            last = texts
+            await asyncio.sleep(0.25)
+        return last or []
+
+    async def _combo_commit(self, page, f: FormField, loc, value: str) -> bool:
+        """Type, wait for the listbox, click the best option for `value` (location: the city + region/country the
+        answer names, via pick_location; other fields: exact/best option), then verify the input SHOWS the committed
+        option and the list closed. Bounded by browser.combobox_commit_s (<= 20 s). FAIL CLOSED: no acceptable
+        option or no commit -> the typed text is cleared (an uncommitted value is never left behind) and False."""
+        k = (id(page), f.key)
+        if k in self._combo and self._combo[k] is None:      # already failed on this page: do not burn the budget twice
+            return False
+        deadline = time.monotonic() + min(20.0, float(self.b.combobox_commit_s))
+        geo = f.kind == FieldKind.location
+        for q in (location_queries(value) if geo else [value]):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                await loc.click(timeout=3000)
+                await loc.press("ControlOrMeta+a")
+                await loc.press("Backspace")
+                await loc.press_sequentially(q, delay=15)
+            except Exception:
+                break
+            texts = await self._combo_options(page, loc, min(deadline, time.monotonic() + 6.0))
+            if not texts:
+                continue
+            pick = pick_location(value, texts) if geo else (exact_choice(value, texts) or best_option(value, texts))
+            if pick is None:
+                continue
+            try:                                            # a real click on the option itself (never Enter)
+                lb = await loc.get_attribute("aria-controls") or await loc.get_attribute("aria-owns")
+                if not lb:
+                    continue
+                await page.locator(f'[id="{lb}"]').locator("[role=option]:visible").nth(texts.index(pick)) \
+                    .click(timeout=3000)
+            except Exception:
+                continue
+            while time.monotonic() < deadline:
+                try:
+                    st = await loc.evaluate("e => [e.value || '', e.getAttribute('aria-expanded') || '']")
+                except Exception:
+                    break
+                if normalize(st[0]) == normalize(pick) and st[1] != "true":
+                    self._combo[k] = pick
+                    return True
+                await asyncio.sleep(0.2)
+        self._combo[k] = None
+        try:                                                # fail closed: never leave uncommitted text behind
+            await loc.press("ControlOrMeta+a")
+            await loc.press("Backspace")
+        except Exception:
+            pass
+        await self._close_menu(page)
+        return False
 
     @staticmethod
     async def _geo_pick(page, loc, opts, value: str) -> str | None:
@@ -1748,6 +1886,15 @@ class PlaywrightDriver(VerificationMixin):
                 continue
             if f.kind == FieldKind.location:
                 loc = await self._locate(page, f)
+                if await self._is_aria_combo(loc):      # committed option text, exactly (ADR-0056)
+                    pick = self._combo.get((id(page), f.key))
+                    try:
+                        got = normalize(await loc.input_value())
+                    except Exception:
+                        got = ""
+                    if not pick or got != normalize(pick):
+                        bad.append(f.key)
+                    continue
                 try:
                     got = normalize(await loc.input_value()) if loc is not None else ""
                 except Exception:
