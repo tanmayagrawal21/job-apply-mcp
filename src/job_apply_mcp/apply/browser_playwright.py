@@ -197,8 +197,16 @@ _CAPTCHA_MARKER = re.compile(r"arkose|funcaptcha|geetest|datadome|perimeterx|hum
                              r"captcha|turnstile|cf-chl", re.IGNORECASE)
 
 
-def _marker_passive(tok: str, attrs: dict[str, str]) -> bool:
+_SCRIPT_UNKNOWN_VENDOR = re.compile(r"arkose|funcaptcha|geetest|datadome|perimeterx|humansecurity|kasada|awswaf|aws-waf",
+                                    re.IGNORECASE)
+
+
+def _marker_passive(tok: str, attrs: dict[str, str], node_name: str = "") -> bool:
     t = tok.lower()
+    # A marker on a <script> element is a loader (e.g. Ashby's <script id="recaptchaScript">), not a widget: passive
+    # per ADR-0036 (script-only reCAPTCHA). Unknown vendors stay unsafe; widgets/frames are judged separately.
+    if node_name.upper() == "SCRIPT":
+        return not _SCRIPT_UNKNOWN_VENDOR.search(tok)
     if t.startswith(("grecaptcha-badge", "grecaptcha-logo", "grecaptcha-error", "g-recaptcha-response",
                      "h-captcha-response", "cf-turnstile-response")):
         return True
@@ -1109,7 +1117,7 @@ class PlaywrightDriver(VerificationMixin):
                 attrs = dict(zip(at[0::2], at[1::2]))
                 toks = (attrs.get("class", "").split() + [attrs.get("id", "")])
                 for t in toks:
-                    if t and _CAPTCHA_MARKER.search(t) and not _marker_passive(t, attrs):
+                    if t and _CAPTCHA_MARKER.search(t) and not _marker_passive(t, attrs, n.get("nodeName", "")):
                         found.append(t[:40])
                 vendor_iframe = n.get("nodeName", "").lower() == "iframe" and _CAPTCHA_FRAME_URL.search(
                     attrs.get("src", "") + " " + attrs.get("name", ""))
