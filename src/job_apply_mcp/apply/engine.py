@@ -1248,9 +1248,12 @@ class ApplyEngine:
                 demo["demographic:gender"] = g
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
+            # DOM-only context for the driver (ADR-0039): phone-widget country, opt-in privacy-notice acknowledgement.
+            dom = {"contact:country": self.profile.lookup("country") or "",
+                   "pref:acknowledge_privacy_notices": self.profile.lookup("acknowledge_privacy_notices") is True}
             async with self._browser_sem:
                 ctx.meta["dispatched"] = True
-                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu}, files, dry_run=dry)
+                last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu, **dom}, files, dry_run=dry)
             if not (last.status == "needs_human" and (last.detail or "").startswith("unsupported_site")):
                 return last
         return last or SubmitResult(ref=ctx.form.ref, status="needs_human",
