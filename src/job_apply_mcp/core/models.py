@@ -82,6 +82,8 @@ class Answer(BaseModel):
     value: Any
     source: str  # "profile" | "rule" | "llm:<model>" | "client"
     confidence: float = 1.0
+    assumed: bool = False           # ADR-0052: an autonomy-level assumption, not a profile fact or owner answer
+    rationale: str | None = None    # ADR-0052: the rule or the model's short reason (never a secret)
 
 
 class ApplicationPlan(BaseModel):

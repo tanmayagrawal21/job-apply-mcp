@@ -552,12 +552,29 @@ class PersonaCfg(BaseModel):
     min_hits: int = 1                 # a gap must have been seen on this many applications to be asked
 
 
+AUTONOMY_LEVELS = ("strict", "safe_default", "infer")
+
+
+class AnswersCfg(BaseModel):
+    """How much the agent may assume when the owner is not available (ADR-0052). Only the trusted user config may
+    make it more permissive; a project file or JOB_APPLY__* can only make it stricter."""
+    # strict: unresolved fields go to the owner (the behaviour before ADR-0052).
+    # safe_default: a deterministic SAFE answer where one exists (decline contact/marketing permission, the
+    #   configured "how did you hear" default, decline to self-identify); everything else stays unresolved.
+    # infer: safe_default plus ordinary capability/experience choice questions answered conservatively by the LLM.
+    autonomy: Literal["strict", "safe_default", "infer"] = "strict"
+    promote_after: int = Field(default=3, ge=1)     # assumptions of one question kind before the owner is asked
+    infer_min_confidence: float = Field(default=0.8, ge=0.0, le=1.0)   # an affirmative inferred answer needs this
+    referral_default: str = ""     # "how did you hear" default; "" = the first apply.referral_preference entry
+
+
 class Settings(BaseModel):
     # ADR-0048: False when the mail settings otp_unattended relies on (sender domains, mail source, IMAP server,
     # trusted authserv ids) came from anything but the trusted user config. Fail closed: False until load_settings
     # has verified them; programmatic Settings must opt in explicitly.
     _otp_mail_trusted: bool = PrivateAttr(default=False)
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
+    answers: AnswersCfg = Field(default_factory=AnswersCfg)
     search: SearchCfg = Field(default_factory=SearchCfg)
     dedupe: DedupeCfg = Field(default_factory=DedupeCfg)
     improve: ImproveCfg = Field(default_factory=ImproveCfg)
@@ -653,6 +670,11 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
     ("accounts", "auto_create"): _bool_on,                                                        # ADR-0046
     ("accounts", "max_login_attempts"): _raises,
+    # ADR-0052: autonomy may only get stricter outside the trusted user config
+    ("answers", "autonomy"): lambda new, base: AUTONOMY_LEVELS.index(new) > AUTONOMY_LEVELS.index(base),
+    ("answers", "promote_after"): _raises,
+    ("answers", "infer_min_confidence"): lambda new, base: new < base,
+    ("answers", "referral_default"): lambda new, base: new != base,
 }
 # Whose mail feeds automatic applications (ADR-0045): identity keys, so ANY change from the trusted baseline counts as
 # relaxing. Only the trusted user config may set them; a project file or JOB_APPLY__* cannot point "self" elsewhere.
