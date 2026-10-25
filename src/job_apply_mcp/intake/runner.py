@@ -406,7 +406,7 @@ class IntakeRunner:
         by_host: OrderedDict[str, list[Cand]] = OrderedDict()
         for c in todo:
             by_host.setdefault(self._host(c), []).append(c)
-        human = not dry and self.s.browser.final_click == "human"     # ADR-0057: one tab at a time, a person clicks
+        human = not dry and self.s.browser.final_click == "human"     # ADR-0058: one tab at a time, a person clicks
         sem = asyncio.Semaphore(1 if human else self.s.intake.submit_parallel)
         manual = not dry and not self.s.apply.auto_approve_active
 

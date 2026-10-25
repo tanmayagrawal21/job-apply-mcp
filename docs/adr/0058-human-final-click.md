@@ -1,4 +1,4 @@
-# ADR-0057: The person makes the final click (`browser.final_click = "human"`)
+# ADR-0058: The person makes the final click (`browser.final_click = "human"`)
 
 Status: accepted · Date: 2026-10-25 · Amends ADR-0012, ADR-0036, ADR-0045
 

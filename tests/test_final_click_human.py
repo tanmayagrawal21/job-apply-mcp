@@ -1,4 +1,4 @@
-"""browser.final_click = "human" (ADR-0057): the agent fills and verifies, a person clicks Submit. Fakes only."""
+"""browser.final_click = "human" (ADR-0058): the agent fills and verifies, a person clicks Submit. Fakes only."""
 import asyncio
 import types
 

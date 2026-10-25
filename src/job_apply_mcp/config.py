@@ -344,7 +344,7 @@ class BrowserCfg(BaseModel):
     evidence_body_chars: int = 500      # cap on each saved submit-response body
     captcha_handoff: bool = True        # captcha-protected pages (always Ashby): never click submit; human does (ADR-0012). Tests only: False
     captcha_policy: Literal["handoff", "attempt"] = "handoff"  # attempt: click Submit once if only an invisible widget (no visible challenge); trusted user config only (ADR-0036)
-    final_click: Literal["agent", "human"] = "agent"   # human: fill + verify, a person clicks Submit in the open tab (ADR-0057); tighten-only
+    final_click: Literal["agent", "human"] = "agent"   # human: fill + verify, a person clicks Submit in the open tab (ADR-0058); tighten-only
     human_click_timeout_s: float = 900.0  # final_click=human: how long the confirmation watcher waits for the click
     human_click_poll_s: float = 3.0       # final_click=human: watcher poll interval (never clicks, types or retries)
     presubmit_validation: bool = True   # read back fields + check visible validation errors before the submit click
@@ -685,7 +685,7 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("grants", "consent_per_run_max_s"): _raises,
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
-    # ADR-0057: "human" only tightens (any layer may set it); going back to "agent" from a trusted "human" relaxes
+    # ADR-0058: "human" only tightens (any layer may set it); going back to "agent" from a trusted "human" relaxes
     ("browser", "final_click"): lambda new, base: new == "agent" and base != "agent",
     ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
     ("accounts", "auto_create"): _bool_on,                                                        # ADR-0046

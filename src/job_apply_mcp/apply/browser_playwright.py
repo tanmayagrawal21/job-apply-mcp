@@ -776,7 +776,7 @@ class PlaywrightDriver(VerificationMixin):
         self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
         self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
         self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
-        # final_click="human" (ADR-0057): ref -> background confirmation watcher; the engine sets the callback
+        # final_click="human" (ADR-0058): ref -> background confirmation watcher; the engine sets the callback
         self._watchers: dict[str, asyncio.Task] = {}
         self.on_human_confirmed: Callable[[SubmitResult], Awaitable[Any]] | None = None
 
@@ -957,7 +957,7 @@ class PlaywrightDriver(VerificationMixin):
                 return SubmitResult(ref=ref, status="needs_human", via="browser",
                                     detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
         if not dry_run and self.b.final_click == "human":
-            return await self._human_handoff(page, ats, ref)       # ADR-0057: never clicks
+            return await self._human_handoff(page, ats, ref)       # ADR-0058: never clicks
         attempt = False
         if not dry_run and self.b.captcha_handoff:
             state = await self._captcha_state(page)
@@ -984,7 +984,7 @@ class PlaywrightDriver(VerificationMixin):
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
         return await self._submit(page, ats, ref, attempt=attempt)
 
-    # -- final_click="human" (ADR-0057) ----------------------------------------------------------
+    # -- final_click="human" (ADR-0058) ----------------------------------------------------------
     async def _human_handoff(self, page, ats: AtsProfile, ref: str) -> SubmitResult:
         """The form is filled and verified: keep the tab, bring it to the front, and let the person click Submit.
         This path NEVER clicks. A background watcher reports the outcome (see _watch_human_click)."""

@@ -500,7 +500,7 @@ async def test_recaptcha_loader_does_not_excuse_other_markers(drv, extra):
 
 
 async def test_final_click_human_never_submits(drv, resume):
-    drv.b.final_click = "human"                            # ADR-0057; headless here -> needs_human, nothing sent
+    drv.b.final_click = "human"                            # ADR-0058; headless here -> needs_human, nothing sent
     srv = Srv(page(), GOOD)
     res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:fc"}), ANS, resume,
                                     dry_run=False)
