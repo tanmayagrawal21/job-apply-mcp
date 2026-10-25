@@ -301,7 +301,24 @@ class ApplyEngine:
                 self._drivers[name] = self._driver_factory(name)
             except (ComponentMissing, KeyError):
                 self._drivers[name] = None
+            d = self._drivers[name]
+            if d is not None and hasattr(d, "on_human_confirmed"):     # final_click=human watcher (ADR-0057)
+                d.on_human_confirmed = self._human_confirmed
         return self._drivers[name]
+
+    async def _human_confirmed(self, res: SubmitResult) -> None:
+        """The person clicked Submit in a handed-off tab and the page shows the ATS's success confirmation
+        (ADR-0057): record it through the normal state machine (same path as a code-step result)."""
+        self.approvals.audit("human_click_confirmed", ref=res.ref, actor="watcher", detail=(res.detail or "")[:200])
+        await self._apply_code_result(res)
+
+    async def await_human_click(self, ref: str) -> SubmitResult | None:
+        """Wait for the final_click=human watcher of `ref` (None: no watcher, timeout or tab closed)."""
+        for d in list(self._drivers.values()):
+            w = getattr(d, "wait_human_click", None)
+            if w is not None and ref in getattr(d, "_watchers", {}):
+                return await w(ref)
+        return None
 
     def _lock(self, company: str) -> asyncio.Lock:
         own = getattr(self.store, "company_lock", None)

@@ -137,6 +137,16 @@ rolling 24 h), per-platform (10) and per-run (10) limits; a user config can lowe
    to a single, plain permission question. Otherwise they stay with you, or are declined (labelled `assumed`) at
    `answers.autonomy = "safe_default"` or `"infer"` (item 5). Authorization and sponsorship come only from
    structured per-country facts.
+10. **You make the final click (optional, ADR-0057).** Set `[browser] final_click = "human"` with
+   `headless = false`. The agent fills and verifies each form, brings the tab to the front, and never clicks
+   Submit. You click. A watcher reads the page every 3 s, for up to `human_click_timeout_s` (900 s by default), and
+   records the submission once the site shows its success page. `run_applications` then hands you one filled tab at
+   a time. The setting only tightens: any config layer can set `human`, and only your own user config can switch
+   it back to `agent`.
+
+**Known limitation: Ashby with reCAPTCHA Enterprise.** Ashby forms protected by reCAPTCHA Enterprise silently
+reject or challenge automated submit clicks, even when the widget is invisible. Use `final_click = "human"` for
+these postings.
 
 ## Transports
 

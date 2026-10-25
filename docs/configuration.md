@@ -217,6 +217,9 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `evidence_body_chars` | `int` | `500` | cap on each saved submit-response body |
 | `captcha_handoff` | `bool` | `true` | captcha-protected pages (always Ashby): never click submit; human does (ADR-0012). Tests only: False |
 | `captcha_policy` | `Literal['handoff', 'attempt']` | `"handoff"` | attempt: click Submit once if only an invisible widget (no visible challenge); trusted user config only (ADR-0036) |
+| `final_click` | `Literal['agent', 'human']` | `"agent"` | human: fill + verify, a person clicks Submit in the open tab (ADR-0057); tighten-only |
+| `human_click_timeout_s` | `float` | `900.0` | final_click=human: how long the confirmation watcher waits for the click |
+| `human_click_poll_s` | `float` | `3.0` | final_click=human: watcher poll interval (never clicks, types or retries) |
 | `presubmit_validation` | `bool` | `true` | read back fields + check visible validation errors before the submit click |
 | `agent_max_steps` | `int` | `40` |  |
 | `agent_tier` | `str` | `"medium"` | llm tier whose model drives the generic agent |
