@@ -214,3 +214,48 @@ def test_run_report_counts_tool_gaps():
     rep = IntakeRunner._build("run-1", rows, 10)
     assert rep["handoff_categories"] == {"tool_gap": 2, "unknown_fact": 1, "hard_limit": 1}
     assert [r["cat"] for r in rep["needs_human"]] == ["tool_gap", "tool_gap", "unknown_fact", "hard_limit"]
+
+
+# ---- next_action respects the category (ADR-0059 x ADR-0067) -------------------------------------------------
+
+def test_tool_gap_in_window_never_asks_the_user(tmp_path, monkeypatch):
+    from job_apply_mcp.core import next_steps
+    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    svc = Services(s, engine=types.SimpleNamespace())
+    row = svc._submit_row(SubmitResult(ref="r", status="needs_human", detail="could not fill/verify: ['q']"))
+    assert row["cat"] == "tool_gap" and row["next_action"] == "retry_via_tool"
+    assert row["next_action"] not in next_steps.HUMAN_ACTIONS
+    row = svc._submit_row(SubmitResult(ref="r", status="unknown", detail="no confirmation detected"))
+    assert row["next_action"] == "reconcile" and "never resubmit" in row["hint"]
+    row = svc._submit_row(SubmitResult(ref="r", status="needs_human", detail="attestation: 'I certify'"))
+    assert row["cat"] == "hard_limit" and row["next_action"] == "ask_user"      # hard limits still go to the user
+
+
+def test_tool_gap_outside_window_keeps_the_normal_guidance(tmp_path):
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    svc = Services(s, engine=types.SimpleNamespace())
+    row = svc._submit_row(SubmitResult(ref="r", status="needs_human", detail="could not fill/verify: ['q']"))
+    assert row["cat"] == "tool_gap" and row["next_action"] == "ask_user"
+
+
+def test_unknown_state_guidance_comes_from_the_state(tmp_path):
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    svc = Services(s, engine=types.SimpleNamespace())
+    row = svc._submit_row(SubmitResult(ref="r", status="error", detail="TimeoutError: page closed"),
+                          {"state": "unknown"})
+    assert row["next_action"] == "verify_with_user" and "never resubmit" in row["hint"]
+
+
+def test_degraded_hint_depends_on_dispatch():
+    from job_apply_mcp.apply.ports import ComponentMissing
+    from job_apply_mcp.core import output
+    e = ComponentMissing("reviewer missing")
+    assert "nothing was submitted" in output.degraded(e)["hint"]
+    e.dispatched = True
+    d = output.degraded(e)
+    assert "never resubmit" in d["hint"] and "nothing was submitted" not in d["hint"]
+    assert d["next_action"] == "verify_with_user"

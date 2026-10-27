@@ -37,7 +37,18 @@ hard limit or a genuinely unknown fact, and tool gaps must be counted so they ca
   `tool_gap` hint inside a consent window says not to hand it to the user. Run reports tag each row with `cat`
   and add `handoff_categories` counts.
 
+- **Guidance uses the category (amends ADR-0059).** `with_guide(row, cat=, window=, state=)`: inside an active
+  consent window, a `tool_gap` never gets a next_action from `HUMAN_ACTIONS`. It gets `retry_via_tool`, or
+  `reconcile` (run `ingest_confirmations`, never resubmit) when the outcome is unknown. The submission state
+  (`submitting`/`unknown`/`handoff`/`awaiting_code`) overrides an `error` status in the guidance, so an unclear
+  outcome is never "retry once". Plan, submit and batch rows all go through the same `Services._guided`.
+- **#101 review items.** `degraded()` says "nothing was submitted" only when the failure came before dispatch.
+  The engine marks the exception with `dispatched`; after dispatch the hint says never resubmit. The resume
+  fallback (amends ADR-0061) uses a same-named copy in `<data_dir>/documents` only when the configured file
+  exists but the OS denies access, AND the copy's SHA-256 matches the hash recorded the last time the
+  configured file was readable (`documents/.resume_hashes.json`). A missing configured resume, or an
+  unverifiable copy, fails with an actionable fix. An older copy is never uploaded silently.
+
 ## Consequences
 Tabs can pile up only with filled work the person still has to finish. The `tool_gap` count becomes the metric
-for automation coverage. The `next_action` hints from ADR-0059 (PR #101) should take `cat` into account once
-both are on main.
+for automation coverage. 

@@ -18,6 +18,7 @@ from .config import Settings, state_path
 from .core.concurrency import HostLimiter, bounded_gather
 from .core.interfaces import PlatformAdapter
 from .core.models import Posting
+from .core.next_steps import plan_status, with_guide
 from .platforms import AdapterError, HttpClient, build_adapters, detect
 from .platforms.textflags import grad_window_conflict, years_required
 from .search.sessions import Session, SessionError, SessionStore, parse_cursor
@@ -397,6 +398,8 @@ class Services:
 
     async def get_form(self, ref_or_url: str) -> dict[str, Any]:
         from .apply.closed import challenge_label, closed_reason
+        from .apply.engine import OPTIONS_MAX
+        from .core.output import full_label
         from .platforms import PostingClosed
         a = self.resolve(ref_or_url)
         try:
@@ -405,11 +408,11 @@ class Services:
             return {"ref": ref_or_url, "status": "skipped", "closed": f"closed: {e}"}
         rows = []
         for x in f.fields:
-            r: dict[str, Any] = {"k": x.key, "l": x.label[:80], "t": x.kind.value}
+            r: dict[str, Any] = {"k": x.key, "l": full_label(x.label), "t": x.kind.value}   # ADR-0061
             if x.required:
                 r["r"] = 1
             if x.options:
-                r["o"] = x.options[:12]
+                r["o"] = list(x.options[:OPTIONS_MAX])
             rows.append(r)
         out: dict[str, Any] = {"ref": f.ref, "via": f.submit_via, "fields": rows}
         if (why := closed_reason(labels=[x.label for x in f.fields])):      # ADR-0056
@@ -438,6 +441,8 @@ class Services:
         else:
             out = await (self.engine.plan(ref) if kind == "plan" else self.engine.draft(ref))
             full = out.compact()
+            st = plan_status(full)                   # next-step guidance for any client (ADR-0059)
+            full = self._guided({**full, "status": st})   # category + guidance (ADR-0059, ADR-0067)
             pages[(kind, ref)] = full
             pages.move_to_end((kind, ref))
             while len(pages) > 32:
@@ -445,8 +450,18 @@ class Services:
         return page_sections(full, cursor, self.settings.response_budget_chars)
 
     async def submit(self, ref_or_url: str, answers: dict[str, Any], dry_run: bool | None,
-                     approval_id: str | None = None, approver: Any = None) -> dict[str, Any]:
-        r = await self.engine.submit(ref_or_url, answers, approval_id, dry_run, approver)
+                     approval_id: str | None = None, approver: Any = None,
+                     final_click: str | None = None) -> dict[str, Any]:
+        from .apply.ports import FINAL_CLICK
+        fc = (final_click or "").strip().lower()
+        if fc not in ("", "agent", "human"):
+            raise ValueError(f"final_click must be 'human' or 'agent' (got {final_click!r})")
+        # TIGHTEN-ONLY (ADR-0060): a call may ask for "human"; "agent" never overrides a configured "human"
+        tok = FINAL_CLICK.set("human" if fc == "human" else None)
+        try:
+            r = await self.engine.submit(ref_or_url, answers, approval_id, dry_run, approver)
+        finally:
+            FINAL_CLICK.reset(tok)
         st = self.engine.approvals.state(ref_or_url)
         return self._submit_row(r, st, self.engine.timings.get(ref_or_url))
 
@@ -454,13 +469,19 @@ class Services:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
                "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t,
                "client_tasks": getattr(r, "client_tasks", None), "unresolved": getattr(r, "unresolved", None)}
-        from .core.handoff import categorize, category_hint, in_window
-        cfg = getattr(self, "settings", None)
-        if (cat := categorize(r.status, r.detail, cfg)):          # ADR-0067
-            row["cat"], row["cat_hint"] = cat, category_hint(cat, in_window(cfg))
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
-        return {k: v for k, v in row.items() if v}
+        return self._guided({k: v for k, v in row.items() if v}, state=st["state"] if st else None)
+
+    def _guided(self, row: dict[str, Any], state: str | None = None) -> dict[str, Any]:
+        """Category (ADR-0067) + next-step guidance (ADR-0059) for one status row."""
+        from .core.handoff import categorize, category_hint, in_window
+        cfg = getattr(self, "settings", None)
+        cat = categorize(row.get("status"), row.get("detail") or row.get("why"), cfg)
+        win = in_window(cfg) if cat else False
+        if cat:
+            row = {**row, "cat": cat, "cat_hint": category_hint(cat, win)}
+        return with_guide(row, cat=cat, window=win, state=state)
 
     async def provide_verification_code(self, pending_id: str, code: str) -> dict[str, Any]:
         r = await self.engine.provide_verification_code(pending_id, code)
@@ -471,7 +492,8 @@ class Services:
         return await self.engine.resolve_submission(ref, outcome, note, actor, evidence)
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        out: dict[str, Any] = {"results": await self.engine.apply_batch(refs, dry_run, max_parallel)}
+        out: dict[str, Any] = {"results": [self._guided(r) if isinstance(r, dict) else r
+                                           for r in await self.engine.apply_batch(refs, dry_run, max_parallel)]}
         from .accounts.runtime import RUN_REPORT  # ADR-0046: login flags for this run (never secrets)
         if flags := RUN_REPORT.compact():
             out["account_flags"] = flags
@@ -525,7 +547,12 @@ class Services:
 
     async def health(self) -> dict[str, Any]:
         from .core import registry
-
+        from .resume_access import resolve_resume
+        try:
+            resume = resolve_resume(self.settings).compact()      # readable by THIS process? (ADR-0061)
+        except Exception as e:  # noqa: BLE001 - health must never fail on a path check
+            resume = {"ok": False, "why": type(e).__name__}
         return {"platforms": registry.platforms.names(), "llm": registry.llm_providers.names(),
                 "browser": registry.browser_drivers.names(), "dry_run": self.settings.dry_run,
+                "final_click": self.settings.browser.final_click, "resume": resume,
                 "llm_router": await self.llm.health()}
