@@ -15,6 +15,7 @@ from ..core.gradwindow import (  # noqa: F401 (ADR-0062 re-export)
     grad_ranges,
     grad_window_conflict,
 )
+from ..core.legalflags import CITIZENSHIP_REQUIREMENT
 
 # --------------------------------------------------------------------------------------- text helpers
 
@@ -45,11 +46,9 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE),
     "opt_excluded": re.compile(
         r"(?:F-?1|OPT|STEM OPT|I-983|CPT)[^.]{0,80}(?:not|unable|ineligible)|not open to (?:F-?1|J-?1)", re.IGNORECASE),
-    # ADR-0062: an explicit requirement only. "must be a U.S. citizen or eligible to work ...", an EEO line
-    # ("regardless of citizenship status") and a bare export-control mention are not a citizenship requirement.
-    "citizenship": re.compile(
-        r"U\.?S\.? citizen(?:ship)? (?:is )?required|must be a U\.?S\.? citizen(?!\w*,? *(?:or|and/or)\b)"
-        r"|security clearance|active clearance|TS/SCI|ITAR", re.IGNORECASE),
+    # ADR-0062: an explicit citizenship / U.S.-person requirement (core.legalflags), clearance or ITAR. EEO lines,
+    # bare export-control mentions and "citizen or eligible to work" are not flagged.
+    "citizenship": re.compile(CITIZENSHIP_REQUIREMENT + r"|security clearance|active clearance|TS/SCI|ITAR", re.IGNORECASE),
     "grad_window": re.compile(
         r"graduat\w*[^.]{0,80}?20\d\d(?:[^.\n]{0,40}?20\d\d)?(?:,? *or (?:earlier|later|before|after|sooner))?"
         r"|(?:class|graduates?) of\s*20\d\d(?:(?: *,| *or| *and| */)+ *20\d\d)*(?:,? *or (?:earlier|later|before|after))?"
@@ -66,7 +65,7 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
 _NEEDS: dict[str, tuple[str, ...]] = {
     "no_sponsorship": ("sponsor",),
     "opt_excluded": ("f-1", "f1", "opt", "i-983", "cpt", "j-1", "j1"),
-    "citizenship": ("citizen", "clearance", "ts/sci", "itar"),
+    "citizenship": ("citizen", "national", "clearance", "ts/sci", "itar"),
     "grad_window": ("grad", "class"),
     "phd_only": ("phd",),
     "academic": ("university", "college", "school of medicine", "research institute", "academic medical center"),
@@ -94,7 +93,7 @@ def _may(kind: str, low: str) -> bool:
 # First characters of every alternative of each pattern (ADR-0043). A `(?=[...])` guard rejects other start
 # positions with one class test instead of trying every IGNORECASE alternative there; the set of matches is
 # unchanged (tests/test_textflags.py checks the guarded and plain patterns agree).
-_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "umsati",
+_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "umacostid",
                           "grad_window": "gc2", "phd_only": "pcn", "academic": "ucsra"}
 _FAST: dict[str, re.Pattern[str]] = {
     k: re.compile(f"(?=[{_FIRST[k]}])(?:{pat.pattern})", pat.flags) for k, pat in _PATTERNS.items()}

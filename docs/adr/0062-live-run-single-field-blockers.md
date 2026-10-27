@@ -49,11 +49,15 @@ sponsorship select whose options are legal statuses, and a bare "Visa" checkbox.
     `policy.graduation_flex_months` on both sides. A posting is gated only on a clear mismatch: it states at least one
     window and the date fits none. Lists ("class of 2026, 2027 or 2028") are alternatives; "by June 2028", "2028 or
     earlier" and "from 2024 onwards" are open-ended; text with no parseable window never gates.
-12. **Citizenship gate.** Only an explicit requirement ("U.S. citizenship is required", "must be a U.S. citizen",
-    "U.S. citizens only") is a citizenship flag. "Citizen or eligible/authorized ...", EEO lines ("citizenship
-    status") and bare export-control mentions are not. Posting-flag snippets are sorted to their own gate (clearance,
-    ITAR / U.S. person, citizenship), and the search prefilter now honours `policy.us_citizen`, `us_person` and
-    `has_clearance` like the gate instead of dropping every flagged posting.
+12. **Citizenship gate.** One pattern set (`core/legalflags.py`) serves the search prefilter and the gate. Every
+    requirement form is flagged: "must be a U.S. citizen", "must be a citizen of the United States", "U.S.
+    citizenship is a requirement", "citizenship required", "U.S. citizens only", "must be a U.S. national", and the
+    permanent-resident forms ("... or green card holder", "U.S. citizens and permanent residents only", "must be a
+    lawful permanent resident or U.S. citizen"), which go to the U.S.-person gate. The one exemption is "citizen OR
+    <work eligibility>" ("or eligible / authorized to work", "or have work authorization"). EEO lines ("citizenship
+    status") and bare export-control mentions contain no requirement form. Posting-flag snippets are sorted to their
+    own gate (clearance, U.S. person, citizenship), and the search prefilter honours `policy.us_citizen`,
+    `us_person` and `has_clearance` like the gate instead of dropping every flagged posting.
 13. **Based in, or willing to relocate to, <place>.** Answered from `[contact]` residence and
     `[preferences].willing_to_relocate`: Yes when relocation is true or the owner lives there (confirmed city +
     region); No only when the owner is confirmed elsewhere and relocation is false; otherwise unresolved with the

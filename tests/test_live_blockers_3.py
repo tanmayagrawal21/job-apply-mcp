@@ -125,21 +125,52 @@ async def test_policy_gates_read_the_profile_graduation():
 
 
 # ---------------------------------------------------------------- citizenship gate: explicit requirement only
-@pytest.mark.parametrize("text", [
+MUST_FLAG = [   # every requirement form main flagged (control review of ADR-0062): none may be lost
+    "Must be a U.S. citizen or green card holder",
+    "US citizens and permanent residents only",
+    "Must be a citizen of the United States",
+    "U.S. citizenship is a requirement",
+    "citizenship required",
+    "Must be a U.S. national",
+    "must be a lawful permanent resident or U.S. citizen",
+    "Must be a U.S. citizen.",
+    "US citizens only.",
+    "U.S. citizenship is required for this role.",
+]
+PERMANENT_RESIDENTS_OK = {"Must be a U.S. citizen or green card holder", "US citizens and permanent residents only",
+                          "must be a lawful permanent resident or U.S. citizen"}
+MUST_NOT_FLAG = [
     "We consider all applicants without regard to race, sex, national origin or citizenship status.",
     "Applicants must be U.S. citizens or eligible to work in the United States.",
     "Must be a U.S. citizen or authorized to work in the U.S.",
+    "Must be a U.S. citizen or have work authorization.",
     "This role may be subject to export control regulations; we may ask about your citizenship.",
-])
-def test_boilerplate_citizenship_mentions_do_not_gate(text):
-    assert gate("citizenship", text, PolicyCfg()) is None
+    "No citizenship required.",
+]
+
+
+@pytest.mark.parametrize("text", MUST_FLAG)
+def test_every_requirement_form_is_flagged_by_textflags(text):
+    assert tf.flag_text(text).get("citizenship")
+    assert tf.citizenship_flags(text)
+
+
+@pytest.mark.parametrize("text", MUST_FLAG)
+def test_every_requirement_form_gates(text):
+    assert g.local_flags(text).get("citizenship")
+    assert gate("citizenship", text, PolicyCfg())[0] == S
+    assert gate("citizenship", text, PolicyCfg(us_citizen=True)) is None
+    # "... or permanent resident" admits U.S. persons; every other form still needs citizenship
+    assert (gate("citizenship", text, PolicyCfg(us_person=True)) is None) == (text in PERMANENT_RESIDENTS_OK)
+    # the same snippet carried as a posting flag (search listings without a description) gates the same way
+    assert gate("citizenship", "", PolicyCfg(), flags=tf.flag_text(text))[0] == S
+
+
+@pytest.mark.parametrize("text", MUST_NOT_FLAG)
+def test_boilerplate_and_work_eligibility_alternatives_do_not_flag(text):
     assert "citizenship" not in tf.flag_text(text)
-
-
-def test_explicit_citizenship_requirement_still_gates():
-    for text in ("U.S. citizenship is required for this role.", "Must be a U.S. citizen.", "US citizens only."):
-        assert gate("citizenship", text, PolicyCfg())[0] == S
-        assert gate("citizenship", text, PolicyCfg(us_citizen=True)) is None
+    assert "citizenship" not in g.local_flags(text)
+    assert gate("citizenship", text, PolicyCfg()) is None
 
 
 def test_posting_flag_snippets_are_sorted_to_their_own_gate():

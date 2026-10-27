@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..config import PolicyCfg
+from ..core.legalflags import CITIZENSHIP_REQUIREMENT, requirement_kind
 from ..core.models import Decision, GateResult, Posting
 
 Verdict = tuple[Decision, str]
@@ -44,13 +45,10 @@ _FLAG_PATTERNS: dict[str, str] = {
                       r"|without (?:the need for )?(?:visa )?sponsorship|not (?:eligible|available) for sponsorship"
                       r"|sponsorship (?:is )?not (?:available|offered|provided)"
                       r"|must be (?:legally )?authorized to work[^.]{0,60}without",
-    # ADR-0062: an explicit requirement sentence only (not EEO "citizenship status", not "citizen or eligible ...")
-    "citizenship": r"(?:u\.?s\.?|united states) citizen(?:ship)? (?:is )?(?:required|mandatory)"
-                   r"|must (?:be|hold) (?:a )?(?:u\.?s\.?|united states) citizen(?:ship)?(?!\w*,? *(?:or|and/or)\b)"
-                   r"|(?:u\.?s\.?|united states) citizens? only|only (?:open to )?(?:u\.?s\.?|united states) citizens",
+    # ADR-0062: every explicit requirement form (core.legalflags); "citizen or eligible to work" is the one exemption
+    "citizenship": CITIZENSHIP_REQUIREMENT,
     "clearance": r"security clearance|\bts/sci\b|top secret|secret clearance|active clearance|polygraph",
-    "us_person": r"\bitar\b|u\.?s\.?[ -]persons?\b|\bear\b regulations"
-                 r"|(?:u\.?s\.?|united states) citizens? or (?:lawful )?permanent residents?",
+    "us_person": r"\bitar\b|u\.?s\.?[ -]persons?\b|\bear\b regulations",
 }
 
 
@@ -69,14 +67,17 @@ def _legal_kind(snippet: str) -> str:
     if re.search(_FLAG_PATTERNS["clearance"], snippet, re.IGNORECASE):
         return "clearance"
     if re.search(_FLAG_PATTERNS["citizenship"], snippet, re.IGNORECASE):
-        return "citizenship"
+        return requirement_kind(snippet)          # "... or permanent resident" is a U.S.-person requirement
     if re.search(_FLAG_PATTERNS["us_person"], snippet, re.IGNORECASE):
         return "us_person"
     return ""                       # a mention that states no requirement (EEO / export boilerplate)
 
 
 def _flags(ctx: GateContext) -> dict[str, list[str]]:
-    merged = dict(local_flags(ctx.text))
+    merged: dict[str, list[str]] = {}
+    for k, v in local_flags(ctx.text).items():
+        for snip in v:
+            merged.setdefault((_legal_kind(snip) or k) if k == "citizenship" else k, []).append(snip)
     for k, v in (ctx.flags or {}).items():
         if k == "citizenship":
             for snip in v:
