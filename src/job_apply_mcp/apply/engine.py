@@ -1638,6 +1638,8 @@ class ApplyEngine:
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
             if g := self.profile.lookup("gender_if_required"):   # the driver fills required EEO selects only
                 demo["demographic:gender"] = g
+            if d := self.profile.lookup("race_detail"):          # ADR-0063: finer race option for DOM-only selects
+                demo["demographic:race_detail"] = d
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
             # DOM-only context for the driver (ADR-0039): phone-widget country, opt-in privacy-notice acknowledgement.
