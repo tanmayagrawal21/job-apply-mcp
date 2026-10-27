@@ -30,7 +30,12 @@ QA on 2026-10-27 (issues #97-#100, plus a Lever pronouns group) found five gaps 
   when exactly one topic matches (trans/cis wording -> no key). `demographic_pick` keeps exact matching and adds only
   three closed equivalences: gender Male=Man / Female=Woman; an option that is the profile value plus a trailing
   explanatory parenthetical; and, for disability/hispanic only, a profile sentence starting "Yes,"/"No," equals a bare
-  "Yes"/"No". `race_detail` is tried before `race` (ADR-0055). "I am not a protected veteran" is never equated with
+  "Yes"/"No", and that last one ONLY when the label is the status question itself ("Disability Status", "I have a
+  disability", "Are you Hispanic/Latino?"), never a question that mentions the topic (reasonable accommodation, work
+  limitations, language skills). The owner's value is used at all only when the label is a plainly-worded self-ID
+  question (`mapper.demographic_label_ok`, after removing an answer instruction such as "(please mark all that
+  apply)"); any other label gets no profile value, i.e. the pre-existing decline/blank behaviour. `race_detail` is
+  tried before `race` (ADR-0055). "I am not a protected veteran" is never equated with
   "No, I am not a veteran" (different facts). The scan repeats up to three passes to catch conditional selects.
 - **Demographic-data consent is NOT a privacy-notice acknowledgement.** ADR-0034/0038 cover notices that only inform
   (every word in `_ACK_VOCAB`); this box grants consent to process special-category data, names the company and lists
@@ -40,12 +45,13 @@ QA on 2026-10-27 (issues #97-#100, plus a Lever pronouns group) found five gaps 
   2. at least one non-decline profile demographic answer was committed on this page (the consent then covers answers
      the owner chose to give; an all-decline survey leaves the box empty);
   3. the box is a lone checkbox in the application form whose OWN label fits `is_demographic_consent`: an optional
-     "By checking this box," + "I consent/agree to" + a data-controller name of at most six words + collect / store /
+     "By checking this box," + "I consent/agree to" + a single data-controller name of at most six words (no "and", "&", "its", "their") + collect / store /
      process / use / retain verbs + "my responses/answers to the (voluntary) demographic / self-identification / EEO /
      diversity survey/questions (above|below)", with nothing else; the name slot may not mention sharing, third
      parties, partners, affiliates, vendors, sale, transfer, marketing, research or any other purpose;
   4. no `policy.stop_phrases` entry appears in the label.
-  Otherwise the box stays empty and a required one makes the run `incomplete`, as before.
+  Otherwise the box stays empty and a required one makes the run `incomplete`, as before. Every tick is recorded in
+  each evidence file of that run (`ticked_by_rule`) and logged.
 - **Pronouns.** `_fill_pronouns` derives each choice group's label from legend, aria-labelledby/aria-label, the
   question's title element, or the nearest preceding text inside the group; a group with no derivable label is
   recognised by its member name. A group whose label is only a pronouns question (`is_pronoun_label`) is ticked with

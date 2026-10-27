@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-from .mapper import normalize
+from .mapper import demographic_label_ok, normalize
 
 _DECLINE_WORDS = re.compile(r"^(decline|prefer not|i prefer not|i don t wish|i do not wish|i don t want|"
                             r"i do not want|i choose not|choose not|i wish not)")
@@ -61,6 +61,17 @@ def dom_demographic_key(label: str) -> str | None:
     return hits.pop() if len(hits) == 1 else None
 
 
+_INSTRUCTION = re.compile(r"\(\s*(?:please\s+)?(?:mark|select|check|choose|tick)\s+(?:all|any|one|only one)"
+                          r"(?:\s+that\s+apply)?\s*\)", re.IGNORECASE)
+
+
+def self_id_label_ok(label: str, key: str) -> bool:
+    """The owner's self-ID value may answer this label: mapper.demographic_label_ok (every word generic self-ID wording
+    or the topic's own words), after removing only an answer-instruction parenthetical such as "(please mark all that
+    apply)". A label that mentions the topic inside another question (accommodation, language skills) fails."""
+    return demographic_label_ok(label, key) or demographic_label_ok(_INSTRUCTION.sub(" ", label), key)
+
+
 def is_decline_value(v: object) -> bool:
     n = normalize(str(v or ""))
     return not n or bool(_DECLINE_WORDS.match(n))
@@ -70,13 +81,24 @@ _GENDER_SYN = (frozenset({"male", "man"}), frozenset({"female", "woman"}))
 _PAREN_TAIL = re.compile(r"\s*\([^()]*\)\s*$")
 
 
-def demographic_pick(key: str | None, values: list[str], options: list[str]) -> str | None:
+# The Yes/No lead equivalence applies ONLY to the status question itself, never to a question that merely mentions the
+# topic (accommodation, work limitations, language skills ...). Matched against the normalised label.
+_YESNO_STATUS = {
+    "disability": re.compile(r"^(?:disability(?: status)?|i have a disability|do you (?:have|identify as "
+                             r"(?:a person with|having)) a disability|are you (?:disabled|a person with a disability))$"),
+    "hispanic": re.compile(r"^(?:hispanic(?: or)? latin[oax](?: ethnicity)?|are you(?: of)? hispanic(?: or)? latin[oax]"
+                           r"(?: origin| ethnicity)?|do you identify as hispanic(?: or)? latin[oax])$"),
+}
+
+
+def demographic_pick(key: str | None, values: list[str], options: list[str], label: str = "") -> str | None:
     """The single option equal to one of the owner's `values` (tried in order, e.g. race_detail before race), or None.
     Equal means normalised equality, plus ONLY these closed equivalences:
       - gender: Male == Man, Female == Woman (one hit only);
       - an option that is the value followed by an explanatory parenthetical: "South Asian (inclusive of ...)" equals
         "South Asian" (never a prefix or substring: "Asian" never equals "South Asian (...)");
-      - disability / hispanic: a profile sentence that starts with "Yes," / "No," equals a bare "Yes" / "No" option.
+      - disability / hispanic: a profile sentence that starts with "Yes," / "No," equals a bare "Yes" / "No" option,
+        ONLY when `label` is the status question itself (_YESNO_STATUS), never a question that mentions the topic.
     Decline values are the caller's business (decline table)."""
     opts = [o for o in options if o and normalize(o) not in ("", "select")]
     for v in values:
@@ -94,7 +116,7 @@ def demographic_pick(key: str | None, values: list[str], options: list[str]) -> 
         hits = [o for o in opts if _PAREN_TAIL.search(o) and normalize(_PAREN_TAIL.sub("", o)) == nv]
         if len(hits) == 1:
             return hits[0]
-        if key in ("disability", "hispanic"):
+        if key in _YESNO_STATUS and _YESNO_STATUS[key].match(normalize(label)):
             m = re.match(r"^(yes|no) \S", nv)
             hits = [o for o in opts if m and normalize(o) == m.group(1)]
             if len(hits) == 1:
@@ -114,16 +136,19 @@ _DEMO_CONSENT = re.compile(
     r"(?:demographic|self identification|eeo|diversity)(?: data)? (?:surveys?|questions?|questionnaires?|section)"
     r"(?: above| below)?$")
 _WHO_BAD = re.compile(r"\b(share|sharing|shared|third|parties|party|partners?|affiliates?|vendors?|sell|sale|"
-                      r"transfer\w*|marketing|advertis\w*|research|public\w*|government|any|other|others)\b")
+                      r"transfer\w*|marketing|advertis\w*|research|public\w*|government|any|other|others|and|its|their)\b")
 
 
 def is_demographic_consent(label: str) -> bool:
     """True only for a label that consents to the posting company collecting / storing / processing the answers to
     the demographic survey on the same form. The whole label must fit the template; the only free slot is a short
     data-controller name (at most 6 words) that names no sharing, third party, marketing or other purpose."""
+    if "&" in label:                       # "Acme & Initech": a second controller (fail closed)
+        return False
     t = normalize(label)
     m = _DEMO_CONSENT.match(t)
-    return bool(m) and not _WHO_BAD.search(m.group("who") or "")
+    who = m.group("who") if m else ""
+    return bool(m) and not _WHO_BAD.search(who or "")     # exactly one controller, no other purpose
 
 
 # ---------------------------------------------------------------- pronouns

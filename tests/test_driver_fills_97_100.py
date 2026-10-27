@@ -54,9 +54,11 @@ def test_demographic_pick_closed_equivalences_only():
     assert demographic_pick("gender", ["Male"], ["Man", "Woman", "Non-binary"]) == "Man"
     assert demographic_pick("gender", ["Woman"], ["Man", "Non-binary"]) is None   # never the other gender
     assert demographic_pick("race", ["Male"], ["Man"]) is None                    # synonyms are gender-only
-    assert demographic_pick("disability", ["No, I do not have a disability"], ["Yes", "No"]) == "No"
-    assert demographic_pick("disability", ["Yes, I have a disability"], ["Yes", "No"]) == "Yes"
-    assert demographic_pick("veteran", ["No, I am not a veteran"], ["Yes", "No"]) is None   # yes/no lead: not veteran
+    lab = "I have a disability:"
+    assert demographic_pick("disability", ["No, I do not have a disability"], ["Yes", "No"], lab) == "No"
+    assert demographic_pick("disability", ["Yes, I have a disability"], ["Yes", "No"], lab) == "Yes"
+    assert demographic_pick("disability", ["No, I do not have a disability"], ["Yes", "No"]) is None   # no label
+    assert demographic_pick("veteran", ["No, I am not a veteran"], ["Yes", "No"], "Veteran Status") is None   # yes/no lead: not veteran
     # "not a protected veteran" is not "not a veteran"
     assert demographic_pick("veteran", ["I am not a protected veteran"],
                             ["Yes, I am a veteran", "No, I am not a veteran"]) is None
@@ -165,6 +167,9 @@ async def test_survey_filled_from_profile_and_consent_ticked_when_opted_in(drv):
     assert st["4003"] == "I am not a protected veteran" and st["4004"] == "No"
     assert st["4005"] == "South Asian (inclusive of C, D)"                   # race_detail wins over race
     assert st.get("checked:gdpr_demographic_data_consent_given_1") is True
+    ev = res.detail.split("evidence=", 1)[1].strip().replace("~", str(__import__("pathlib").Path.home()), 1)
+    metas = [json.loads(p.read_text()) for p in __import__("pathlib").Path(ev).glob("dry-run-*.json")]
+    assert metas and any("demographic-data consent" in t for m in metas for t in m["ticked_by_rule"])
 
 
 async def test_consent_not_ticked_without_the_privacy_opt_in(drv):
@@ -276,3 +281,54 @@ async def test_pronouns_only_from_the_profile(drv, value, ticked):
     assert res.status == "dry_run", res.detail                   # optional: an unanswered group never blocks
     st = _state(posts)
     assert sorted(k[len("checked:"):] for k in st if k.startswith("checked:")) == ticked
+
+
+# ---------------------------------------------------------------- review on #104: Yes/No lead only for the status question
+
+
+@pytest.mark.parametrize("key,label", [
+    ("disability", "Will you require a reasonable accommodation for a disability during the interview process?"),
+    ("disability", "Has a disability ever prevented you from working?"),
+    ("hispanic", "Do you speak Spanish to Latino customers?"),
+])
+@pytest.mark.parametrize("value", ["Yes, I have a disability", "No, I do not have a disability", "No, I am not Hispanic"])
+def test_yes_no_lead_never_answers_a_topic_mention(key, label, value):
+    assert demographic_pick(key, [value], ["Yes", "No"], label) is None
+
+
+@pytest.mark.parametrize("key,label,value,want", [
+    ("disability", "Disability Status", "No, I do not have a disability", "No"),
+    ("disability", "I have a disability:", "Yes, I have a disability", "Yes"),
+    ("hispanic", "Are you Hispanic/Latino?", "No, I am not Hispanic or Latino", "No"),
+])
+def test_yes_no_lead_for_the_status_question(key, label, value, want):
+    assert demographic_pick(key, [value], ["Yes", "No", "I don't wish to answer"], label) == want
+
+
+def test_consent_with_two_controllers_is_not_the_template():
+    assert not is_demographic_consent("I consent to Acme and Initech using my responses to the demographic survey above")
+    assert not is_demographic_consent("I consent to Acme & Initech using my responses to the demographic survey above")
+    assert not is_demographic_consent("I consent to Acme, its affiliates processing my responses to the demographic survey")
+
+
+TOPIC_HTML = """<html><body><form id=application-form>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<label for=q1>Will you require a reasonable accommodation for a disability during the interview process?</label>
+<div id=q1_wrap></div>
+<label for=q2>Do you speak Spanish to Latino customers?</label><div id=q2_wrap></div>
+<button type=submit>Submit application</button></form>
+<script>__RS__
+rs('q1', ['Yes', 'No']); rs('q2', ['Yes', 'No']);
+__REPORT__
+</script></body></html>""".replace("__RS__", RS_JS).replace("__REPORT__", REPORT)
+
+
+async def test_topic_mentions_get_no_self_id_value(drv):
+    srv, posts = _serve(TOPIC_HTML)
+    form = ApplicationForm(ref="greenhouse:initech:44", fields=[FormField(key="first_name", label="First Name",
+                                                                          kind=FieldKind.text)])
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/44", form,
+                                    {"first_name": "Alex", "demographic:disability": "Yes, I have a disability",
+                                     "demographic:hispanic": "No, I am not Hispanic or Latino"}, {}, dry_run=True)
+    st = _state(posts)
+    assert st["q1"] == "" and st["q2"] == "", (st, res.detail)

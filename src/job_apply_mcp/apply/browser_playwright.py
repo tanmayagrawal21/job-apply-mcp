@@ -38,6 +38,7 @@ from .dom_rules import (
     is_decline_value,
     is_demographic_consent,
     is_pronoun_label,
+    self_id_label_ok,
 )
 from .geo import location_queries, pick_location
 from .mapper import (
@@ -844,6 +845,7 @@ class PlaywrightDriver(VerificationMixin):
         self._tasks: dict[int, list[asyncio.Task]] = {}
         self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
         self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
+        self._ticked: dict[int, list[str]] = {}                # page -> rule-ticked boxes, shown in evidence (ADR-0063)
         self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
         # final_click="human" (ADR-0058): ref -> background confirmation watcher; the engine sets the callback
         self._watchers: dict[str, asyncio.Task] = {}
@@ -908,6 +910,7 @@ class PlaywrightDriver(VerificationMixin):
         finally:
             self._api_keys.pop(id(page), None)
             self._exempt.pop(id(page), None)
+            self._ticked.pop(id(page), None)
             for k in [k for k in self._combo if k[0] == id(page)]:
                 self._combo.pop(k, None)
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
@@ -1315,7 +1318,8 @@ class PlaywrightDriver(VerificationMixin):
                     "errors": await self._validation_errors(page), "network": await self._records(page),
                     "captcha_widgets": await self._captcha_widgets(page),
                     "submit_buttons": await self._button_summary(page),
-                    "text": trim(text, self.b.evidence_text_chars), **(extra or {})}
+                    "text": trim(text, self.b.evidence_text_chars),
+                    "ticked_by_rule": self._ticked.get(id(page), []), **(extra or {})}
             (d / f"{tag}.json").write_text(redact(json.dumps(meta, indent=1)))   # ADR-0046 defense in depth
             home = str(Path.home())
             shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
@@ -1803,7 +1807,12 @@ class PlaywrightDriver(VerificationMixin):
             ck = dom_demographic_key(lab)
         if not (ck in DEMOGRAPHIC_KEYS or _DEMOGRAPHIC_LABEL.search(lab) or row.get("section")):
             return [], 0
+        # ADR-0063: the owner's value is used only for a plainly-worded self-ID question (every word generic self-ID
+        # wording or the topic's own words); "accommodation for a disability", "Spanish to Latino customers" etc.
+        # get no profile value (decline table when required, blank when optional), exactly as before this ADR.
         keys = ["race_detail", "race"] if ck == "race" else [ck] if ck in DEMOGRAPHIC_KEYS else []
+        if keys and not self_id_label_ok(lab, ck):
+            keys = []
         values = [str(answers.get(f"demographic:{k}") or "").strip() for k in keys]
         values = [v for v in values if v]
         if not values and not row["required"]:
@@ -1812,7 +1821,7 @@ class PlaywrightDriver(VerificationMixin):
 
         def choose(texts: list[str]) -> str | None:
             texts = [t for t in texts if t and normalize(t) not in ("select", "")]
-            return exact_decline(texts) if declined else demographic_pick(ck, values, texts)
+            return exact_decline(texts) if declined else demographic_pick(ck, values, texts, lab)
         loc = page.locator(f'[id="{el_id}"]').first
         try:
             await loc.scroll_into_view_if_needed()
@@ -1912,6 +1921,7 @@ class PlaywrightDriver(VerificationMixin):
                 try:
                     if await box.is_checked():
                         log.info("ticked demographic-data consent (ADR-0063)")
+                        self._ticked.setdefault(id(page), []).append(f"demographic-data consent: {r['label'][:160]}")
                         break
                 except Exception:
                     break
