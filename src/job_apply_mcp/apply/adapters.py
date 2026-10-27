@@ -399,7 +399,7 @@ class RouterView:
             tier = self.r.cfg.task_tiers.get(task_class)
             if tier is None:
                 return True
-            cands = await self.r._candidates(task_class)
+            cands = await self.r._candidates(task_class)   # local-only classes list local candidates only
             return any(c.provider != "client" for c in cands)
         except Exception:  # noqa: BLE001
             return False

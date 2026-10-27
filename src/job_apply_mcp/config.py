@@ -100,6 +100,14 @@ class LLMCfg(BaseModel):
         "narrative": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=1200,
                              temperature=0.6, heavy=True, num_ctx=8192, timeout_s=150),
         "review": LLMTier(provider="client", model="client-default", max_tokens=1200, temperature=0.2),
+        # Required-essay autodraft (ADR-0057): writer and strict reviewer, LOCAL ONLY (llm.local_only_classes).
+        # Each is configurable on its own: [llm.task_tiers.essay] model = "..." keeps the other fields.
+        # Default from the ADR-0057 benchmark: gemma4:12b was the only local model whose drafts passed; qwen2.5:7b
+        # as reviewer returned wrong findings. One model for both = no weight swap between writer and reviewer.
+        "essay": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=700, temperature=0.4,
+                         num_ctx=6144, timeout_s=120),
+        "essay_review": LLMTier(provider="ollama", model="gemma4:12b-it-qat", max_tokens=600, temperature=0.0,
+                                num_ctx=6144, timeout_s=90),
     })
     # Tried in order after the primary of a tier or task tier (keys: tier names and task-tier names).
     fallbacks: dict[str, list[LLMTier]] = Field(default_factory=lambda: {
@@ -109,7 +117,11 @@ class LLMCfg(BaseModel):
         "narrative": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1200, temperature=0.6),
                       LLMTier(provider="client", model="client-default", max_tokens=1200)],
         "review": [LLMTier(provider="ollama", model="qwen2.5:7b", max_tokens=1200, temperature=0.2)],
+        "essay": [], "essay_review": [],   # fail closed: no other model approves what the configured one would not
     })
+    # Task classes the router runs on LOCAL providers only: cloud and client candidates are skipped and
+    # client_on_failure never applies (ADR-0057). Changing it outside the trusted user config disables autodraft.
+    local_only_classes: list[str] = Field(default_factory=lambda: ["essay", "essay_review"])
     routing: RoutingCfg = Field(default_factory=RoutingCfg)
     allow_cloud: bool = True        # if False, cloud providers (incl. client) are skipped; falls to local ones
     timeout_s: float = 120.0        # per-call wall clock
@@ -126,10 +138,12 @@ class LLMCfg(BaseModel):
         "batch": "You fill job application forms. Reply with one JSON object mapping each field key to its answer.",
         "narrative": "You write first-person application prose: specific, honest, no clichés.",
         "review": "You review application drafts for specificity, accuracy and tone.",
+        "essay": "You write first-person application prose: specific, honest, no clichés.",
+        "essay_review": "You are a strict reviewer of application answers. You fail anything unsupported.",
     })
     heavy_parallel: int = 1         # concurrent calls to `heavy` local models (one big model resident on 16 GB)
     # Task classes whose LOCAL calls always share the heavy semaphore, whatever the tier's `heavy` flag (ADR-0041).
-    heavy_classes: list[str] = Field(default_factory=lambda: ["narrative", "review"])
+    heavy_classes: list[str] = Field(default_factory=lambda: ["narrative", "review", "essay", "essay_review"])
     providers: dict[str, dict[str, Any]] = Field(default_factory=lambda: {
         "ollama": {"base_url": "http://127.0.0.1:11434", "keep_alive": "30m"},
         "openai_compat": {"base_url": "", "api_key_env": "OPENAI_API_KEY"},
@@ -396,6 +410,8 @@ class WritingCfg(BaseModel):
     # "inline": plan_application drafts prose. "deferred": plan lists prose as client_tasks and the separate
     # draft_answers tool runs writer + reviewer later, so batch planning stays fast (ADR-0041).
     mode: Literal["inline", "deferred"] = "inline"
+    local_essays: bool = False          # ADR-0057: local essay autodraft (with reviewer="router"); trusted user config only
+    client_essay_words: int = 200       # word limit given to the client for an essay with no max length (ADR-0057)
     review_client_prose: bool = True    # agent mode: client-supplied prose gets the writer path's review before approval; false only from the trusted user config (ADR-0044)
     rules: list[str] = Field(default_factory=lambda: [
         "Formal register; no contractions.",
@@ -591,6 +607,10 @@ class Settings(BaseModel):
     # trusted authserv ids) came from anything but the trusted user config. Fail closed: False until load_settings
     # has verified them; programmatic Settings must opt in explicitly.
     _otp_mail_trusted: bool = PrivateAttr(default=False)
+    # ADR-0057: True only when the trusted user config itself sets writing.reviewer="router" and no project file,
+    # environment variable or untrusted file changed the writer/reviewer models, rules or provider settings.
+    # Fail closed: False until load_settings has verified it; programmatic Settings must opt in explicitly.
+    _autodraft_trusted: bool = PrivateAttr(default=False)
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
     answers: AnswersCfg = Field(default_factory=AnswersCfg)
     search: SearchCfg = Field(default_factory=SearchCfg)
@@ -616,6 +636,14 @@ class Settings(BaseModel):
                                                                  "smartrecruiters", "workday", "generic"])
     dry_run: bool = True            # safe default: nothing is submitted until the user flips this
     response_budget_chars: int = 4000   # tools truncate/paginate to stay under this
+
+    @property
+    def essay_autodraft(self) -> bool:
+        """ADR-0057: required essays are drafted locally, strictly reviewed locally and filled (labelled assumed)
+        only when the TRUSTED user config chose reviewer="router" and autonomy is safe_default or infer."""
+        return (self._autodraft_trusted and self.writing.enabled and self.writing.local_essays
+                and self.writing.reviewer == "router"
+                and self.answers.autonomy in ("safe_default", "infer"))
 
 
 def _deep_merge(a: dict, b: dict) -> dict:
@@ -896,6 +924,28 @@ def _mail_view(s: Settings) -> tuple:
             s.ingest.path, s.ingest.imap.model_dump())
 
 
+def _autodraft_view(s: Settings) -> tuple:
+    """Everything the essay autodraft trusts (ADR-0057): reviewer choice, prose rules, the essay writer/reviewer tiers
+    and their fallbacks, the local-only list, cloud permission and provider endpoints."""
+    w, llm = s.writing, s.llm
+    tiers = {k: (llm.task_tiers[k].model_dump() if k in llm.task_tiers else None,
+                 [t.model_dump() for t in llm.fallbacks.get(k, [])]) for k in ("essay", "essay_review")}
+    return (w.reviewer, w.local_essays, w.enabled, list(w.rules), list(w.banned_phrases), list(w.gap_patterns), w.max_rounds,
+            w.style_exemplar, list(w.style_corpus), w.timeout_s, tiers, list(llm.local_only_classes), llm.allow_cloud,
+            repr(sorted(llm.providers.items())), dict(llm.system_prefix))
+
+
+def _seed_task_tiers(d: dict, defaults: Settings) -> dict:
+    """Per-tier configuration (ADR-0057): `[llm.task_tiers.<class>]` and `[llm.fallbacks.<class>]` change ONE task tier
+    (fields missing from a task tier keep their default) instead of replacing the whole table."""
+    llm = d.get("llm")
+    if not isinstance(llm, dict) or not any(k in llm for k in ("task_tiers", "fallbacks")):
+        return d
+    seed = {"llm": {"task_tiers": {k: v.model_dump() for k, v in defaults.llm.task_tiers.items()},
+                    "fallbacks": {k: [t.model_dump() for t in v] for k, v in defaults.llm.fallbacks.items()}}}
+    return _deep_merge(seed, d) if isinstance(llm.get("task_tiers", {}), dict) else d
+
+
 def _user_file_trusted(user: Path) -> tuple[bool, str]:
     """Only the FIXED-location user config (never one found through XDG_CONFIG_HOME or the environment), owned by this user and not group/world-writable, may relax
     security settings (ADR-0021). A file chosen via JOB_APPLY_MCP_CONFIG is never trusted for that."""
@@ -921,7 +971,8 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     defaults = Settings()
     user = paths.config_file()
     if user.is_file():
-        udata = _sanitize_caps(tomllib.loads(user.read_text(encoding="utf-8")), str(user), None)
+        udata = _seed_task_tiers(_sanitize_caps(tomllib.loads(user.read_text(encoding="utf-8")), str(user), None),
+                                 defaults)
         trusted, why = _user_file_trusted(user)
         trusted_user = trusted
         if not trusted:
@@ -932,9 +983,10 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     base = Settings.model_validate(udata) if udata else defaults
     proj = (project_dir or Path.cwd()) / "job-apply-mcp.toml"
     if proj.is_file() and proj.resolve() != user.resolve():
-        pdata = _sanitize_caps(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj), base)
+        pdata = _seed_task_tiers(_sanitize_caps(tomllib.loads(proj.read_text(encoding="utf-8")), str(proj), base),
+                                 base)
         data = _deep_merge(data, _restrict(pdata, str(proj), base))
-    edata = _sanitize_caps(_env_overrides(), "environment (JOB_APPLY__*)", base)
+    edata = _seed_task_tiers(_sanitize_caps(_env_overrides(), "environment (JOB_APPLY__*)", base), base)
     data = _deep_merge(data, _restrict(edata, "environment (JOB_APPLY__*)", base))
     s = Settings.model_validate(data)
     _enforce(s, base)
@@ -952,6 +1004,11 @@ def load_settings(project_dir: Path | None = None) -> Settings:
         for k, raw in qhits:
             log.warning("submission cap control.params.quota.%s=%r is loosened by the trusted user config %s",
                         k, raw, user)
+    s._autodraft_trusted = (trusted_user and base.writing.reviewer == "router" and base.writing.local_essays
+                            and _autodraft_view(s) == _autodraft_view(base))
+    if base.writing.local_essays and not s._autodraft_trusted:
+        log.info("essay autodraft disabled: writing.reviewer='router' is not from the trusted user config, or a project "
+                 "file / the environment changed the prose models or rules (ADR-0057)")
     upol = udata.get("policy") if isinstance(udata.get("policy"), dict) else {}
     s.policy._us_person_trusted = (trusted_user and "us_person" in upol
                                    and s.policy.us_person == base.policy.us_person)          # ADR-0055
