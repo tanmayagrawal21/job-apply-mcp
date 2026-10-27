@@ -10,14 +10,16 @@ from ..config import Settings
 
 
 def build_report(s: Settings) -> dict[str, Any]:
+    from ..resume_access import resolve_resume
     from ..writing.quality import read_corpus
     from . import load_profile
     from .facts import facts_report, resolve_facts
     from .resume import load_resume
-    if not s.paths.resume:
-        return {"error": "paths.resume not set"}
+    acc = resolve_resume(s)                      # readable by this process, or a copy in <data_dir>/documents
+    if acc.path is None:
+        return {"error": acc.why, "fix": acc.fix}
     try:
-        resume = load_resume(s.paths.resume)
+        resume = load_resume(str(acc.path))
         prof = load_profile(s.paths.profile)
     except (OSError, RuntimeError, ValueError) as e:
         return {"error": str(e)[:200]}
