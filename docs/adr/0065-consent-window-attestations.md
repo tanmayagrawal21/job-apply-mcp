@@ -22,7 +22,9 @@ consent window that the owner minted.
    bound to this run). There is no new crypto and no new scope. The check is read-only. Ticking consumes no
    submission (the submission's own approval does, as before).
 3. **Re-check at submit.** On the cached path, the fresh-plan path and the stateless path, `attest.submit_check`
-   re-verifies the window, the opt-in and the classification of every auto-ticked field. If any of these fails, the
+   re-verifies the window, the opt-in and the classification of every auto-ticked field. The stateless path
+   reclassifies only when the opt-in is on or an earlier plan of that ref auto-ticked something (server-held
+   `attested.json`), so the default configuration is unchanged. If any of these fails, the
    result is `needs_human` and nothing is sent. The stateless path re-derives the ticked fields from the form labels,
    excluding fields that have an explicit owner `[answers]` value.
 4. **Classifier (apply/attest.py, deny-by-default).** A field is ticked only if every one of these holds:
@@ -34,15 +36,18 @@ consent window that the owner minted.
      ITAR, citizenship and work authorization; criminal history; non-compete and other restrictive covenants;
      certification of a specific fact (degree, license, clearance, years, age, salary, ...); drug, medical and credit
      checks; messaging, marketing and talent-community opt-ins; privacy notices (ADR-0034 keeps its own owner
-     preference); data sharing, recordings and signatures; terms or conditions of employment; negations and refusals.
+     preference); data sharing, recordings and signatures; terms or conditions of employment; negations and refusals; first-person statements of fact ("I am",
+     "I'm", "I was", "my ... status", "employee").
      A label that combines an allowed class with any of these is excluded.
    - It triggers at least one class, and **every** triggered class is enabled.
    - **Every word** is in the generic vocabulary plus the vocabularies of the triggered classes, after the employer's
-     own name (and `dedupe.company_aliases`) is removed. Arbitration and terms labels may also name a fixed list of
+     own name (the posting's company only, never `dedupe.company_aliases`, which untrusted config layers can set) is
+     removed. Arbitration and terms labels may also name a fixed list of
      ATS vendors. Any other organisation or unknown word leaves the field unresolved. This is the same model as
      `mapper._ACK_VOCAB`.
    - The value is unambiguous: a checkbox gets `True`. A choice field needs exactly one affirmative option made only
-     of acknowledgement words, and every other option must be a plain negative. Otherwise the field stays unresolved.
+     of acknowledgement words, and every other option must be a plain negative ("No", "I do not agree"). Any other option ("Partially",
+     "Yes, with exceptions") leaves the field unresolved.
 5. **Logging.** Each tick is recorded in four places:
    - As an `Answer` with source `consent:auto_attest:<class>`.
    - In the plan audit `auto_attest`, as `{key, class, label (exact), value, ref, consent_id}`.

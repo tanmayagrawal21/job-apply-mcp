@@ -83,6 +83,11 @@ NEVER = [
     "Do you consent to a background check?",
     "I certify the information is accurate and agree to relocate",
     "I acknowledge the VEVRAA notice",
+    # statements of fact about the candidate are not acknowledgements (review of #105)
+    "I acknowledge that I am an Acme Robotics employee and agree to the policy",
+    "I acknowledge the EEO policy and confirm my protected status",
+    "I acknowledge that I'm a current employee and have read the job description",
+    "I have read the policy and confirm my veteran status",
     "I accept the Terms of Use of Globex Recruiting Partners",
     "Acme Robotics Terms of Use",                  # no attestation verb
     "Please type your full name as your electronic signature to certify the above is true",
@@ -105,6 +110,21 @@ def test_company_name_is_removed_only_as_the_employer():
     assert attest.classify("I acknowledge that employment with Initech is at-will.", CO) == ()
 
 
+async def test_config_aliases_never_widen_the_vocabulary(tmp_path, clock):
+    """dedupe.company_aliases can come from untrusted config layers: it must not strip words before the vocabulary
+    check (review of #105)."""
+    lab = "I certify I can lift 50 pounds and the information is accurate"
+    assert attest.classify(lab, CO) == ()
+    s = esettings(tmp_path)
+    s.dedupe.company_aliases = {"i can lift 50 pounds": CO}
+    window(s)
+    form = ApplicationForm(ref=POSTING.ref, submit_via=["api"], fields=[F("first_name", "First Name"),
+                                                                      F("q", lab, FieldKind.boolean)])
+    e, _ad, _ = eng(tmp_path, s, form)
+    out = await e.plan(POSTING.ref)
+    assert "q" in out.plan.unresolved and not attest.auto_keys(out.plan.answers)
+
+
 @pytest.mark.parametrize("field,want", [
     (F("a", "x", FieldKind.boolean), True),
     (F("a", "x", FieldKind.select, options=["Yes", "No"]), "Yes"),
@@ -113,6 +133,10 @@ def test_company_name_is_removed_only_as_the_employer():
     (F("a", "x", FieldKind.select, options=["Yes", "Yes, and text me job alerts"]), None),
     (F("a", "x", FieldKind.select, options=["Yes", "I agree"]), None),            # two affirmatives: ambiguous
     (F("a", "x", FieldKind.select, options=["Yes, I am a U.S. citizen", "No"]), None),
+    (F("a", "x", FieldKind.select, options=["I agree", "Partially"]), None),
+    (F("a", "x", FieldKind.select, options=["Yes", "Yes, with exceptions"]), None),
+    (F("a", "x", FieldKind.select, options=["Yes", "Maybe", "No"]), None),
+    (F("a", "x", FieldKind.select, options=["Yes", "No, I do not consent"]), "Yes"),
     (F("a", "x", FieldKind.text), None),
     (F("a", "x", FieldKind.textarea), None),
 ])
@@ -269,6 +293,33 @@ async def test_stateless_submit_rechecks_the_window(tmp_path, clock):
     clock.t += 120
     r = await e.submit(POSTING.ref, answers, out.approval_id, dry_run=False)
     assert r.status == "needs_human" and ad.submits == []
+
+
+async def test_stateless_path_unchanged_without_opt_in(tmp_path, clock, monkeypatch):
+    """Default config (no opt-in, nothing auto-ticked before): the stateless submit path never reclassifies."""
+    s = esettings(tmp_path, classes=[])
+    e, _ad, _ = eng(tmp_path, s)
+    out = await e.plan(POSTING.ref)
+    answers = {a.key: a.value for a in out.plan.answers}
+    e._plans.clear()
+
+    def boom(*a, **k):
+        raise AssertionError("reclassify must not run without the opt-in")
+    monkeypatch.setattr(attest, "reclassify", boom)
+    r = await e.submit(POSTING.ref, answers, out.approval_id, dry_run=False)
+    assert "consent window" not in (r.detail or "")
+
+
+async def test_stateless_path_rechecks_old_ticks_after_opt_in_removed(tmp_path, clock):
+    s = esettings(tmp_path)
+    window(s)
+    e, ad, _ = eng(tmp_path, s)
+    out = await e.plan(POSTING.ref)
+    answers = {a.key: a.value for a in out.plan.answers}
+    e._plans.clear()
+    s.consent.auto_attest = []
+    r = await e.submit(POSTING.ref, answers, out.approval_id, dry_run=False)
+    assert r.status == "needs_human" and "no longer eligible" in r.detail and ad.submits == []
 
 
 async def test_adversarial_labels_never_ticked_inside_a_window(tmp_path, clock):

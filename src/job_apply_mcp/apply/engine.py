@@ -457,8 +457,7 @@ class ApplyEngine:
                                 job_country=job_country(ctx.posting.location, ctx.posting.countries,
                                                         ctx.posting.locations),
                                 job_locations=[ctx.posting.location, *ctx.posting.locations])
-            attested = attest.apply_auto_attest(mapped, self.s, ref=ref, company=ctx.posting.company,   # ADR-0065
-                                                aliases=self._company_aliases(ctx.posting.company))
+            attested = attest.apply_auto_attest(mapped, self.s, ref=ref, company=ctx.posting.company)  # ADR-0065
         if attested:
             audit["auto_attest"] = attested
             attest.write_evidence(self.s.paths.data_dir, ref, "plan", attested)
@@ -1379,9 +1378,12 @@ class ApplyEngine:
                 eff = supplied                      # stateless: must hash-match the server-held record
                 rec, _ = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
                 base = eff if rec is not None and self.approvals.matches(rec, eff, self._split(ctx.form, eff)[1]) else {}
-                auto = attest.reclassify(ctx.form.fields, eff, ctx.posting.company,
-                                         self._company_aliases(ctx.posting.company),
-                                         owner_answer=lambda f: self.profile.lookup(normalize(f.label)))
+                # ADR-0065: only when auto-attest is on or an earlier plan of this ref ticked something, so the
+                # default configuration is unchanged
+                auto = (attest.reclassify(ctx.form.fields, eff, ctx.posting.company,
+                                          owner_answer=lambda f: self.profile.lookup(normalize(f.label)))
+                        if attest.enabled_classes(self.s) or attest.planned_keys(self.s.paths.data_dir, ref)
+                        else set())
             why = self._closed_or_challenge(ctx)       # ADR-0056: also on the cached / stateless paths
             if why is not None:
                 return SubmitResult(ref=ref, status="skipped" if why[0] == Decision.skip else "needs_human",
@@ -1404,8 +1406,7 @@ class ApplyEngine:
                                     unresolved=list(dict.fromkeys(open_ + missing)))
             # ADR-0065: every auto-ticked attestation needs the owner's consent window again, right now
             why_att, att_consent, att_rows = attest.submit_check(self.s, ctx.form.fields, eff, auto,
-                                                                 ctx.posting.company,
-                                                                 self._company_aliases(ctx.posting.company))
+                                                                 ctx.posting.company)
             if why_att:
                 return SubmitResult(ref=ref, status="needs_human", detail=why_att[:300])
             blocked = await self._control("submit", ctx, dry, eff)

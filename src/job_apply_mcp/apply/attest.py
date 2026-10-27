@@ -12,7 +12,7 @@ Safety argument (each condition is necessary; any one failing leaves the field t
    must be enabled, (b) contain nothing from `_EXCLUDE` (AI/authorship, export control/citizenship, criminal history,
    restrictive covenants, specific facts, messaging opt-ins, privacy notices, signatures, ...), and (c) consist ONLY
    of words in the generic vocabulary plus the triggered classes' vocabularies (after removing the employer's name and
-   a fixed ATS name list), modelled on mapper._ACK_VOCAB. Anything left over -> unresolved.
+   a fixed ATS name list; never config aliases), modelled on mapper._ACK_VOCAB. Anything left over -> unresolved.
 5. **Unambiguous value.** A checkbox (boolean) gets True; a choice field needs exactly one affirmative option whose
    words are all acknowledgement words; anything else -> unresolved.
 6. **Logged.** Each tick records class, exact label, posting ref and consent id in the plan audit, the evidence
@@ -95,7 +95,9 @@ _EXCLUDE = re.compile(
     r"\bemployment (?:agreement|contract|offer|terms)\b|\boffer letter\b|\bunpaid\b|\btrial\b|\bovertime\b|"
     r"\bshifts?\b|\bweekends?\b|\btravel\b|\bfirearm\w*|\bweapon\w*|\bgovernment\b|\bclassified\b|"
     # negations, refusals and anything that is not an affirmative statement
-    r"\bnot\b|\bno\b|\bnever\b|\bdecline\w*|\brefus\w*|\bwithdraw\w*|\brevok\w*|\bunless\b|\bexcept\b")
+    r"\bnot\b|\bno\b|\bnever\b|\bdecline\w*|\brefus\w*|\bwithdraw\w*|\brevok\w*|\bunless\b|\bexcept\b|"
+    # a statement about the candidate ("I am an employee", "my protected status") is a fact, not an acknowledgement
+    r"\bi (?:am|m|was)\b|\bmy (?:\w+ )?status\b|\bemployee\w*")
 
 # ---- (c) vocabulary allowlists (deny-by-default, like mapper._ACK_VOCAB) ------------------------------------------
 _GENERIC = frozenset(_words("""
@@ -120,7 +122,7 @@ _VOCAB: dict[str, frozenset[str]] = {
     attestation applicant s
     """)),
     "policy_ack": frozenset(_words("""
-    at will employment employer employee either party parties terminate terminated termination relationship time
+    at will employment employer either party parties terminate terminated termination relationship time
     reason cause notice without equal opportunity eeo statement statements policy policies job description posting
     position role requirements responsibilities duties details summary listed described company s handbook code
     conduct guidelines practices does discriminate basis law laws applicable protected status nothing contract
@@ -149,27 +151,28 @@ _LEGAL_SUFFIX = frozenset(["inc", "llc", "ltd", "corp", "co", "corporation", "gm
 # options: the one affirmative choice, made only of acknowledgement words
 _OPT_WORDS = frozenset(_words("""yes i agree accept acknowledge acknowledged confirm certify consent understand understood
 have read and do the above terms i m am"""))
+_NEGATIVE = frozenset({"no", "not", "decline"})
 _OPT_NEG = _OPT_WORDS | {"no", "not", "don", "t", "decline", "do"}
 _OPT_AFFIRM = re.compile(r"\b(?:yes|agree|accept|acknowledge\w*|confirm|certify|consent|understand\w*)\b")
 
 
-def _strip_names(n: str, company: str, aliases: Sequence[str]) -> str:
-    """Remove the employer's own name (full name, with and without a legal suffix) and its aliases."""
+def _strip_names(n: str, company: str) -> str:
+    """Remove the employer's own name (the posting's company, with and without a legal suffix). Never config aliases:
+    dedupe.company_aliases can come from untrusted config layers and must not widen the vocabulary (review of #105)."""
     names: set[str] = set()
-    for c in (company, *aliases):
-        words = normalize(c or "").split()
+    words = normalize(company or "").split()
+    if words:
+        names.add(" ".join(words))
+    while words and words[-1] in _LEGAL_SUFFIX:
+        words = words[:-1]
         if words:
             names.add(" ".join(words))
-        while words and words[-1] in _LEGAL_SUFFIX:
-            words = words[:-1]
-            if words:
-                names.add(" ".join(words))
     for name in sorted(names, key=len, reverse=True):
         n = re.sub(rf"\b{re.escape(name)}(?: s)?\b", " ", n)
     return re.sub(r"\s+", " ", n).strip()
 
 
-def classify(label: str, company: str = "", aliases: Sequence[str] = ()) -> tuple[str, ...]:
+def classify(label: str, company: str = "") -> tuple[str, ...]:
     """The attestation classes `label` belongs to, or () when it is not a pure, common attestation.
     Deny-by-default: any exclusion term, any word outside the vocabularies, or no attestation verb -> ()."""
     raw = (label or "").strip()
@@ -182,7 +185,7 @@ def classify(label: str, company: str = "", aliases: Sequence[str] = ()) -> tupl
         return ()
     if not _VERB.search(n):
         return ()
-    stripped = _strip_names(n, company, aliases)
+    stripped = _strip_names(n, company)
     hits = tuple(c for c in CLASSES if _TRIGGER[c].search(stripped))
     if not hits:
         return ()
@@ -203,12 +206,13 @@ def tick_value(f: FormField) -> Any | None:
     aff = []
     for o in f.options:
         n = normalize(o)
-        if _EXCLUDE.search(n):
-            if not all(t in _OPT_NEG for t in n.split()):
-                return None                         # an option naming something else: the owner decides
+        words = n.split()
+        if _OPT_AFFIRM.search(n) and all(t in _OPT_WORDS for t in words) and not _EXCLUDE.search(n):
+            aff.append(o)                           # "Yes", "I agree", "I acknowledge"
+        elif words and all(t in _OPT_NEG for t in words) and set(words) & _NEGATIVE:
             continue                                # a plain "No" / "I do not agree"
-        if _OPT_AFFIRM.search(n) and all(t in _OPT_WORDS for t in n.split()):
-            aff.append(o)
+        else:
+            return None                             # "Partially", "Yes, with exceptions", "Yes, I am ...": owner
     if len(aff) != 1:
         return None
     return [aff[0]] if f.kind == FieldKind.multiselect else aff[0]
@@ -231,22 +235,20 @@ def active_window(settings: Any) -> Any | None:
     return None
 
 
-def eligible(f: FormField, enabled: frozenset[str], company: str = "",
-             aliases: Sequence[str] = ()) -> tuple[tuple[str, ...], Any] | None:
+def eligible(f: FormField, enabled: frozenset[str], company: str = "") -> tuple[tuple[str, ...], Any] | None:
     """(classes, value) when `f` may be auto-ticked under `enabled`, else None."""
     if not enabled or not f.required or f.kind == FieldKind.file:
         return None
     if optin_channels(f) is not None:              # ADR-0050: messaging opt-ins stay owner-only
         return None
-    cls = classify(f.label, company, aliases)
+    cls = classify(f.label, company)
     if not cls or not set(cls) <= enabled:
         return None
     v = tick_value(f)
     return None if v is None else (cls, v)
 
 
-def apply_auto_attest(mapped: Any, settings: Any, *, ref: str, company: str = "",
-                      aliases: Sequence[str] = ()) -> list[dict[str, Any]]:
+def apply_auto_attest(mapped: Any, settings: Any, *, ref: str, company: str = "") -> list[dict[str, Any]]:
     """Hook after map_fields: move eligible unresolved attestation fields into `mapped.answers`. Returns the log rows
     (also the plan audit's `auto_attest`). No opt-in or no active window -> [] and `mapped` is untouched."""
     enabled = enabled_classes(settings)
@@ -258,7 +260,7 @@ def apply_auto_attest(mapped: Any, settings: Any, *, ref: str, company: str = ""
     rows: list[dict[str, Any]] = []
     keep = []
     for f in mapped.unresolved:
-        got = eligible(f, enabled, company, aliases)
+        got = eligible(f, enabled, company)
         if got is None:
             keep.append(f)
             continue
@@ -278,14 +280,14 @@ def auto_keys(answers: Sequence[Answer]) -> set[str]:
     return {a.key for a in answers if (a.source or "").startswith(SOURCE)}
 
 
-def reclassify(fields: Sequence[FormField], eff: dict[str, Any], company: str = "", aliases: Sequence[str] = (),
+def reclassify(fields: Sequence[FormField], eff: dict[str, Any], company: str = "",
                owner_answer: Any = None) -> set[str]:
     """Stateless submit path (no cached plan): fields that hold an auto-attest-shaped tick and have no explicit
     owner answer. Uses every class, so a stale tick is caught even when the opt-in has since been removed."""
     out: set[str] = set()
     for f in fields:
         v = eff.get(f.key)
-        if v in (None, "", False, []) or not classify(f.label, company, aliases):
+        if v in (None, "", False, []) or not classify(f.label, company):
             continue
         if owner_answer is not None:
             with contextlib.suppress(Exception):
@@ -296,7 +298,7 @@ def reclassify(fields: Sequence[FormField], eff: dict[str, Any], company: str = 
 
 
 def submit_check(settings: Any, fields: Sequence[FormField], eff: dict[str, Any], keys: set[str],
-                 company: str = "", aliases: Sequence[str] = ()) -> tuple[str | None, Any | None, list[dict[str, Any]]]:
+                 company: str = "") -> tuple[str | None, Any | None, list[dict[str, Any]]]:
     """Re-verify every auto-ticked field at submit time. Returns (block reason or None, consent, log rows)."""
     keys = {k for k in keys if eff.get(k) not in (None, "", False, [])}
     if not keys:
@@ -310,12 +312,22 @@ def submit_check(settings: Any, fields: Sequence[FormField], eff: dict[str, Any]
     rows = []
     for k in sorted(keys):
         f = by.get(k)
-        got = eligible(f, enabled, company, aliases) if f is not None else None
+        got = eligible(f, enabled, company) if f is not None else None
         if got is None or got[1] != eff.get(k):
             return f"auto-attested field {k!r} is no longer eligible (opt-in or wording changed); re-plan", None, []
         rows.append({"key": k, "class": "+".join(got[0]), "label": f.label, "value": eff.get(k),  # type: ignore[union-attr]
                      "consent_id": c.id})
     return None, c, rows
+
+
+def planned_keys(data_dir: str | Path, ref: str) -> set[str]:
+    """Keys auto-ticked by an earlier plan of `ref` (server-held evidence). Lets the stateless submit path re-check
+    old ticks without touching default-config behaviour. Unreadable evidence -> set()."""
+    p = Path(data_dir).expanduser() / "evidence" / hashlib.sha256(ref.encode()).hexdigest()[:12] / "attested.json"
+    with contextlib.suppress(ValueError, OSError, AttributeError, TypeError):
+        events = json.loads(p.read_text(encoding="utf-8")).get("events") or []
+        return {r["key"] for e in events if e.get("stage") == "plan" for r in e.get("auto_attested") or []}
+    return set()
 
 
 def write_evidence(data_dir: str | Path, ref: str, stage: str, rows: list[dict[str, Any]]) -> str | None:
