@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Consent-window attestations `[consent] auto_attest` (trusted user config only; default none): inside an active
+  `approve_submissions` consent window, REQUIRED checkboxes of the opted-in classes (accuracy, policy_ack,
+  background_check, arbitration_terms) are ticked by a deny-by-default classifier; AI-use, export control,
+  citizenship, criminal history, restrictive covenants, specific facts and opt-ins are never ticked. Re-checked at
+  submit; every tick is logged (class, label, ref, consent id) in evidence, the audit log and the run report (ADR-0065).
+- Browser driver (ADR-0063): a Greenhouse board that redirects to a company site is reopened as the Greenhouse
+  embed (#98, #99); field lookup is scoped to the application form when a page has several forms (job-alert boxes,
+  #98); DOM self-ID surveys use the profile with closed equivalences (Male=Man, explanatory parentheticals, Yes/No
+  leads) and are rescanned for conditional questions (#97, #100); the demographic-data processing consent box is
+  ticked only with the privacy opt-in, a committed profile demographic answer and an exact template (#97); Lever
+  pronouns groups are filled only from `[demographics].pronouns`.
 - Any-client usability: a missing optional component (local model, reviewer, browser extra) now returns
   `status: needs_human` with `why` and `next_action` instead of an error (ADR-0059); every status carries a
   machine-readable `next_action` and a one-line `hint` (ADR-0059); `submit_application(final_click="human")`

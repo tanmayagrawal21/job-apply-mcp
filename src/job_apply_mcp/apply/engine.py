@@ -41,7 +41,7 @@ from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
 from ..platforms.base import PostingClosed
 from ..writing import checks
-from . import autonomy, essays
+from . import attest, autonomy, essays
 from .approvals import ApprovalBook, evidence_path
 from .autonomy import Assumption
 from .closed import CHALLENGE_REASON, challenge_fields, closed_reason
@@ -457,6 +457,10 @@ class ApplyEngine:
                                 job_country=job_country(ctx.posting.location, ctx.posting.countries,
                                                         ctx.posting.locations),
                                 job_locations=[ctx.posting.location, *ctx.posting.locations])
+            attested = attest.apply_auto_attest(mapped, self.s, ref=ref, company=ctx.posting.company)  # ADR-0065
+        if attested:
+            audit["auto_attest"] = attested
+            attest.write_evidence(self.s.paths.data_dir, ref, "plan", attested)
         answers = sal_answers + list(mapped.answers)
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
         voluntary = {f.key: full_label(f.label) for f in mapped.skipped_voluntary}
@@ -1358,6 +1362,7 @@ class ApplyEngine:
                                             detail=f"answer '{k}' differs from the approved plan; re-plan")
                 eff = {**cached.answers, **supplied}
                 base = cached.answers
+                auto = attest.auto_keys(cached.plan_answers)
             elif dry or self.s.apply.auto_approve_active:
                 plan = await self._plan_ctx(ref, ctx)
                 plan_unresolved = list(plan.plan.unresolved)
@@ -1368,10 +1373,17 @@ class ApplyEngine:
                     return SubmitResult(ref=ref, status=st, detail="; ".join(rs)[:200])
                 base = {a.key: a.value for a in plan.plan.answers}
                 eff = {**base, **supplied}
+                auto = attest.auto_keys(plan.plan.answers)
             else:
                 eff = supplied                      # stateless: must hash-match the server-held record
                 rec, _ = self.approvals.check(approval_id, ref, self._url(ctx)) if approval_id else (None, "")
                 base = eff if rec is not None and self.approvals.matches(rec, eff, self._split(ctx.form, eff)[1]) else {}
+                # ADR-0065: only when auto-attest is on or an earlier plan of this ref ticked something, so the
+                # default configuration is unchanged
+                auto = (attest.reclassify(ctx.form.fields, eff, ctx.posting.company,
+                                          owner_answer=lambda f: self.profile.lookup(normalize(f.label)))
+                        if attest.enabled_classes(self.s) or attest.planned_keys(self.s.paths.data_dir, ref)
+                        else set())
             why = self._closed_or_challenge(ctx)       # ADR-0056: also on the cached / stateless paths
             if why is not None:
                 return SubmitResult(ref=ref, status="skipped" if why[0] == Decision.skip else "needs_human",
@@ -1392,6 +1404,11 @@ class ApplyEngine:
                 listed = list(dict.fromkeys([k for k in open_ if k in missing] + missing))
                 return SubmitResult(ref=ref, status="needs_human", detail=f"unresolved required: {listed}",
                                     unresolved=list(dict.fromkeys(open_ + missing)))
+            # ADR-0065: every auto-ticked attestation needs the owner's consent window again, right now
+            why_att, att_consent, att_rows = attest.submit_check(self.s, ctx.form.fields, eff, auto,
+                                                                 ctx.posting.company)
+            if why_att:
+                return SubmitResult(ref=ref, status="needs_human", detail=why_att[:300])
             blocked = await self._control("submit", ctx, dry, eff)
             if blocked:
                 return SubmitResult(ref=ref, status="needs_human", detail=blocked)
@@ -1419,6 +1436,11 @@ class ApplyEngine:
                     ok, st = self.approvals.begin_submit(ref, approval_id)   # durable BEFORE the click
                     if not ok:
                         return self._state_block(ref) or SubmitResult(ref=ref, status="needs_human", detail=st)
+                    for r in att_rows:                                  # ADR-0065: logged before the click
+                        self.approvals.audit("auto_attest", ref=ref, approval_id=approval_id,
+                                             actor=f"consent:{att_consent.id}",
+                                             detail=f"{r['class']} | {r['key']} | {r['label']}"[:500])
+                    attest.write_evidence(self.s.paths.data_dir, ref, "submit", att_rows)
                 clicked_at = datetime.now(UTC)
                 try:
                     with self._stage(ref, "submit"):
@@ -1638,6 +1660,8 @@ class ApplyEngine:
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
             if g := self.profile.lookup("gender_if_required"):   # the driver fills required EEO selects only
                 demo["demographic:gender"] = g
+            if d := self.profile.lookup("race_detail"):          # ADR-0063: finer race option for DOM-only selects
+                demo["demographic:race_detail"] = d
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
             # DOM-only context for the driver (ADR-0039): phone-widget country, opt-in privacy-notice acknowledgement.
