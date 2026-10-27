@@ -19,7 +19,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError, field_validator
 
 from . import paths
 
@@ -252,6 +252,23 @@ class GrantsCfg(BaseModel):
     consent_per_run_max_s: int = GRANT_MAX_DURATION_S   # a --per-run consent also expires after this
     otp_unattended_wait_s: int = 180              # otp_unattended: how long to wait for the code mail before `unknown`
     otp_poll_s: int = 15                          # otp_unattended: mail poll interval while waiting
+
+
+AUTO_ATTEST_CLASSES = ("accuracy", "policy_ack", "background_check", "arbitration_terms")
+
+
+class ConsentCfg(BaseModel):
+    """What an owner-minted consent window (ADR-0048) may do beyond approving submissions. ADR-0065: inside an active
+    `approve_submissions` window, required checkboxes of these COMMON attestation classes are ticked automatically
+    (deny-by-default classifier in apply/attest.py; every tick is logged). Honoured ONLY from the trusted user config;
+    a project file, JOB_APPLY__* or an untrusted user file can only remove classes. Default: none."""
+    auto_attest: list[Literal["accuracy", "policy_ack", "background_check", "arbitration_terms"]] = Field(
+        default_factory=list)
+
+    @field_validator("auto_attest", mode="before")
+    @classmethod
+    def _csv(cls, v: Any) -> Any:      # "accuracy,policy_ack" (environment spelling) -> a list
+        return [x.strip() for x in v.split(",") if x.strip()] if isinstance(v, str) else v
 
 
 class AccountsCfg(BaseModel):
@@ -613,6 +630,10 @@ class Settings(BaseModel):
     # environment variable or untrusted file changed the writer/reviewer models, rules or provider settings.
     # Fail closed: False until load_settings has verified it; programmatic Settings must opt in explicitly.
     _autodraft_trusted: bool = PrivateAttr(default=False)
+    # ADR-0065: True only when the trusted user config itself sets [consent].auto_attest. Fail closed: False until
+    # load_settings has verified it; programmatic Settings must opt in explicitly.
+    _auto_attest_trusted: bool = PrivateAttr(default=False)
+    consent: ConsentCfg = Field(default_factory=ConsentCfg)
     persona: PersonaCfg = Field(default_factory=PersonaCfg)
     answers: AnswersCfg = Field(default_factory=AnswersCfg)
     search: SearchCfg = Field(default_factory=SearchCfg)
@@ -725,6 +746,8 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("answers", "promote_after"): _raises,
     ("answers", "infer_min_confidence"): lambda new, base: new < base,
     ("answers", "referral_default"): lambda new, base: new != base,
+    # ADR-0065: adding any auto-attest class relaxes; removing classes only tightens
+    ("consent", "auto_attest"): lambda new, base: bool(set(new) - set(base)),
 }
 # Whose mail feeds automatic applications (ADR-0045): identity keys, so ANY change from the trusted baseline counts as
 # relaxing. Only the trusted user config may set them; a project file or JOB_APPLY__* cannot point "self" elsewhere.
@@ -1011,6 +1034,11 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     if base.writing.local_essays and not s._autodraft_trusted:
         log.info("essay autodraft disabled: writing.reviewer='router' is not from the trusted user config, or a project "
                  "file / the environment changed the prose models or rules (ADR-0057)")
+    ucon = udata.get("consent") if isinstance(udata.get("consent"), dict) else {}
+    s._auto_attest_trusted = (trusted_user and "auto_attest" in ucon
+                              and set(s.consent.auto_attest) <= set(base.consent.auto_attest))      # ADR-0065
+    if s.consent.auto_attest and not s._auto_attest_trusted:
+        log.info("consent.auto_attest disabled: it is not set by the trusted user config (ADR-0065)")
     upol = udata.get("policy") if isinstance(udata.get("policy"), dict) else {}
     s.policy._us_person_trusted = (trusted_user and "us_person" in upol
                                    and s.policy.us_person == base.policy.us_person)          # ADR-0055

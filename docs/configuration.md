@@ -18,6 +18,14 @@ Run `job-apply-mcp init` to create a starter file and `job-apply-mcp doctor` to 
 | `dry_run` | `bool` | `true` | safe default: nothing is submitted until the user flips this |
 | `response_budget_chars` | `int` | `4000` | tools truncate/paginate to stay under this |
 
+## `[consent]`
+
+What an owner-minted consent window (ADR-0048) may do beyond approving submissions. ADR-0065: inside an active `approve_submissions` window, required checkboxes of these COMMON attestation classes are ticked automatically (deny-by-default classifier in apply/attest.py; every tick is logged). Honoured ONLY from the trusted user config; a project file, JOB_APPLY__* or an untrusted user file can only remove classes. Default: none.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `auto_attest` | `list[Literal['accuracy', 'policy_ack', 'background_check', 'arbitration_terms']]` | `[]` |  |
+
 ## `[persona]`
 
 Profile builder (ADR-0047): gap collection, stored answers and interactive questions.
