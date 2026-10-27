@@ -4,6 +4,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Submit outcomes (ADR-0066): per-ATS classification of each Submit click (success, emailed code, captcha
+  rejected, blocked, validation error, not sent). A Greenhouse low reCAPTCHA score now routes to `awaiting_code`
+  (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal
+  `captcha_rejected`, never retried. Ashby: Submit waits for in-flight uploads, and a refused "We're updating your
+  application" click (nothing sent) is clicked once more after the upload settles.
 - Any-client usability: a missing optional component (local model, reviewer, browser extra) now returns
   `status: needs_human` with `why` and `next_action` instead of an error (ADR-0059); every status carries a
   machine-readable `next_action` and a one-line `hint` (ADR-0059); `submit_application(final_click="human")`

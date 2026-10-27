@@ -44,6 +44,7 @@ from .mapper import (
     pick_school,
     privacy_ack_value,
 )
+from .outcomes import ASHBY_UPDATING, OUTCOME_DOM_JS, classify
 from .ports import final_click
 from .verification import VerificationMixin
 
@@ -1101,9 +1102,11 @@ class PlaywrightDriver(VerificationMixin):
                                        "submit": is_submit_request(ats, url, req.method)}
                 if rec["submit"]:
                     try:
-                        rec["body"] = trim(await asyncio.wait_for(resp.text(), 3), self.b.evidence_body_chars)
+                        raw = await asyncio.wait_for(resp.text(), 3)
                     except Exception:
-                        rec["body"] = ""
+                        raw = ""
+                    rec["body"] = trim(raw, self.b.evidence_body_chars)
+                    rec["_cls"] = raw[:8000]          # outcome classification only; never saved (ADR-0066)
                 recs.append(rec)
             except Exception:
                 pass
@@ -1238,7 +1241,8 @@ class PlaywrightDriver(VerificationMixin):
             except Exception:
                 text = ""
             meta = {"ref": ref, "stage": stage, "url": trim(page.url, 300),
-                    "errors": await self._validation_errors(page), "network": await self._records(page),
+                    "errors": await self._validation_errors(page),
+                    "network": [{k: v for k, v in r.items() if not k.startswith("_")} for r in await self._records(page)],
                     "captcha_widgets": await self._captcha_widgets(page),
                     "submit_buttons": await self._button_summary(page),
                     "text": trim(text, self.b.evidence_text_chars), **(extra or {})}
@@ -2136,14 +2140,59 @@ class PlaywrightDriver(VerificationMixin):
                                 detail=f"{n} submit buttons found; refusing to guess")
         if (blk := detect_blocker(await page.locator("body").inner_text())) in ("captcha", "verification"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} challenge visible")
+        if ats.name == "ashby" and not await self._ashby_idle(page):     # ADR-0066: never click mid-upload
+            ev = await self._save_evidence(page, ref, "upload-pending")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent: an upload / autofill was still in progress; Submit not clicked{ev}")
         await target.scroll_into_view_if_needed()
+        since = len(self._net.get(id(page), []))
         await target.click()                                   # the ONE submit click; never repeated
-        return await self._conclude(page, ats, ref, attempt=attempt)
+        res = await self._conclude(page, ats, ref, attempt=attempt, since=since)
+        if res.status != "not_sent":
+            return res
+        # ADR-0066: Ashby refused to SEND (its "We're updating your application" toast; no submit request was made).
+        # Nothing reached the ATS, so one more click after the upload settles is the same single attempt.
+        if any(r.get("submit") for r in (await self._records(page))[since:]) or not await self._ashby_idle(page):
+            ev = await self._save_evidence(page, ref, "not-sent")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent: {res.detail}; upload did not settle, not clicked again{ev}")
+        target, n = await self._pick_submit(page)
+        if target is None:
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent: {res.detail}; {n} submit buttons on retry, refusing to guess")
+        since = len(self._net.get(id(page), []))
+        await target.click()                                   # the click that actually sends (first one was refused)
+        res = await self._conclude(page, ats, ref, attempt=attempt, since=since)
+        if res.status == "not_sent":
+            ev = await self._save_evidence(page, ref, "not-sent")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent twice: {res.detail}; stopped{ev}")
+        return res
+
+    async def _ashby_idle(self, page) -> bool:
+        """True once no upload / autofill is in flight: no "We're updating your application" toast and no uploading /
+        parsing text (cap upload_settle_s + 15 s). Read-only."""
+        busy = re.compile(r"\buploading\b|\bparsing\b|analy[sz]ing (your )?(resume|cv|file)", re.IGNORECASE)
+        deadline = time.monotonic() + self.b.upload_settle_s + 15.0
+        while True:
+            try:
+                text = await page.locator("body").inner_text()
+            except Exception:
+                text = ""
+            if text and not ASHBY_UPDATING.search(text) and not busy.search(text):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.4)
 
     async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False,
-                        attempt: bool = False) -> SubmitResult:
-        """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026)."""
+                        attempt: bool = False, since: int | None = None) -> SubmitResult:
+        """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026). The
+        per-ATS classifier (ADR-0066) runs first on responses made after this click and on the page; the older
+        URL/text rule is the fallback."""
         deadline = time.monotonic() + self.b.confirmation_wait_s
+        if since is None:
+            since = len(self._net.get(id(page), []))
         text, outcome = "", None
         while True:
             await asyncio.sleep(0.5)
@@ -2153,7 +2202,42 @@ class PlaywrightDriver(VerificationMixin):
                 still = await page.get_by_role("button", name=_SUBMIT_NAME).count() > 0
             except Exception:                              # page navigated mid-read: retry next poll
                 text, still = "", True
-            outcome = decide_outcome(ats, page.url, text, still, records)
+            try:
+                dom = await page.evaluate(OUTCOME_DOM_JS)
+            except Exception:
+                dom = {}
+            kind = classify(ats.name, records, dom, since=since, after_code=after_code)
+            if kind is not None:
+                k, why = kind
+                if k == "success":
+                    outcome = "submitted"
+                    break
+                if k == "code_requested":
+                    if (pending := await self._await_code(page, ats, ref)) is not None:
+                        return pending
+                    if time.monotonic() < deadline:
+                        continue                       # the code inputs render after the response: poll again
+                    ev = await self._save_evidence(page, ref, "verification")
+                    if attempt:
+                        self._handoff_pages.add(id(page))
+                    return SubmitResult(ref=ref, status="roadblock", via="browser",
+                                        detail=f"verification after submit: {why}{ev}")
+                if k == "not_sent":
+                    return SubmitResult(ref=ref, status="not_sent", via="browser", detail=why)
+                ev = await self._save_evidence(page, ref, k.replace("_", "-"))
+                if k == "captcha_rejected":         # terminal: never retried, never evaded (ADR-0066)
+                    return SubmitResult(ref=ref, status="captcha_rejected", via="browser",
+                                        detail=f"captcha_rejected: {why}; the ATS did not accept the application; "
+                                               f"not retried. A human may apply manually.{ev}")
+                if k == "blocked":
+                    return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"blocked: {why}{ev}")
+                errs = (await self._validation_errors(page))[:5]
+                return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
+                                    detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT retry "
+                                           f"automatically.{ev}")
+            outcome = decide_outcome(ats, page.url, text, still, records[since:])
+            if outcome == "failed" and ats.name in ("greenhouse", "ashby") and time.monotonic() < deadline:
+                outcome = None                         # let the page show which failure it is (code step, panel)
             if outcome:
                 break
             if attempt and (shown := [x for k in ("visible", "unsafe") for x in (await self._captcha_state(page))[k]]):
