@@ -89,13 +89,46 @@ _MAP: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Optional components (local model, reviewer, browser extra, profile) that are not available degrade the call to a
+# structured needs_human result instead of an error (ADR-0059): the client gets the reason and the next step.
+_DEGRADE = ("ComponentMissing", "ProviderUnavailable")
+
+
+def degraded(e: BaseException) -> dict[str, Any] | None:
+    """needs_human result for a missing optional component; None for any other exception."""
+    names = {c.__name__ for c in type(e).__mro__}
+    if not names & set(_DEGRADE):
+        return None
+    return {"ok": False, "status": "needs_human", "why": f"{type(e).__name__}: {e}"[:300],
+            "next_action": "fix_setup",
+            "hint": "An optional component is unavailable. Call health for the fix, or tell the user; "
+                    "nothing was submitted.",
+            "error": {"code": "component_missing" if "ComponentMissing" in names else "unavailable",
+                      "message": str(e)[:300], "hint": "Install the needed extra or enable the component in config."}}
+
+
 def error_from_exc(e: BaseException) -> str:
+    if (d := degraded(e)) is not None:
+        return dumps(d)
     names = {c.__name__ for c in type(e).__mro__}
     for name, code, hint in _MAP:
         if name in names:
             msg = e.args[0] if isinstance(e, KeyError) and e.args else e
             return err(code, f"{type(e).__name__}: {msg}", hint)
     return err("internal", f"{type(e).__name__}: {e}", "Unexpected failure; see server logs.")
+
+
+# ---- client-facing labels (ADR-0061) -----------------------------------------------------------------------
+LABEL_MAX = 500
+LABEL_MARK = "…(truncated)"
+_LABEL_KEYS = frozenset({"label", "l", "q"})
+_OPTION_KEYS = frozenset({"options", "o"})
+
+
+def full_label(s: Any, cap: int = LABEL_MAX) -> str:
+    """A question label the client can answer from: whole up to `cap` chars, else cut with an explicit marker."""
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= cap else s[:cap] + LABEL_MARK
 
 
 # ---- shaping -----------------------------------------------------------------------------------------------
@@ -219,6 +252,11 @@ def _truncate_strings(o: Any, thresh: int) -> bool:
     """Shorten every string longer than `thresh` to about half, ending in an explicit marker."""
     changed = False
     for c, k, v in list(_strings(o)):
+        if k in _LABEL_KEYS and isinstance(c, dict):     # labels keep LABEL_MAX chars (ADR-0061)
+            if len(v) > max(thresh, LABEL_MAX + len(LABEL_MARK)):
+                c[k] = full_label(v)
+                changed = changed or c[k] != v
+            continue
         if len(v) > thresh:
             keep = max(thresh // 2, 8)
             new = v[:keep] + f"…[+{len(v) - keep} chars]"
@@ -237,6 +275,8 @@ def _paginate_deep(o: Any, keep: int) -> bool:
         x = stack.pop()
         if isinstance(x, dict):
             for k, v in list(x.items()):
+                if k in _OPTION_KEYS and keep > 0:           # a question's options stay whole (ADR-0061)
+                    continue
                 if isinstance(v, list) and len(v) > keep:
                     if x.get("paged") == k:   # the list `next` belongs to: the cursor follows the new cut
                         x["next"], x["omitted"] = _start.get() + keep, x["omitted"] + len(v) - keep
@@ -340,6 +380,9 @@ def guarded(fn: Callable[..., Any], budget: Callable[[], int]) -> Callable[..., 
                     res = {"text": res}
             return redact(out(res, budget(), name))
         except Exception as e:
+            if (d := degraded(e)) is not None:          # optional component missing: needs_human (ADR-0059)
+                log.warning("tool %s degraded: %s", name, d["why"])
+                return redact(out(d, budget(), name))
             log.exception("tool %s failed", name)   # full traceback -> stderr/log only (log records are redacted)
             return redact(error_from_exc(e))
         finally:

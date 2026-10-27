@@ -52,6 +52,7 @@ from .mapper import (
     pick_school,
     privacy_ack_value,
 )
+from .ports import final_click
 from .verification import VerificationMixin
 
 log = logging.getLogger(__name__)
@@ -1030,7 +1031,7 @@ class PlaywrightDriver(VerificationMixin):
                 ev = await self._save_evidence(page, ref, "presubmit-errors", extra={"errors": errs})
                 return SubmitResult(ref=ref, status="needs_human", via="browser",
                                     detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
-        if not dry_run and self.b.final_click == "human":
+        if not dry_run and final_click(self.b.final_click) == "human":   # config or per call (ADR-0060)
             return await self._human_handoff(page, ats, ref)       # ADR-0058: never clicks
         attempt = False
         if not dry_run and self.b.captcha_handoff:
