@@ -77,7 +77,17 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
                          profile=profile, router=router, gates=gates, store=store, driver_factory=driver_factory,
                          control=control)
     wire_persona(engine, settings)
+    wire_journal(engine, settings)
     return engine
+
+
+def wire_journal(engine: ApplyEngine, settings: Settings) -> None:
+    """Attach the candidate journal (ADR-0064). It is advisory: a state dir that cannot be resolved leaves it off."""
+    from ..journal import CandidateJournal
+    try:
+        engine.journal = CandidateJournal(state_path(settings))
+    except Exception:  # noqa: BLE001
+        engine.journal = None
 
 
 def wire_persona(engine: ApplyEngine, settings: Settings) -> None:
