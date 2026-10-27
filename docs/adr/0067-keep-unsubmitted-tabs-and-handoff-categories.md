@@ -49,6 +49,18 @@ hard limit or a genuinely unknown fact, and tool gaps must be counted so they ca
   configured file was readable (`documents/.resume_hashes.json`). A missing configured resume, or an
   unverifiable copy, fails with an actionable fix. An older copy is never uploaded silently.
 
+- **Review fixes (control + reviewer on 5537e16).** In `categorize`, hard limits are checked first. A detail
+  that matches both a hard and a consented pattern is a `hard_limit`. `_HARD` now covers every
+  captcha/reCAPTCHA/hCaptcha/Turnstile/Cloudflare check, AI-use and personal-completion attestations, and
+  secrets (password, API key, token, credential). A captcha is never a consented `tool_gap`.
+  `with_guide` returns `reconcile` whenever the submission state is `submitting`/`unknown`, the status is
+  `unknown`, or the detail marks a handoff raised after the submit click ("already submitted once", a code
+  prompt). That holds whatever the status or category. `handoff`, `awaiting_code`, `submitting` and `unknown`
+  are never steered to a retry, and their `cat_hint` never says to retry. Post-click handoffs already persist
+  as state `unknown`, which is in `approvals.BLOCKING` (engine `_apply_code_result` and the submit mapping), so
+  `begin_submit` refuses a second click. Batch rows take the submission state from the approvals book. Kept
+  tabs with status unknown, roadblock or error carry the note "may already be sent; do not click Submit again".
+
 ## Consequences
 Tabs can pile up only with filled work the person still has to finish. The `tool_gap` count becomes the metric
 for automation coverage.

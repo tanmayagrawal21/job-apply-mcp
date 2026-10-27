@@ -22,9 +22,13 @@ CATEGORIES = (HARD_LIMIT, UNKNOWN_FACT, TOOL_GAP)
 HANDOFF_STATUSES = frozenset({"needs_human", "incomplete", "handoff", "roadblock", "unknown", "needs_input",
                               "needs_review", "awaiting_code", "awaiting_approval", "quota_blocked"})
 
+# Checked FIRST: a detail matching a hard limit is a hard_limit even when a consented pattern also matches.
 _HARD = re.compile(
-    r"visible (?:captcha )?challenge|comprehension|anti-automation|attestation|legal|terms|consent field|"
-    r"stop phrase|secret|password|final_click=human|click submit in the open tab|quota|daily limit|control: block",
+    r"captcha|hcaptcha|turnstile|cloudflare|bot[- ]check|human verification|visible (?:\w+ )?challenge|"
+    r"comprehension|anti-automation|attestation|acknowledg|personally (?:completed|wrote|written)|"
+    r"\bai[- ](?:use|usage|tools?|generated|assist)|legal|terms|consent field|stop phrase|"
+    r"secret|password|passcode|api[ _-]?key|\btoken\b|credential|"
+    r"final_click=human|click submit in the open tab|quota|daily limit|control: block",
     re.IGNORECASE)
 _UNKNOWN = re.compile(
     r"unresolved required|no explicit profile answer|profile (?:gap|question|answer)|needs_input|"
@@ -33,9 +37,8 @@ _UNKNOWN = re.compile(
 _CONSENTED = (
     (re.compile(r"awaiting_approval|approval required|awaiting approval", re.IGNORECASE), "approve_submissions"),
     (re.compile(r"\blogin\b|sign[- ]in|account", re.IGNORECASE), "credentials"),
-    (re.compile(r"verification|\bcode\b|\botp\b", re.IGNORECASE), "otp_unattended"),
-    (re.compile(r"passive|invisible|captcha-protected|\bashby\b", re.IGNORECASE), "captcha_attempt"),
-)
+    (re.compile(r"verification code|\bcode\b|\botp\b|confirm (?:your )?email", re.IGNORECASE), "otp_unattended"),
+)   # no captcha entry: any captcha / bot check is a hard_limit (checked first)
 # without consent these are the owner's to do (secrets, captcha, own approval)
 _HARD_NO_CONSENT = re.compile(r"awaiting_approval|awaiting approval|\blogin\b|sign[- ]in|verification|\bcode\b|"
                               r"\botp\b|captcha", re.IGNORECASE)
@@ -57,7 +60,7 @@ def categorize(status: str | None, detail: str | None, settings: Any = None) -> 
     if st not in HANDOFF_STATUSES:
         return None
     text = f"{st} {detail or ''}"
-    if _HARD.search(text):
+    if _HARD.search(text):                   # hard limits first, before any consented pattern
         return HARD_LIMIT
     for pat, scope in _CONSENTED:            # a consented step left to a person is the tool's gap
         if pat.search(text) and _consented(settings, scope):

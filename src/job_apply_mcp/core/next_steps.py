@@ -6,6 +6,7 @@ Token-lean by design: one snake_case verb phrase plus one short sentence, never 
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # status -> (next_action, hint). Hints never promise an outcome and never tell a client to bypass the tool.
@@ -58,6 +59,15 @@ _GAP_IN_WINDOW: dict[str, tuple[str, str]] = {
 
 # submission states that override a row's status for guidance (an unclear outcome is never "retry")
 _STATE_GUIDE = {"submitting": "unknown", "unknown": "unknown", "handoff": "handoff", "awaiting_code": "awaiting_code"}
+# the application may already be sent: whatever the status or category, the next step is reconcile (ADR-0025)
+_RECONCILE_STATES = frozenset({"submitting", "unknown"})
+RECONCILE = {"next_action": "reconcile",
+             "hint": "May already be sent; never resubmit. User finishes any open tab; run ingest_confirmations."}
+# a handoff raised AFTER the submit click (code prompts, "already submitted once"): reconcile, never retry
+POST_CLICK = re.compile(r"already submitted|submitted once|not retried|verification prompt|code field|"
+                        r"enter the code|after (?:the )?submit|may already be sent", re.IGNORECASE)
+# filled in an open tab or waiting for a code: never steered to a retry (a retry could submit twice)
+NO_RETRY = frozenset({"handoff", "awaiting_code", "submitting", "unknown"})
 
 
 def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | None = None,
@@ -67,9 +77,14 @@ def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | Non
     if "next_action" in row:
         return row
     st = str(status if status is not None else row.get("status") or "")
+    detail = str(row.get("detail") or "")
+    if state in _RECONCILE_STATES or st == "unknown" or (st != "awaiting_code" and POST_CLICK.search(detail)):
+        return {**row, **RECONCILE}           # whatever the status or category (control review, ADR-0067)
     if state in _STATE_GUIDE and st in ("error", "needs_human", "roadblock", "unknown", ""):
         st = _STATE_GUIDE[state]
     g = guide(st)
+    if st in NO_RETRY or state in NO_RETRY:
+        window = False
     if cat == "tool_gap" and window and g.get("next_action") in HUMAN_ACTIONS:
         a, h = _GAP_IN_WINDOW.get(st, _GAP_IN_WINDOW[""])
         g = {"next_action": a, "hint": h}

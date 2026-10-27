@@ -944,8 +944,10 @@ class PlaywrightDriver(VerificationMixin):
 
     def _remember_kept(self, page, ref: str, res: SubmitResult | None) -> None:
         pid = id(page)
-        self._kept[pid] = {"ref": ref, "status": res.status if res else "error",
-                           "url": str(getattr(page, "url", "") or "")[:300]}
+        st = res.status if res else "error"
+        self._kept[pid] = {"ref": ref, "status": st, "url": str(getattr(page, "url", "") or "")[:300]}
+        if st in ("unknown", "roadblock", "error"):        # the click may have happened
+            self._kept[pid]["note"] = "may already be sent; do not click Submit again"
         on_close = getattr(page, "on", None)
         if callable(on_close):
             try:

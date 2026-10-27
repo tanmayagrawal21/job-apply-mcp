@@ -309,7 +309,7 @@ async def test_plan_and_submit_rows_carry_guidance():
     d = await svc.plan(POSTING.ref)
     assert d["status"] == "needs_input" and d["next_action"] == "ask_user"
     row = svc._submit_row(SubmitResult(ref="r", status="unknown"))
-    assert row["next_action"] == "verify_with_user" and "never resubmit" in row["hint"]
+    assert row["next_action"] == "reconcile" and "never resubmit" in row["hint"]
 
 
 # ---- 6. server instructions (ADR-0061) ------------------------------------------------------------------------

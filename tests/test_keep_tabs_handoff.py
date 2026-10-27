@@ -68,7 +68,8 @@ async def test_filled_unsubmitted_tab_stays_open_and_is_listed(tmp_path, status)
     d = _driver(tmp_path)
     await _go(d, status)
     page = d.pages[0]
-    assert page.closed == 0 and d.kept_tabs() == [{"ref": REF, "status": status, "url": URL}]
+    note = {"note": "may already be sent; do not click Submit again"} if status in ("unknown", "roadblock") else {}
+    assert page.closed == 0 and d.kept_tabs() == [{"ref": REF, "status": status, "url": URL, **note}]
     assert json.loads((tmp_path / "kept_tabs.json").read_text()) == d.kept_tabs()
     await page.close()                                   # the person closes it: forgotten
     assert d.kept_tabs() == [] and json.loads((tmp_path / "kept_tabs.json").read_text()) == []
@@ -175,17 +176,26 @@ def test_categorize_outside_a_consent_window(status, detail, cat):
     ("needs_human", "awaiting_approval: run `job-apply-mcp approve x`", "approve_submissions"),
     ("roadblock", "login before filling", "credentials"),
     ("awaiting_code", "verification code requested", "otp_unattended"),
-    ("handoff", "a human must click Submit (captcha-protected)", "captcha_attempt"),
 ])
 def test_consented_steps_are_tool_gaps_inside_the_window(monkeypatch, status, detail, scope):
     monkeypatch.setattr(handoff, "_consented", lambda s, sc: sc == scope)
     assert handoff.categorize(status, detail, settings=object()) == "tool_gap"
 
 
-def test_hard_limits_stay_hard_inside_the_window(monkeypatch):
-    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)
-    for detail in ("visible challenge on the page", "attestation: 'I certify'", "comprehension check"):
-        assert handoff.categorize("needs_human", detail, settings=object()) == "hard_limit"
+HARD_IN_WINDOW = [
+    "visible challenge on the page", "attestation: 'I certify'", "comprehension check",
+    "visible CAPTCHA on login page", "reCAPTCHA checkbox, sign in", "Cloudflare verification challenge",
+    "Turnstile human verification", "personally completed this application", "AI-use policy acknowledgement",
+    "api key / token required", "hCaptcha on the account page", "password typed by hand at sign-in",
+    "a human must click Submit (captcha-protected)",
+]
+
+
+@pytest.mark.parametrize("detail", HARD_IN_WINDOW)
+@pytest.mark.parametrize("status", ["needs_human", "roadblock", "handoff", "awaiting_code"])
+def test_hard_limits_are_checked_first_inside_the_window(monkeypatch, detail, status):
+    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)      # every consent scope active
+    assert handoff.categorize(status, detail, settings=object()) == "hard_limit"
 
 
 def test_hints_never_push_a_tool_gap_to_the_user_in_window():
@@ -229,6 +239,8 @@ def test_tool_gap_in_window_never_asks_the_user(tmp_path, monkeypatch):
     assert row["next_action"] not in next_steps.HUMAN_ACTIONS
     row = svc._submit_row(SubmitResult(ref="r", status="unknown", detail="no confirmation detected"))
     assert row["next_action"] == "reconcile" and "never resubmit" in row["hint"]
+    row = svc._submit_row(SubmitResult(ref="r", status="roadblock", detail="login before filling"))
+    assert row["cat"] == "tool_gap" and row["next_action"] == "retry_via_tool"   # pre-fill, nothing sent
     row = svc._submit_row(SubmitResult(ref="r", status="needs_human", detail="attestation: 'I certify'"))
     assert row["cat"] == "hard_limit" and row["next_action"] == "ask_user"      # hard limits still go to the user
 
@@ -247,7 +259,53 @@ def test_unknown_state_guidance_comes_from_the_state(tmp_path):
     svc = Services(s, engine=types.SimpleNamespace())
     row = svc._submit_row(SubmitResult(ref="r", status="error", detail="TimeoutError: page closed"),
                           {"state": "unknown"})
-    assert row["next_action"] == "verify_with_user" and "never resubmit" in row["hint"]
+    assert row["next_action"] == "reconcile" and "never resubmit" in row["hint"]
+
+
+# reviewer repro: handoffs AFTER the submit click must never be steered to a retry (double-submit risk)
+POST_CLICK_DETAILS = [
+    ("the entered code was not accepted; attempts exhausted; the application was already submitted once and is NOT "
+     "retried. Finish or verify it in the open browser tab, then resolve_submission."),
+    "verification prompt with several code fields; enter the code in the open browser tab yourself",
+    "form filled and verified in the open browser tab; a human must click Submit (captcha-protected)",
+]
+
+
+@pytest.mark.parametrize("detail", POST_CLICK_DETAILS)
+@pytest.mark.parametrize("state", [None, "handoff", "unknown"])
+def test_handoffs_in_window_never_retry(tmp_path, monkeypatch, detail, state):
+    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    svc = Services(s, engine=types.SimpleNamespace())
+    row = svc._submit_row(SubmitResult(ref="r", status="handoff", detail=detail),
+                          {"state": state} if state else None)
+    assert row["next_action"] in {"user_clicks_submit", "reconcile", "verify_with_user", "provide_verification_code"}
+    assert "retry" not in row["next_action"] and "retry" not in row.get("cat_hint", "")
+
+
+@pytest.mark.parametrize("status", ["incomplete", "handoff", "awaiting_code", "needs_human", "roadblock", "error",
+                                    "needs_input", "dry_run", "submitted"])
+@pytest.mark.parametrize("state", ["submitting", "unknown"])
+@pytest.mark.parametrize("cat,window", [("tool_gap", True), ("tool_gap", False), ("hard_limit", True), (None, False)])
+def test_state_submitting_or_unknown_is_always_reconcile(status, state, cat, window):
+    from job_apply_mcp.core.next_steps import with_guide
+    g = with_guide({"status": status}, cat=cat, window=window, state=state)
+    assert g["next_action"] == "reconcile"
+
+
+async def test_batch_rows_reconcile_on_unknown_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+
+    class Eng:
+        approvals = types.SimpleNamespace(state=lambda ref: {"state": "unknown"})
+
+        async def apply_batch(self, refs, dry, mp):
+            return [{"ref": "r", "status": "incomplete", "detail": "required fields still empty"}]
+    out = await Services(s, engine=Eng()).apply_batch(["r"], None, None)
+    assert out["results"][0]["next_action"] == "reconcile"
 
 
 def test_degraded_hint_depends_on_dispatch():

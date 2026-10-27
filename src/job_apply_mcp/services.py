@@ -473,12 +473,22 @@ class Services:
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return self._guided({k: v for k, v in row.items() if v}, state=st["state"] if st else None)
 
+    def _state_of(self, ref: Any) -> str | None:
+        try:
+            st = self.engine.approvals.state(ref) if ref else None
+        except Exception:  # noqa: BLE001 - guidance only
+            return None
+        return st.get("state") if isinstance(st, dict) else None
+
     def _guided(self, row: dict[str, Any], state: str | None = None) -> dict[str, Any]:
         """Category (ADR-0067) + next-step guidance (ADR-0059) for one status row."""
         from .core.handoff import categorize, category_hint, in_window
         cfg = getattr(self, "settings", None)
         cat = categorize(row.get("status"), row.get("detail") or row.get("why"), cfg)
-        win = in_window(cfg) if cat else False
+        from .core.next_steps import NO_RETRY, POST_CLICK
+        blocked = ({row.get("status"), state} & NO_RETRY       # may be sent / filled in an open tab: never "retry"
+                   or POST_CLICK.search(str(row.get("detail") or "")))
+        win = (in_window(cfg) if cat else False) and not blocked
         if cat:
             row = {**row, "cat": cat, "cat_hint": category_hint(cat, win)}
         return with_guide(row, cat=cat, window=win, state=state)
@@ -492,8 +502,9 @@ class Services:
         return await self.engine.resolve_submission(ref, outcome, note, actor, evidence)
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        out: dict[str, Any] = {"results": [self._guided(r) if isinstance(r, dict) else r
-                                           for r in await self.engine.apply_batch(refs, dry_run, max_parallel)]}
+        rows = await self.engine.apply_batch(refs, dry_run, max_parallel)
+        out: dict[str, Any] = {"results": [self._guided(r, state=self._state_of(r.get("ref"))) if isinstance(r, dict)
+                                           else r for r in rows]}
         from .accounts.runtime import RUN_REPORT  # ADR-0046: login flags for this run (never secrets)
         if flags := RUN_REPORT.compact():
             out["account_flags"] = flags
