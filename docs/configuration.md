@@ -147,7 +147,7 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `salary_multi_level_ratio` | `float` | `1.4` | top/bottom above this => range spans levels |
 | `salary_lower_middle` | `float` | `0.33` | anchor position inside a multi-level range (0.5 = midpoint) |
 | `requires_sponsorship` | `bool \| None` | `none` |  |
-| `graduation` | `str \| None` | `none` | e.g. "2026-05" |
+| `graduation` | `str \| None` | `none` | fallback when the profile has no education end date, e.g. "2026-05" |
 | `exclude_employer_patterns` | `list[str]` | `[]` |  |
 | `stop_phrases` | `list[str]` | `["personally completed", "my own work", "without the use of ai", "no ai", "ai policy"]` |  |
 | `dedupe_days` | `int` | `180` |  |
