@@ -46,7 +46,7 @@ async def _submit(e, text, dry_run=False):
 
 
 def _reviews(r):
-    return [p for c, p in r.calls if c == "review"]
+    return [p for c, p in r.calls if c in ("review", "essay_review")]
 
 
 async def test_passing_client_prose_is_reviewed_then_submitted():
@@ -114,7 +114,7 @@ async def test_review_timeout_fails_closed():
         cancelled = 0
 
         async def complete(self, prompt, *, task_class="short", **kw):
-            if task_class == "review":
+            if task_class in ("review", "essay_review"):
                 try:
                     await asyncio.sleep(30)
                 except asyncio.CancelledError:

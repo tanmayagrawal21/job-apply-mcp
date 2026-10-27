@@ -25,6 +25,7 @@ to the profile gaps so the owner is asked once. A stored owner answer for that k
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections.abc import Sequence
@@ -365,13 +366,19 @@ def stored_value(f: FormField, raw: Any) -> Any | None:
     return s if f.kind in (FieldKind.text, FieldKind.unknown) else None
 
 
-def write_evidence(data_dir: str | Path, ref: str, rows: list[dict[str, Any]]) -> str | None:
-    """assumed.json in the ref's evidence folder (same folder the browser driver uses). Never raises."""
+def write_evidence(data_dir: str | Path, ref: str, rows: list[dict[str, Any]], *, merge: bool = False) -> str | None:
+    """assumed.json in the ref's evidence folder (same folder the browser driver uses). Never raises. `merge` keeps
+    the existing rows of other keys (draft_answers adds essays to a plan's assumptions, ADR-0057)."""
     import hashlib
     try:
         d = Path(data_dir).expanduser() / "evidence" / hashlib.sha256(ref.encode()).hexdigest()[:12]
         d.mkdir(parents=True, exist_ok=True)
         p = d / "assumed.json"
+        if merge and p.is_file():
+            with contextlib.suppress(ValueError, OSError, AttributeError, TypeError):
+                keys = {r.get("key") for r in rows}
+                old = json.loads(p.read_text(encoding="utf-8")).get("assumed") or []
+                rows = [r for r in old if isinstance(r, dict) and r.get("key") not in keys] + rows
         p.write_text(json.dumps({"ref": ref, "at": datetime.now(UTC).isoformat(timespec="seconds"),
                                  "assumed": rows}, indent=1, default=str), encoding="utf-8")
         return str(p)

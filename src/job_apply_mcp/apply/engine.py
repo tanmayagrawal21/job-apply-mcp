@@ -40,7 +40,7 @@ from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
 from ..platforms.base import PostingClosed
 from ..writing import checks
-from . import autonomy
+from . import autonomy, essays
 from .approvals import ApprovalBook, evidence_path
 from .autonomy import Assumption
 from .closed import CHALLENGE_REASON, challenge_fields, closed_reason
@@ -167,6 +167,12 @@ _GENERIC = {"experience", "years", "year", "have", "you", "with", "any", "work",
             "skills", "skill", "level", "are", "does", "than", "more", "least", "following", "please"}
 
 
+def _essay_row(a: Answer, labels: dict[str, str]) -> dict[str, Any]:
+    """assumed.json row for an autodrafted essay (ADR-0057), same shape as _track_assumed's rows."""
+    return {"key": a.key, "label": labels.get(a.key, "")[:160], "value": a.value, "rule": a.source, "assumed": True,
+            "confidence": a.confidence, "rationale": a.rationale or ""}
+
+
 class PlanOut(BaseModel):
     plan: ApplicationPlan
     client_tasks: list[dict[str, Any]] = Field(default_factory=list)
@@ -192,7 +198,7 @@ class PlanOut(BaseModel):
             d["skipped_voluntary"] = self.skipped_voluntary
         if self.profile_gaps:
             d["profile_gaps"] = self.profile_gaps
-        assumed = {a.key: {"value": a.value, "rule": a.source, **({"why": a.rationale} if a.rationale else {}),
+        assumed = {a.key: {"value": essays.short(a.value) if essays.is_essay(a.source) else a.value, "rule": a.source, **({"why": a.rationale} if a.rationale else {}),
                            **({"confidence": a.confidence} if a.source.startswith("assumed:infer") else {})}
                    for a in self.plan.answers if a.assumed}
         if assumed:
@@ -454,11 +460,11 @@ class ApplyEngine:
             # one batched short-field call and the prose pipeline run concurrently
             with self._stage(ref, "llm"):
                 (got, leftover), (written, long_, wtasks) = await asyncio.gather(
-                    self._llm_short(short, ctx), self._write_long(long_, ctx))
+                    self._llm_short(short, ctx), self._write_long(long_, ctx, ref=ref))
             answers += got
             long_ += leftover
             answers += written
-            tasks += wtasks
+            tasks += [{**t, "prose": True} for t in wtasks]
         else:
             long_ += short
         long_ += owner_only
@@ -471,10 +477,15 @@ class ApplyEngine:
             if assumptions:
                 audit["assumed"] = {x.field.key: {"rule": x.answer.source, "why": x.answer.rationale or ""}
                                     for x in assumptions}
+        fmap = {f.key: f for f in ctx.form.fields}
+        drafted = [Assumption(fmap[a.key], a, None) for a in answers if essays.is_essay(a.source) and a.key in fmap]
+        if drafted:   # ADR-0057: generated essays are labelled like every other assumption
+            audit.setdefault("assumed", {}).update({x.field.key: {"rule": x.answer.source, "why": x.answer.rationale or ""}
+                                                    for x in drafted})
         out = self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
                              profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
-        if assumptions:
-            out.profile_gaps += self._track_assumed(ref, ctx, assumptions)
+        if assumptions or drafted:
+            out.profile_gaps += self._track_assumed(ref, ctx, assumptions + drafted)
         return out
 
     # ------------------------------------------------------------- autonomy (ADR-0052)
@@ -668,7 +679,7 @@ class ApplyEngine:
         for f in long_:
             if f.key in have:
                 continue
-            if not f.required and not (f.kind == FieldKind.textarea and self.s.apply.write_optional):
+            if not f.required and not (f.kind == FieldKind.textarea and self._write_optional()):
                 continue
             unresolved_keys.append(f.key)
             tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
@@ -692,6 +703,11 @@ class ApplyEngine:
                                                 audit=audit),
                        client_tasks=tasks, approval_id=aid, timings=self.timings.get(ref, {}),
                        skipped_voluntary=voluntary or {}, profile_gaps=list(profile_gaps or []))
+
+    def _write_optional(self) -> bool:
+        """apply.write_optional, except that with the essay autodraft optional prose stays blank unless autonomy is
+        infer (ADR-0057)."""
+        return self.s.apply.write_optional and not (self.s.essay_autodraft and self.s.answers.autonomy != "infer")
 
     def _salary(self, posting: Posting):
         """Persona salary policy when wired (ADR-0047); otherwise the deterministic rule from PolicyCfg."""
@@ -866,21 +882,35 @@ class ApplyEngine:
         s = str(value).strip()
         return s if not f.max_length or len(s) <= f.max_length else None
 
-    async def _write_long(self, fields: list[FormField], ctx: _Ctx, *, deferred: bool | None = None):
+    async def _write_long(self, fields: list[FormField], ctx: _Ctx, *, deferred: bool | None = None,
+                          ref: str = ""):
         """Prose only for required (or opted-in) long text; fields written concurrently under ONE wall-clock
         budget (writing.timeout_s) shared by writer and reviewer rounds. In deferred mode nothing is drafted:
-        prose fields are listed for draft_answers (ADR-0041)."""
+        prose fields are listed for draft_answers (ADR-0041).
+
+        Essay autodraft (ADR-0057, Settings.essay_autodraft): non-cover-letter essays are drafted by the LOCAL "essay"
+        tier and approved only by the LOCAL strict "essay_review" tier plus deterministic lint and grounding checks.
+        Approved text is planned as an assumed answer; anything else (review failure, error, timeout) is never
+        planned: a required essay stays unresolved for the owner, an optional one (drafted only under
+        autonomy=infer) stays blank. Every draft is saved for the owner under the evidence folder."""
         written: list[Answer] = []
         rest: list[FormField] = []
         tasks: list[dict[str, Any]] = []
         w = self.s.writing
         if not fields or self.router is None or not w.enabled:
             return written, list(fields), tasks
+        ref = ref or ctx.form.ref
+        auto = self.s.essay_autodraft
+        infer = self.s.answers.autonomy == "infer"
         todo: list[FormField] = []
         for f in fields:
-            wanted = f.required or self.s.apply.write_optional or "cover" in normalize(f.label)
+            cover = "cover" in normalize(f.label)
+            if auto and not cover:       # ADR-0057: optional essays only under infer, never via write_optional
+                wanted = f.required or infer
+            else:
+                wanted = f.required or self.s.apply.write_optional or cover
             if (self._is_prose_question(f) and wanted and self._llm_allowed(f)
-                    and not ("cover" in normalize(f.label) and w.cover_letter_policy == "never")):
+                    and not (cover and w.cover_letter_policy == "never")):
                 todo.append(f)
             else:
                 rest.append(f)
@@ -889,26 +919,42 @@ class ApplyEngine:
             return written, rest, tasks
         if self._exemplar is None:
             self._exemplar = load_exemplar(w.style_exemplar)
+        essays = {f.key for f in todo if auto and "cover" not in normalize(f.label)}
         avail = getattr(self.router, "available", None)
-        if todo and avail is not None:
+
+        async def ready(*classes: str) -> bool:
+            if avail is None:
+                return True
             try:
-                if not await avail("narrative"):
-                    return written, rest + todo, tasks
+                return all([await avail(c) for c in classes])
             except Exception:  # noqa: BLE001
-                return written, rest + todo, tasks
+                return False
+
+        if essays and not await ready("essay", "essay_review"):   # no local writer/reviewer: never a cloud one
+            for f in [f for f in todo if f.key in essays]:
+                todo.remove(f)
+                if f.required:
+                    tasks.append(self._task(f, ctx, {"needs_human": True, "autodraft": "local_models_unavailable"}))
+        if any(f.key not in essays for f in todo) and not await ready("narrative"):
+            rest += [f for f in todo if f.key not in essays]
+            todo = [f for f in todo if f.key in essays]
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + w.timeout_s if w.timeout_s and w.timeout_s > 0 else None
         progress = {f.key: WriteProgress() for f in todo}
+        sources = [*self.profile.facts("", 80), ctx.posting.description or "", ctx.summary] if essays else []
 
         async def one(f: FormField):
             cover = "cover" in normalize(f.label)
+            essay = f.key in essays
             coro = write_text(
                 self.router, w, kind="cover_letter" if cover else "free_text", label=f.label,  # type: ignore[arg-type]
                 company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
                 facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
                 resume=getattr(self.profile, "resume_facts", None), corpus=getattr(self.profile, "corpus", None),
-                progress=progress[f.key])
+                progress=progress[f.key],
+                **({"draft_class": "essay", "review_class": "essay_review", "router_review": True,
+                    "ground_sources": sources, "review_facts": self.profile.facts(f.label, 40)} if essay else {}))
             if deadline is None:
                 return await coro
             async with asyncio.timeout_at(deadline):   # cancels the in-flight LLM call (and its HTTP request)
@@ -917,7 +963,9 @@ class ApplyEngine:
         with self._stage(ctx.form.ref, "write"):
             results = await bounded_gather((one(f) for f in todo), self.s.concurrency.global_limit)
         for f, res in zip(todo, results, strict=True):
-            if isinstance(res, TimeoutError):
+            if f.key in essays:
+                self._essay_result(f, res, progress[f.key], ctx, ref, written, tasks)
+            elif isinstance(res, TimeoutError):
                 p = progress[f.key]
                 extra: dict[str, Any] = {"timed_out": True, "stage": p.stage or "queued"}
                 if p.draft:   # partial draft for the client to finish; never planned as an answer
@@ -936,6 +984,45 @@ class ApplyEngine:
                                                  "scorecard": res.scorecard}))
         return written, rest, tasks
 
+    def _essay_tiers(self) -> str:
+        cfg = getattr(getattr(self.router, "r", None), "cfg", None) or getattr(self.router, "cfg", None)
+        try:
+            return " / ".join(f"{c}={cfg.task_tiers[c].provider}:{cfg.task_tiers[c].model}"
+                              for c in ("essay", "essay_review"))
+        except Exception:  # noqa: BLE001 - labels only
+            return ""
+
+    def _essay_result(self, f: FormField, res: Any, prog: WriteProgress, ctx: _Ctx, ref: str,
+                      written: list[Answer], tasks: list[dict[str, Any]]) -> None:
+        """ADR-0057: plan an autodrafted essay only on a strict pass; save every draft locally for the owner."""
+        tiers = self._essay_tiers()
+        if not isinstance(res, BaseException) and res.status == "pass" and res.text.strip():
+            path = essays.save(self.s.paths.data_dir, ref, key=f.key, label=f.label, company=ctx.posting.company,
+                               title=ctx.posting.title, status="approved by the local strict reviewer; filled",
+                               text=res.text, tiers=tiers)
+            written.append(Answer(key=f.key, value=res.text.strip(), source=essays.RULE, assumed=True, confidence=1.0,
+                                  rationale="generated locally from the resume, profile, persona and posting; passed "
+                                            "lint, grounding and the local strict reviewer"
+                                            + (f"; full text: {path}" if path else "")))
+            return
+        if isinstance(res, TimeoutError):
+            why, draft = f"timed out (writing.timeout_s) at stage {prog.stage or 'queued'}", prog.draft
+            viol: list[str] = []
+        elif isinstance(res, BaseException):
+            why, draft, viol = f"error: {type(res).__name__}", prog.draft, []
+        else:
+            why, draft = "rejected by review", res.text
+            viol = [v.line() for v in res.violations] or [f"status {res.status}"]
+        path = None
+        if draft.strip():
+            path = essays.save(self.s.paths.data_dir, ref, key=f.key, label=f.label, company=ctx.posting.company,
+                               title=ctx.posting.title, status=f"NOT filled: {why}", text=draft, violations=viol,
+                               tiers=tiers)
+        if f.required:   # never planned: the owner answers it (the rejected draft stays in the local file only)
+            tasks.append(self._task(f, ctx, {"needs_human": True, "autodraft": why,
+                                             **({"violations": viol[:6]} if viol else {}),
+                                             **({"draft_file": path} if path else {})}))
+
     async def draft(self, ref: str) -> PlanOut:
         """draft_answers: run writer + reviewer for the prose fields a (deferred) plan left open, under the same
         writing.timeout_s budget, and re-issue the approval over the grown answer set (ADR-0041)."""
@@ -952,7 +1039,12 @@ class ApplyEngine:
         from ..persona import posting_scope
         with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
                 ctx.posting.company, ctx.posting.title, ctx.summary):
-            written, rest, tasks = await self._write_long(open_, ctx, deferred=False)
+            written, rest, tasks = await self._write_long(open_, ctx, deferred=False, ref=ref)
+            tasks = [{**t, "prose": True} for t in tasks]
+        drafted = [a for a in written if essays.is_essay(a.source)]
+        if drafted:   # ADR-0057: assumed essays join the ref's evidence next to the plan's other assumptions
+            labels = {f.key: f.label for f in ctx.form.fields}
+            autonomy.write_evidence(self.s.paths.data_dir, ref, [_essay_row(a, labels) for a in drafted], merge=True)
         out = self._finalize(ref, ctx, cached.gate, cached.plan_answers + written, rest, tasks, cached.audit,
                              **cached.extra)
         out.timings = dict(self.timings.get(ref, {}))
@@ -1141,8 +1233,10 @@ class ApplyEngine:
             coro = review_text(
                 self.router, w, text, kind="cover_letter" if "cover" in normalize(f.label) else "free_text",
                 label=f.label, company=ctx.posting.company, title=ctx.posting.title, summary=ctx.summary,
-                facts=self.profile.facts(f.label, 12), max_len=f.max_length, exemplar=self._exemplar or "",
-                resume=resume, corpus=corpus)
+                facts=self.profile.facts(f.label, 40), max_len=f.max_length, exemplar=self._exemplar or "",
+                resume=resume, corpus=corpus,
+                # ADR-0057: a client-written essay is judged by the LOCAL strict reviewer, never by the client itself
+                review_class="review" if "cover" in normalize(f.label) else "essay_review")
             if deadline is None:
                 return await coro
             async with asyncio.timeout_at(deadline):
