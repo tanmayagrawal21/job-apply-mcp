@@ -75,6 +75,22 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 | `answer_profile_question` | `key`, `scope`, `scope_value` | asks the USER (elicitation) to type the answer for a gap key; takes no value from the client; stored as `user_written`; nothing is stored if the client cannot elicit (ADR-0047) |
 | `facts_report` | none | resume-first fact precedence: counts, profile/resume conflicts, and letter facts excluded as conflicting or outdated (with the resume's version) |
 
+## Candidate journal (ADR-0064)
+
+| Tool | Inputs | Output |
+|---|---|---|
+| `record_candidate_fact` | `fact`, `key=""`, `value=""`, `scope="global"` (or `country:XX`, `company:<name>`, `role:<title>`), `source="chat"` (chat, correction, document), `quote=""`, `confidence="stated"` (stated, inferred, confirmed), `client=""`, `kind="fact"` (fact, story) | `{ok,id,date,kind,fact,key?,value?,src,conf,risk,confirmed_via?,usable,note?,warnings?}` |
+| `list_candidate_facts` | `key_prefix=""`, `kind=""`, `risk=""`, `include_retracted=False`, `limit=25`, `cursor=0`, `full=False` | `{rows, total, next}` newest first |
+| `retract_candidate_fact` | `id`, `reason=""`, `client=""` | `{ok, retracted, tombstone, date}` |
+
+Clients should call `record_candidate_fact` whenever the user says something about themselves. The journal is
+dated and append-only: retracting adds a tombstone and deletes nothing. Secrets are redacted or refused. Sensitive
+facts (authorization, visa, citizenship, sponsorship, EEO, criminal history, clearance) fill a form only once
+confirmed, either through a dialog or through the user's verbatim chat quote. Inferred facts and attestations
+never fill a form. `plan_application` uses the journal after the profile: `src` shows `journal:<id>@<date>`, and
+a disagreement with the profile leaves the field open with a `conflict` hint. Stories reach prose tasks as
+`context.stories`.
+
 ## Operations and self-improvement
 
 | Tool | Inputs | Output |

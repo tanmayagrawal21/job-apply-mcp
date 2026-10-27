@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Candidate journal: `record_candidate_fact`, `list_candidate_facts` and `retract_candidate_fact` keep a dated,
+  append-only log (0600 JSONL in the state dir) of what the user says about themselves. Server instructions ask
+  every client to record such facts. Secrets are redacted at capture. Sensitive facts are usable only once
+  confirmed (dialog or verbatim chat quote), and inferred facts and attestations never fill forms. The mapper uses
+  the journal after the profile, with `journal:<id>@<date>` provenance, and flags conflicts instead of choosing a
+  value. Stories reach prose tasks (ADR-0064).
 - Autonomy level `[answers] autonomy = strict | safe_default | infer` (trusted user config only; default strict):
   safe declines for genuine contact/marketing permission asks, the configured "how did you hear" default and
   "decline to self-identify"; at `infer`, conservative resume-based answers to an allowlist of skill/experience questions. Hard limits

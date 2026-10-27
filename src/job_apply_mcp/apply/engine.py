@@ -284,6 +284,7 @@ class ApplyEngine:
         self._exemplar: str | None = None
         self.persona: Any = None      # PersonaPolicy (ADR-0047); set by the factory
         self.gaps: Any = None         # ProfileDB gap collector; set by the factory
+        self.journal: Any = None      # CandidateJournal (ADR-0064); set by the factory
         self._reviewed: set[str] = set()     # digests of (ref, key, text) client prose that passed review (ADR-0044)
 
     # ---------------------------------------------------------------- helpers
@@ -445,7 +446,8 @@ class ApplyEngine:
                                 company_aliases=self._company_aliases(ctx.posting.company), persona=self.persona,
                                 job_country=job_country(ctx.posting.location, ctx.posting.countries,
                                                         ctx.posting.locations),
-                                job_locations=[ctx.posting.location, *ctx.posting.locations])
+                                job_locations=[ctx.posting.location, *ctx.posting.locations],
+                                journal=self._journal_view(ctx))
         answers = sal_answers + list(mapped.answers)
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
         voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
@@ -789,9 +791,21 @@ class ApplyEngine:
         if self._needs_human(f):
             t["needs_human"] = True
             t["reason"] = "attestation/AI-use question: no explicit profile answer"
+        if self.journal is not None and (f.kind == FieldKind.textarea or self._is_prose_question(f)):
+            from ..journal.overlay import journal_stories  # ADR-0064: the user's own stories, essay material
+            if stories := journal_stories(self.journal, f.label, ctx.posting.company):
+                t["context"]["stories"] = stories
         if extra:
             t.update(extra)
         return t
+
+    def _journal_view(self, ctx: _Ctx) -> Any:
+        """ADR-0064: the candidate journal scoped to this posting (None when absent or unreadable)."""
+        if self.journal is None:
+            return None
+        from ..journal.overlay import journal_view
+        return journal_view(self.journal, ctx.posting.company, ctx.posting.title,
+                            job_country(ctx.posting.location, ctx.posting.countries, ctx.posting.locations))
 
     async def _llm_short(self, fields: list[FormField], ctx: _Ctx) -> tuple[list[Answer], list[FormField]]:
         """ONE router call for every remaining short field; each reply is validated independently."""
