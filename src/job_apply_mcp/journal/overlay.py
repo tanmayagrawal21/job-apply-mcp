@@ -46,6 +46,14 @@ _ATTEST_LABEL = re.compile(r"certif|attest|under penalty|i agree|i acknowledge|i
                           r"truthful", re.IGNORECASE)
 
 
+def _attest_class(label: str, company: str = "") -> bool:
+    try:
+        from ..apply.attest import classify
+        return bool(classify(label, company))
+    except Exception:  # noqa: BLE001 - fail closed: treat as an attestation
+        return True
+
+
 def lookup_keys(key: str) -> tuple[str, ...]:
     """The profile lookup keys a journal key may answer (empty: stored for context only)."""
     if key in _STATIC:
@@ -91,6 +99,7 @@ class JournalView:
 
     def __init__(self, entries: list[Entry], company: str = "", title: str = "", job_country: str | None = None):
         from ..store.sqlite import company_key
+        self.company = company
         ck, tl = company_key(company) if company else "", title.lower()
         rank: dict[str, tuple[int, str, Entry]] = {}
         for e in entries:
@@ -133,6 +142,7 @@ class ProfileOverlay:
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_view", view)
         object.__setattr__(self, "_cur", "")
+        object.__setattr__(self, "_off", False)
         object.__setattr__(self, "served", {})       # field key -> [Entry]
         object.__setattr__(self, "conflicts", {})    # field key -> [{journal_key, lookup, profile, journal}]
         object.__setattr__(self, "overrides", {})    # field key -> profile values an owner correction replaced
@@ -143,15 +153,22 @@ class ProfileOverlay:
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(self._inner, name, value)
 
-    def begin(self, field_key: str) -> None:
-        object.__setattr__(self, "_cur", field_key)
+    def begin(self, f: Any) -> None:
+        """Start a field. Attestation fields (this module's wording check, or ADR-0065's classifier) are outside the
+        journal entirely: no value is served and no conflict is raised, so only the label and the owner's consent
+        window (ADR-0065) or the owner decide them."""
+        key = getattr(f, "key", f)
+        label = str(getattr(f, "label", "") or "")
+        off = bool(label) and (bool(_ATTEST_LABEL.search(label)) or _attest_class(label, self._view.company))
+        object.__setattr__(self, "_cur", key)
+        object.__setattr__(self, "_off", off)
 
     def facts(self, topic: str = "", limit: int = 12) -> list[str]:
         return self._inner.facts(topic, limit)
 
     def lookup(self, key: str) -> Any | None:
         pv = self._inner.lookup(key)
-        e = self._view.index.get(key)
+        e = None if getattr(self, "_off", False) else self._view.index.get(key)
         if e is None:
             return pv
         jv = form_value(e)

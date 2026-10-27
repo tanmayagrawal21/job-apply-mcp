@@ -428,3 +428,41 @@ def test_residence_is_sensitive():
     for k in ("contact.city", "contact.region", "contact.country"):
         assert risk_class(k) == "sensitive"
     assert risk_class("availability.start_date") == "everyday"
+
+
+# ---------------------------------------------------------------- ADR-0065 interaction: attestations stay out of it
+from test_consent_attestations import ATTEST as AT_LABEL
+from test_consent_attestations import clock, eng, esettings, window  # noqa: F401
+
+
+def test_attestation_fields_are_outside_the_journal(tmp_path):
+    j = jr(tmp_path)
+    j.record("Alex will relocate", key="preferences.willing_to_relocate", value="yes", quote="sure, I'd move")
+    ov = journal_view(j).overlay(view(prefs=Preferences(willing_to_relocate=False)))
+    for label in (AT_LABEL, "I consent to a background check.", "I certify that I am willing to relocate"):
+        ov.begin(F("q", label, FieldKind.boolean))
+        ov.lookup("structured:willing_to_relocate")
+        assert "q" not in ov.served and "q" not in ov.conflicts      # no value served, no conflict raised
+    ov.begin(F("r", RELOC, FieldKind.select, options=YN))
+    ov.lookup("structured:willing_to_relocate")
+    assert "r" in ov.conflicts                                       # an ordinary question still sees the journal
+
+
+async def test_auto_attest_is_unchanged_by_journal_entries(tmp_path, clock):  # noqa: F811
+    s = esettings(tmp_path)
+    window(s)
+    plain, _, _ = eng(tmp_path / "a", s)
+    base = await plain.plan(POSTING.ref)
+    e, _, _ = eng(tmp_path / "b", s)
+    j = jr(tmp_path)
+    j.record("Owner says no background checks", key="background_check.consent", value="no",
+             quote="I do not consent to background checks", source="correction", elicited=True)
+    j.record("Owner certifies", key="attestation.accuracy", value="no", quote="do not certify anything",
+             elicited=True)
+    e.journal = j
+    out = await e.plan(POSTING.ref)
+    want = {a.key: (a.value, a.source) for a in base.plan.answers}
+    got = {a.key: (a.value, a.source) for a in out.plan.answers}
+    assert got == want and got["q_acc"][1].startswith("consent:auto_attest")
+    assert not any(src.startswith("journal:") for _, src in got.values())
+    assert [r["key"] for r in out.plan.audit["auto_attest"]] == [r["key"] for r in base.plan.audit["auto_attest"]]

@@ -2185,7 +2185,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
 
     for f in fields:
         if journal is not None:
-            profile.begin(f.key)
+            profile.begin(f)
         if f.kind == FieldKind.file:
             path = _file_for(f.label, profile)
             if path:

@@ -80,6 +80,7 @@ class Cand:
     deferred: bool = False  # not handled this run (over the cap): its mail message stays unprocessed
     assumed: list[dict[str, Any]] | None = None   # ADR-0052: answers the agent assumed for this posting
     prose: list[dict[str, Any]] | None = None     # ADR-0057: unresolved essays for the MCP client to draft
+    attested: list[dict[str, Any]] | None = None  # ADR-0065: attestations ticked under the owner's consent window
 
     def row(self) -> dict[str, Any]:
         r = {"ref": self.target, "url": self.target if self.target.startswith("http") else None,
@@ -298,6 +299,8 @@ class IntakeRunner:
                    "awaiting_confirmation": getattr(self, "_awaiting", []),
                    # ADR-0052: every assumed answer, labelled, per posting
                    "assumed": {c.target: c.assumed for c in cands if c.target and c.assumed},
+                   # ADR-0065: every attestation ticked under the owner's consent window, for the owner's review
+                   "auto_attested": {c.target: c.attested for c in cands if c.target and c.attested},
                    # ADR-0057: unresolved essays the MCP client can draft and hand back through submit_application
                    "client_tasks": {c.target: {"approval_id": c.approval_id, "essays": c.prose}
                                     for c in cands if c.target and c.prose}}
@@ -306,8 +309,10 @@ class IntakeRunner:
                                           "autonomy": self.s.answers.autonomy})
         out = {**rep, "mode": "dry_run" if dry else "live", "autonomy": self.s.answers.autonomy,
                "max_applications": n or None, "assumed": ctx["assumed"] or None,
+               "auto_attested": ctx["auto_attested"] or None,
                "client_tasks": ctx["client_tasks"] or None,
-               "plan_context": {k: v for k, v in ctx.items() if v and k not in ("assumed", "client_tasks")}}
+               "plan_context": {k: v for k, v in ctx.items() if v and k not in ("assumed", "client_tasks",
+                                                                                 "auto_attested")}}
         if preview is not None:
             out["live_preview"] = preview
         return {k: v for k, v in out.items() if v is not None}
@@ -415,6 +420,7 @@ class IntakeRunner:
                       **({"why": a.rationale} if a.rationale else {})}
                      for a in out.plan.answers if a.assumed] or None
         c.prose = self._client_essays(c, out, cached) or None
+        c.attested = list((out.plan.audit or {}).get("auto_attest") or []) or None
         if g.decision != Decision.submit:
             c.prose = None
             c.status = "skipped" if g.decision == Decision.skip else "needs_human"
@@ -660,6 +666,7 @@ class IntakeRunner:
                if summ.get(k)}
         return {**rep, "started": run["started_at"], "finished": run["finished_at"], "mode": summ.get("mode"),
                 "autonomy": summ.get("autonomy") or "strict", **({"assumed": summ["assumed"]} if summ.get("assumed") else {}),
+                **({"auto_attested": summ["auto_attested"]} if summ.get("auto_attested") else {}),
                 **({"plan_context": ctx} if ctx else {})}
 
     async def confirm_feedback(self, fid: int, by: str) -> dict[str, Any]:

@@ -71,6 +71,10 @@ refused. Use must stay as safe as the profile's: legal status and demographics c
     conflict held, and the conflict note tells the client that the owner must confirm in the dialog or edit
     `profile.toml`. This also protects the trust-guarded keys (citizenship, sponsorship, authorization).
     U.S.-person and clearance facts have no form mapping at all.
+- **Attestations stay outside the journal (ADR-0065).** For a field whose label reads as a certification, or that
+  ADR-0065's `attest.classify` puts in any class, the overlay serves no journal value and raises no conflict. Only
+  the label, the owner's consent window and the owner decide such a field. Auto-attestation runs after
+  `map_fields` and is unaffected by journal entries, and a journal value never replaces an attested answer.
 - **Echoed text is untrusted data.** `record_candidate_fact` and `list_candidate_facts` return fact, quote and
   client text under an `untrusted` key, beside a `notice` that it is data and not instructions. Sentences that
   address a model are stripped from the echo by `control.sanitize.sanitize_untrusted` and counted in
