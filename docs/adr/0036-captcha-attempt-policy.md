@@ -49,3 +49,14 @@ Risk-score rejections that show no challenge look like "no confirmation" and are
 `uv run pytest tests/test_apply_browser_local.py tests/test_approvals.py -k captcha` (browser tests need local
 Chrome and skip otherwise). Revert: remove the setting, its `_RELAXES` entry and the `attempt` branch; the default
 behaviour is unchanged.
+
+## Note (2026-10-23): reCAPTCHA loader script marker
+Ashby pages load reCAPTCHA with `<script id="recaptchaScript">`. The CDP marker scan flagged that `id` as
+`marker:recaptchaScript`, so `captcha_policy=attempt` handed off on a page with only a script-only, passive
+reCAPTCHA. That handoff contradicts this ADR. A marker on a `<script>` element (by id or class) now counts as
+passive unless it names an unknown vendor (arkose, geetest, datadome and similar). Everything else stays fail-closed
+and still hands off:
+- a visible challenge;
+- a checkbox container;
+- a shown iframe;
+- any marker on an element that is not a script.

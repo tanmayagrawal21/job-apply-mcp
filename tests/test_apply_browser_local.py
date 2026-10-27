@@ -10,6 +10,7 @@ import pytest
 from job_apply_mcp.apply.browser_playwright import (
     ATS,
     PlaywrightDriver,
+    captcha_attempt_ok,
     decide_outcome,
     evidence_dir,
     is_submit_request,
@@ -476,3 +477,31 @@ async def test_cdp_failure_fails_closed(drv, monkeypatch):
     finally:
         await page_.close()
     assert out["unsafe"] == ["cdp-unavailable"]
+
+
+# Ashby loads reCAPTCHA with <script id="recaptchaScript">: a loader script marker is passive (ADR-0036 note).
+_RC_LOADER = "<script id='recaptchaScript' src='/recaptcha/api.js?render=KEY'></script>"
+
+
+async def test_recaptcha_loader_script_with_invisible_badge_is_attempt_ok(drv):
+    st = await _state(drv, f"<html><body>{_RC_LOADER}{PASSIVE_HTML_BADGE}</body></html>")
+    assert not _unsafe(st) and st["widgets"], st
+    assert captcha_attempt_ok("attempt", st["widgets"], st, lambda: False)
+
+
+@pytest.mark.parametrize("extra", [
+    "<div class='g-recaptcha' style='width:304px;height:78px'></div>",                       # visible checkbox box
+    "<iframe src='about:blank#recaptcha/api2/bframe' style='width:400px;height:580px'></iframe>",  # shown challenge
+    "<div id='recaptchaScript' style='width:300px;height:80px'>x</div>"])                    # non-script element
+async def test_recaptcha_loader_does_not_excuse_other_markers(drv, extra):
+    st = await _state(drv, f"<html><body>{_RC_LOADER}{PASSIVE_HTML_BADGE}{extra}</body></html>")
+    assert _unsafe(st), (extra, st)
+    assert not captcha_attempt_ok("attempt", st["widgets"], st, lambda: True)
+
+
+async def test_final_click_human_never_submits(drv, resume):
+    drv.b.final_click = "human"                            # ADR-0058; headless here -> needs_human, nothing sent
+    srv = Srv(page(), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:fc"}), ANS, resume,
+                                    dry_run=False)
+    assert srv.posts == 0 and res.status == "needs_human" and "final_click=human" in res.detail, res.detail

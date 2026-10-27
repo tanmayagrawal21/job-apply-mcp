@@ -178,6 +178,9 @@ class PolicyCfg(BaseModel):
     hours_per_year: int = 2080                   # hourly -> annual conversion
     exclude_title_patterns: list[str] = Field(default_factory=list)  # regexes on the title (e.g. "research")
     has_phd: bool = False                        # False: skip titles aimed at PhD graduates/students (ADR-0011)
+    # Set by load_settings only (never from config): True when policy.us_person came from the trusted user config.
+    # Only then may the mapper answer a U.S.-person question from it (ADR-0055).
+    _us_person_trusted: bool = PrivateAttr(default=False)
 
 
 BUILTIN_CONTROLS = ["mode", "quota", "attestation", "hard_stop", "single_submit", "prose_lint",
@@ -355,6 +358,9 @@ class BrowserCfg(BaseModel):
     evidence_body_chars: int = 500      # cap on each saved submit-response body
     captcha_handoff: bool = True        # captcha-protected pages (always Ashby): never click submit; human does (ADR-0012). Tests only: False
     captcha_policy: Literal["handoff", "attempt"] = "handoff"  # attempt: click Submit once if only an invisible widget (no visible challenge); trusted user config only (ADR-0036)
+    final_click: Literal["agent", "human"] = "agent"   # human: fill + verify, a person clicks Submit in the open tab (ADR-0058); tighten-only
+    human_click_timeout_s: float = 900.0  # final_click=human: how long the confirmation watcher waits for the click
+    human_click_poll_s: float = 3.0       # final_click=human: watcher poll interval (never clicks, types or retries)
     presubmit_validation: bool = True   # read back fields + check visible validation errors before the submit click
     agent_max_steps: int = 40
     agent_tier: str = "medium"          # llm tier whose model drives the generic agent
@@ -707,6 +713,8 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
     ("grants", "consent_per_run_max_s"): _raises,
     ("browser", "captcha_handoff"): _bool_off,
     ("browser", "captcha_policy"): lambda new, base: new == "attempt" and base != "attempt",   # ADR-0036
+    # ADR-0058: "human" only tightens (any layer may set it); going back to "agent" from a trusted "human" relaxes
+    ("browser", "final_click"): lambda new, base: new == "agent" and base != "agent",
     ("writing", "review_client_prose"): _bool_off,                                             # ADR-0044
     ("accounts", "auto_create"): _bool_on,                                                        # ADR-0046
     ("accounts", "max_login_attempts"): _raises,
@@ -721,6 +729,10 @@ _RELAXES: dict[tuple[str | None, str], Any] = {
 for _k in ("sender", "recipient", "self_address", "self_aliases"):
     _RELAXES[("intake.mail", _k)] = lambda new, base: new != base
 _RELAXES[("ingest.imap", "user_env")] = lambda new, base: new != base   # fallback source of the "self" address
+# ADR-0055: candidate legal-status facts (gates, and the mapper's U.S.-person fallback). Only the trusted user config
+# may set them; a project file, JOB_APPLY__* or an untrusted user file cannot change them in either direction.
+for _k in ("us_person", "us_citizen", "requires_sponsorship", "has_clearance"):
+    _RELAXES[("policy", _k)] = lambda new, base: new != base
 
 # Submission caps (ADR-0035). `apply.*` is the documented setting; `control.params.quota.*` is the legacy
 # spelling and takes precedence when set, so it is guarded too.
@@ -997,6 +1009,9 @@ def load_settings(project_dir: Path | None = None) -> Settings:
     if base.writing.local_essays and not s._autodraft_trusted:
         log.info("essay autodraft disabled: writing.reviewer='router' is not from the trusted user config, or a project "
                  "file / the environment changed the prose models or rules (ADR-0057)")
+    upol = udata.get("policy") if isinstance(udata.get("policy"), dict) else {}
+    s.policy._us_person_trusted = (trusted_user and "us_person" in upol
+                                   and s.policy.us_person == base.policy.us_person)          # ADR-0055
     urf = udata.get("control", {}).get("rules_file") if isinstance(udata.get("control"), dict) else None
     if urf and trusted_user and urf == s.control.rules_file:
         s.control._rules_trusted = True

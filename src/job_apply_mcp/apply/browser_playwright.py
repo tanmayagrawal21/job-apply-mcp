@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -197,8 +197,16 @@ _CAPTCHA_MARKER = re.compile(r"arkose|funcaptcha|geetest|datadome|perimeterx|hum
                              r"captcha|turnstile|cf-chl", re.IGNORECASE)
 
 
-def _marker_passive(tok: str, attrs: dict[str, str]) -> bool:
+_SCRIPT_UNKNOWN_VENDOR = re.compile(r"arkose|funcaptcha|geetest|datadome|perimeterx|humansecurity|kasada|awswaf|aws-waf",
+                                    re.IGNORECASE)
+
+
+def _marker_passive(tok: str, attrs: dict[str, str], node_name: str = "") -> bool:
     t = tok.lower()
+    # A marker on a <script> element is a loader (e.g. Ashby's <script id="recaptchaScript">), not a widget: passive
+    # per ADR-0036 (script-only reCAPTCHA). Unknown vendors stay unsafe; widgets/frames are judged separately.
+    if node_name.upper() == "SCRIPT":
+        return not _SCRIPT_UNKNOWN_VENDOR.search(tok)
     if t.startswith(("grecaptcha-badge", "grecaptcha-logo", "grecaptcha-error", "g-recaptcha-response",
                      "h-captcha-response", "cf-turnstile-response")):
         return True
@@ -768,6 +776,9 @@ class PlaywrightDriver(VerificationMixin):
         self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
         self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
         self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
+        # final_click="human" (ADR-0058): ref -> background confirmation watcher; the engine sets the callback
+        self._watchers: dict[str, asyncio.Task] = {}
+        self.on_human_confirmed: Callable[[SubmitResult], Awaitable[Any]] | None = None
 
     # -- lifecycle ------------------------------------------------------------------------------
     async def _context(self):
@@ -798,6 +809,9 @@ class PlaywrightDriver(VerificationMixin):
             await route.continue_()
 
     async def aclose(self) -> None:
+        for t in self._watchers.values():
+            t.cancel()
+        self._watchers.clear()
         if self._ctx is not None:
             await self._ctx.close()
             await self._pw.stop()
@@ -942,6 +956,8 @@ class PlaywrightDriver(VerificationMixin):
                 ev = await self._save_evidence(page, ref, "presubmit-errors", extra={"errors": errs})
                 return SubmitResult(ref=ref, status="needs_human", via="browser",
                                     detail=f"validation errors before submit (not clicked): {errs[:5]}{ev}")
+        if not dry_run and self.b.final_click == "human":
+            return await self._human_handoff(page, ats, ref)       # ADR-0058: never clicks
         attempt = False
         if not dry_run and self.b.captcha_handoff:
             state = await self._captcha_state(page)
@@ -967,6 +983,67 @@ class PlaywrightDriver(VerificationMixin):
             return SubmitResult(ref=ref, status="dry_run", via="browser",
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
         return await self._submit(page, ats, ref, attempt=attempt)
+
+    # -- final_click="human" (ADR-0058) ----------------------------------------------------------
+    async def _human_handoff(self, page, ats: AtsProfile, ref: str) -> SubmitResult:
+        """The form is filled and verified: keep the tab, bring it to the front, and let the person click Submit.
+        This path NEVER clicks. A background watcher reports the outcome (see _watch_human_click)."""
+        ev = await self._save_evidence(page, ref, "handoff-final-click")
+        if self.b.headless:
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"form filled and verified, not clicked (final_click=human); set "
+                                       f"browser.headless=false so a person can click Submit{ev}")
+        self._handoff_pages.add(id(page))
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        old = self._watchers.pop(ref, None)
+        if old is not None and not old.done():
+            old.cancel()
+        self._watchers[ref] = asyncio.create_task(self._watch_human_click(page, ats, ref))
+        return SubmitResult(ref=ref, status="handoff", via="browser", confirmation=page.url[:200],
+                            detail=f"form filled and verified; click Submit in the open tab{ev}")
+
+    async def _watch_human_click(self, page, ats: AtsProfile, ref: str) -> SubmitResult | None:
+        """Poll the handed-off tab (browser.human_click_poll_s, up to human_click_timeout_s) with the SAME success
+        detection as the agent-click path. Read-only: never clicks, types or retries. Success -> evidence
+        'confirmed-after-human-click' and the engine callback; timeout, a closed tab or any error -> None (the ref stays
+        a handoff for reconcile / ingest_confirmations)."""
+        deadline = time.monotonic() + max(0.0, float(self.b.human_click_timeout_s))
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(max(0.05, float(self.b.human_click_poll_s)))
+                if page.is_closed():
+                    return None
+                try:
+                    text = await page.locator("body").inner_text()
+                    still = await page.get_by_role("button", name=_SUBMIT_NAME).count() > 0
+                except Exception:                      # navigating after the click: read again next poll
+                    continue
+                if decide_outcome(ats, page.url, text, still, await self._records(page)) == "submitted":
+                    ev = await self._save_evidence(page, ref, "confirmed-after-human-click")
+                    res = SubmitResult(ref=ref, status="submitted", via="browser", confirmation=page.url[:200],
+                                       detail=f"confirmed after human click{ev}")
+                    if self.on_human_confirmed is not None:
+                        await self.on_human_confirmed(res)
+                    return res
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("final-click watcher for %s stopped on an error; left as handoff", ref, exc_info=True)
+            return None
+
+    async def wait_human_click(self, ref: str) -> SubmitResult | None:
+        """Await the ref's watcher (run_applications in final_click=human mode). None = no watcher / no confirmation."""
+        t = self._watchers.get(ref)
+        if t is None:
+            return None
+        try:
+            return await asyncio.shield(t)
+        except Exception:
+            return None
 
     # -- evidence / network ---------------------------------------------------------------------
     # -- login walls (ADR-0046) ------------------------------------------------------------------
@@ -1109,7 +1186,7 @@ class PlaywrightDriver(VerificationMixin):
                 attrs = dict(zip(at[0::2], at[1::2]))
                 toks = (attrs.get("class", "").split() + [attrs.get("id", "")])
                 for t in toks:
-                    if t and _CAPTCHA_MARKER.search(t) and not _marker_passive(t, attrs):
+                    if t and _CAPTCHA_MARKER.search(t) and not _marker_passive(t, attrs, n.get("nodeName", "")):
                         found.append(t[:40])
                 vendor_iframe = n.get("nodeName", "").lower() == "iframe" and _CAPTCHA_FRAME_URL.search(
                     attrs.get("src", "") + " " + attrs.get("name", ""))

@@ -60,6 +60,7 @@ class Demographics(BaseModel):
     gender_if_required: str = ""        # used instead of `gender` when the gender question is required; "" = `gender`
     hispanic_latino: str = DECLINE      # the separate "Are you Hispanic or Latino?" question (e.g. "Yes" / "No")
     race_ethnicity: str = DECLINE
+    race_detail: str = ""               # ADR-0055: optional finer race option; "" = race_ethnicity only
     veteran_status: str = DECLINE
     disability_status: str = DECLINE
     sexual_orientation: str = DECLINE
@@ -106,6 +107,7 @@ class Authorization(BaseModel):
     requires_sponsorship_now: bool | None = None   # ADR-0053: "do you require sponsorship NOW?" only
     citizen: bool | None = None            # citizenship of the home country
     citizenship: str = ""                  # country of citizenship; drives "Citizenship Status" and, if citizen is unset, US-citizen
+    us_person: bool | None = None          # ADR-0055: U.S. person (ITAR/EAR); unset falls back to an explicit policy.us_person
     countries: dict[str, CountryAuthorization] = Field(default_factory=dict)
 
     @model_validator(mode="before")

@@ -482,7 +482,8 @@ class IntakeRunner:
         by_host: OrderedDict[str, list[Cand]] = OrderedDict()
         for c in todo:
             by_host.setdefault(self._host(c), []).append(c)
-        sem = asyncio.Semaphore(self.s.intake.submit_parallel)
+        human = not dry and self.s.browser.final_click == "human"     # ADR-0058: one tab at a time, a person clicks
+        sem = asyncio.Semaphore(1 if human else self.s.intake.submit_parallel)
         manual = not dry and not self.s.apply.auto_approve_active
 
         async def one(c: Cand) -> None:
@@ -494,6 +495,17 @@ class IntakeRunner:
                 r = await self.engine.submit(c.target, {}, c.approval_id, dry)
             except Exception as e:  # noqa: BLE001
                 c.status, c.why = "failed", f"{type(e).__name__}: {e}"
+                return
+            if human and r.status == "handoff":         # wait for the person's click (or the watcher's timeout)
+                done = None
+                with contextlib.suppress(Exception):
+                    done = await self.engine.await_human_click(c.target)
+                if done is not None and done.status == "submitted":
+                    c.status, c.why = "submitted", "confirmed after human click"
+                    return
+                c.status = "needs_human"
+                c.why = (f"handoff: {r.detail or ''} (no confirmation within browser.human_click_timeout_s; "
+                         "reconcile / ingest_confirmations can resolve it)")
                 return
             c.status = _SUBMIT_MAP.get(r.status, "unknown")
             if c.status == "needs_human" and _quota_hit(r.detail or ""):
@@ -511,6 +523,10 @@ class IntakeRunner:
                 async with sem:
                     await one(c)
 
+        if human:                                       # strictly sequential across hosts too
+            for v in by_host.values():
+                await host_worker(v)
+            return
         await asyncio.gather(*(host_worker(v) for v in by_host.values()))
 
     @staticmethod
