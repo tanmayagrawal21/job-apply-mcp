@@ -4,8 +4,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
-- Submit outcome fix (ADR-0068): an explicit ATS rejection after the click is `needs_human` again; only a sent
-  request with no verdict is `roadblock`/`unknown` (worded "outcome unknown", no longer "treat as NOT submitted").
+- Submit outcome fix (ADR-0068): only an unambiguous ATS rejection after the click (structured 400/409/422 errors,
+  Ashby GraphQL errors) is `needs_human`. 408/429/5xx, keyword-only bodies, Lever error text and a sent request with
+  no verdict are `roadblock`/`unknown` (blocking; worded "outcome unknown").
 - Submit outcomes (ADR-0066): per-ATS classification of each Submit click (success, emailed code, captcha
   rejected, blocked, validation error, not sent). A Greenhouse low reCAPTCHA score now routes to `awaiting_code`
   (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal

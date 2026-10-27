@@ -508,3 +508,46 @@ async def test_final_click_human_never_submits(drv, resume):
     res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:fc"}), ANS, resume,
                                     dry_run=False)
     assert srv.posts == 0 and res.status == "needs_human" and "final_click=human" in res.detail, res.detail
+
+
+# ---------------------------------------------------------------- ADR-0068: only an unambiguous rejection is re-enterable
+
+
+def _rec(status, body):
+    return [{"url": "u", "status": status, "submit": True, "body": body[:50], "_cls": body}]
+
+
+@pytest.mark.parametrize(("status", "body", "rejected"), [
+    (502, '{"errors":[{"message":"bad gateway"}]}', False),
+    (504, "<html>Gateway Timeout</html>", False),
+    (503, '{"errors":[{"message":"unavailable"}]}', False),
+    (408, '{"errors":[{"message":"timeout"}]}', False),
+    (429, '{"errors":[{"message":"slow down"}]}', False),
+    (200, '{"data":null,"note":"this field is required"}', False),
+    (200, "Required field missing", False),
+    (400, "invalid", False),                                          # not structured
+    (422, '{"errors":[{"field":"email","message":"is invalid"}]}', True),
+    (400, '{"field_errors":{"email":["is invalid"]}}', True),
+    (200, '{"errors":[{"message":"Invalid email"}]}', True),          # Ashby GraphQL errors (ashby only)
+])
+def test_explicit_rejection_is_strict(status, body, rejected):
+    from job_apply_mcp.apply.browser_playwright import explicit_rejection
+    assert explicit_rejection(ATS["ashby"], _rec(status, body)) is rejected
+    if status == 200 and rejected:
+        assert explicit_rejection(ATS["greenhouse"], _rec(status, body)) is False   # GraphQL signature is Ashby's
+
+
+@pytest.mark.parametrize(("status", "body"), [(502, '{"errors":[{"message":"bad gateway"}]}'), (504, "Gateway Timeout"),
+                                              (408, "Request Timeout"), (200, '{"note":"email is required"}')])
+async def test_ambiguous_failure_after_submit_is_unknown(drv, resume, status, body):
+    srv = Srv(page(), body, api_status=status)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "roadblock" and "outcome unknown" in res.detail, res.detail   # engine: unknown, blocking
+    assert srv.posts == 1
+
+
+async def test_structured_422_field_errors_is_a_rejection(drv, resume):
+    srv = Srv(page(), '{"errors":[{"field":"email","message":"is invalid"}]}', api_status=422)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "needs_human" and "rejected" in res.detail, res.detail
+    assert srv.posts == 1

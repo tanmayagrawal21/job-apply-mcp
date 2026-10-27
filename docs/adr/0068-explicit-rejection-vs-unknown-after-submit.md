@@ -14,6 +14,17 @@ so every local-fixture browser test is skipped there.
 - If a submit request was issued and NO verdict came back (no success, no rejection), the result stays `roadblock`
   (engine `unknown`), and the detail now says "outcome unknown: a submit request was sent but no success
   confirmation appeared (it may have been received)" instead of the contradictory "treat as NOT submitted".
+- **What counts as an explicit rejection (control review on #108).** `network_verdict` says "failure" for any status
+  >= 400 and, outside Ashby, for any body containing words like "required" or "invalid", which is too loose to
+  re-open an application. `explicit_rejection` accepts only:
+  - an Ashby GraphQL response with a non-empty structured `errors` array and no `FormSubmitSuccess`;
+  - a 400/409/422 response whose JSON body carries a non-empty `errors`, `field_errors` or `errorMessages`;
+  - the structured per-ATS codes `classify` already handles (Greenhouse `invalid-attributes` / `invalid-attachment`,
+    Ashby `FormRender` errors).
+  408, 429, 5xx, gateway/timeouts, unparseable bodies and keyword-only bodies are NOT rejections. The request may
+  have been processed, so the result is `roadblock` (engine `unknown`, blocking until reconciled). Lever's re-rendered
+  error text is an inferred signal, so a Lever `validation_error` after the click is also `roadblock`. Only an
+  explicit rejection returns the re-enterable `needs_human` (engine `handoff`).
 - If no submit request was issued, the old `needs_human` "treat as NOT submitted" text is unchanged. So is the
   attempt-policy rule (ADR-0036: always `roadblock`).
 - The test is renamed to `test_no_confirmation_after_a_sent_request_is_unknown_with_evidence` and asserts the

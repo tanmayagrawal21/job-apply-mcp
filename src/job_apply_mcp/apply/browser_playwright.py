@@ -385,6 +385,38 @@ def network_verdict(ats: AtsProfile, records: list[dict[str, Any]]) -> str | Non
     return None
 
 
+_REJECT_STATUS = (400, 409, 422)
+
+
+def explicit_rejection(ats: AtsProfile, records: list[dict[str, Any]]) -> bool:
+    """True only for an UNAMBIGUOUS refusal in the latest submit response (ADR-0068): the ATS processed the request
+    and said no. Accepted signatures: Ashby GraphQL with a non-empty structured `errors` array (any 2xx/4xx status)
+    and no FormSubmitSuccess; any ATS answering 400/409/422 with a JSON body that carries a non-empty `errors` /
+    `field_errors` / `errorMessages`. Everything else (408, 429, 5xx, gateway/timeouts, bodies that merely CONTAIN
+    words like "required" or "invalid", unparseable bodies) is NOT a rejection: the request may have been processed,
+    so the outcome is unknown."""
+    subs = [r for r in records if r.get("submit")]
+    if not subs:
+        return False
+    r = subs[-1]
+    status = int(r.get("status") or 0)
+    if status in (408, 429) or status >= 500 or status == 0:
+        return False
+    body = str(r.get("_cls") or r.get("body") or "")
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    def nonempty(*keys: str) -> bool:
+        return any(isinstance(data.get(k), (list, dict)) and data.get(k) for k in keys)
+    if ats.name == "ashby" and status < 500 and nonempty("errors") and "FormSubmitSuccess" not in body:
+        return True
+    return status in _REJECT_STATUS and nonempty("errors", "field_errors", "errorMessages")
+
+
 def decide_outcome(ats: AtsProfile, url: str, text: str, form_present: bool,
                    records: list[dict[str, Any]]) -> str | None:
     """'submitted' | 'failed' | None. The network response outranks page text; URL/text are the fallback."""
@@ -2451,9 +2483,12 @@ class PlaywrightDriver(VerificationMixin):
                 if k == "blocked":
                     return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"blocked: {why}{ev}")
                 errs = (await self._validation_errors(page))[:5]
-                return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
-                                    detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT retry "
-                                           f"automatically.{ev}")
+                # ADR-0068: only a structured rejection (Greenhouse error code, Ashby FormRender errors) is re-enterable;
+                # Lever's re-rendered error text is an inferred signal, so its outcome stays unknown (blocking).
+                inferred = ats.name not in ("greenhouse", "ashby")
+                return SubmitResult(ref=ref, status="roadblock" if attempt or inferred else "needs_human",
+                                    via="browser", detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT "
+                                                          f"retry automatically.{ev}")
             outcome = decide_outcome(ats, page.url, text, still, records[since:])
             if outcome == "failed" and ats.name in ("greenhouse", "ashby") and time.monotonic() < deadline:
                 outcome = None                         # let the page show which failure it is (code step, panel)
@@ -2493,7 +2528,12 @@ class PlaywrightDriver(VerificationMixin):
         # ADR-0066: likewise when a submit request was issued but NO verdict came back (it may have arrived): unknown.
         # An explicit ATS rejection (outcome "failed") is a verdict, not an ambiguity: needs_human, as before.
         sent_now = self._sent_count(page)
-        issued = outcome is None and sent0 is not None and sent_now is not None and sent_now != sent0
+        ambiguous = outcome == "failed" and not explicit_rejection(ats, (await self._records(page))[since:])
+        if ambiguous:
+            # ADR-0068: "failed" from status >= 400 or a keyword in the body is not a verdict (408 / 5xx / timeouts may
+            # have been processed): the request was sent, so the outcome is unknown (blocking), never re-enterable.
+            outcome = None
+        issued = ambiguous or (outcome is None and sent0 is not None and sent_now is not None and sent_now != sent0)
         if outcome == "failed":
             why = "ATS rejected the submission"
         elif issued:
