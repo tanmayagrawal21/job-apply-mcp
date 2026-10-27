@@ -18,7 +18,7 @@ from .config import Settings, state_path
 from .core.concurrency import HostLimiter, bounded_gather
 from .core.interfaces import PlatformAdapter
 from .core.models import Posting
-from .core.next_steps import guide, plan_status, with_guide
+from .core.next_steps import plan_status, with_guide
 from .platforms import AdapterError, HttpClient, build_adapters, detect
 from .platforms.textflags import grad_window_conflict, years_required
 from .search.sessions import Session, SessionError, SessionStore, parse_cursor
@@ -39,6 +39,7 @@ class Services:
         self._llm = None
         self._plan_pages: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()   # last plan/draft per ref
         self._skills: list[str] | None = None
+        self._graduation: str | None = None    # ADR-0062: the profile's graduation date, read once
         self._desc: dict[str, Posting | None] = {}
         self._late: set[asyncio.Task] = set()   # timed-out board fetches left to finish into the cache (ADR-0043)
 
@@ -155,12 +156,31 @@ class Services:
         pol, f = self.settings.policy, p.flags
         if pol.requires_sponsorship and ({"no_sponsorship", "opt_excluded"} & f.keys()):
             return True
-        if "citizenship" in f or "phd_only" in f:
+        if "phd_only" in f or self._legal_drop(p):
             return True
         if pol.max_years_required is not None and (y := years_required(" ".join(f.get("years", [])))) is not None \
                 and y > pol.max_years_required:
             return True
-        return bool(pol.graduation and "grad_window" in f and grad_window_conflict(f["grad_window"], pol.graduation))
+        grad = self._profile_graduation() or pol.graduation    # ADR-0062: the profile's date, then policy.graduation
+        return bool(grad and "grad_window" in f
+                    and grad_window_conflict(f["grad_window"], grad, pol.graduation_flex_months))
+
+    def _legal_drop(self, p: Posting) -> bool:
+        """ADR-0062: the broad citizenship flag drops a posting only when the citizenship gate (which alone decides,
+        on the description when there is one) would skip it under the owner's policy facts."""
+        if "citizenship" not in p.flags:
+            return False
+        from .policy.gates import GateContext, citizenship_gate
+        ctx = GateContext(text=p.description or "", flags={"citizenship": list(p.flags["citizenship"])})
+        return citizenship_gate(ctx, self.settings.policy) is not None
+
+    def _profile_graduation(self) -> str | None:
+        if self._graduation is None:
+            from .profile import load_profile
+            self._graduation = ""
+            with contextlib.suppress(OSError, ValueError):
+                self._graduation = load_profile(self.settings.paths.profile).graduation() or ""
+        return self._graduation or None
 
     @property
     def sessions(self) -> SessionStore:
@@ -442,7 +462,7 @@ class Services:
             out = await (self.engine.plan(ref) if kind == "plan" else self.engine.draft(ref))
             full = out.compact()
             st = plan_status(full)                   # next-step guidance for any client (ADR-0059)
-            full = {**full, "status": st, **guide(st)}
+            full = self._guided({**full, "status": st})   # category + guidance (ADR-0059, ADR-0067)
             pages[(kind, ref)] = full
             pages.move_to_end((kind, ref))
             while len(pages) > 32:
@@ -471,7 +491,28 @@ class Services:
                "client_tasks": getattr(r, "client_tasks", None), "unresolved": getattr(r, "unresolved", None)}
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
-        return with_guide({k: v for k, v in row.items() if v})
+        return self._guided({k: v for k, v in row.items() if v}, state=st["state"] if st else None)
+
+    def _state_of(self, ref: Any) -> str | None:
+        try:
+            st = self.engine.approvals.state(ref) if ref else None
+        except Exception:  # noqa: BLE001 - guidance only
+            return None
+        return st.get("state") if isinstance(st, dict) else None
+
+    def _guided(self, row: dict[str, Any], state: str | None = None) -> dict[str, Any]:
+        """Category (ADR-0067) + next-step guidance (ADR-0059) for one status row."""
+        from .core.handoff import categorize, category_hint, in_window
+        cfg = getattr(self, "settings", None)
+        cat = categorize(row.get("status"), row.get("detail") or row.get("why"), cfg,
+                         unresolved=row.get("unresolved"), client_tasks=row.get("client_tasks"))
+        from .core.next_steps import NO_RETRY, POST_CLICK
+        blocked = ({row.get("status"), state} & NO_RETRY       # may be sent / filled in an open tab: never "retry"
+                   or POST_CLICK.search(str(row.get("detail") or "")))
+        win = (in_window(cfg) if cat else False) and not blocked
+        if cat:
+            row = {**row, "cat": cat, "cat_hint": category_hint(cat, win)}
+        return with_guide(row, cat=cat, window=win, state=state)
 
     async def provide_verification_code(self, pending_id: str, code: str) -> dict[str, Any]:
         r = await self.engine.provide_verification_code(pending_id, code)
@@ -482,8 +523,9 @@ class Services:
         return await self.engine.resolve_submission(ref, outcome, note, actor, evidence)
 
     async def apply_batch(self, refs: list[str], dry_run: bool | None, max_parallel: int | None) -> dict[str, Any]:
-        out: dict[str, Any] = {"results": [with_guide(r) if isinstance(r, dict) else r
-                                           for r in await self.engine.apply_batch(refs, dry_run, max_parallel)]}
+        rows = await self.engine.apply_batch(refs, dry_run, max_parallel)
+        out: dict[str, Any] = {"results": [self._guided(r, state=self._state_of(r.get("ref"))) if isinstance(r, dict)
+                                           else r for r in rows]}
         from .accounts.runtime import RUN_REPORT  # ADR-0046: login flags for this run (never secrets)
         if flags := RUN_REPORT.compact():
             out["account_flags"] = flags

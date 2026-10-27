@@ -163,7 +163,7 @@ class PolicyCfg(BaseModel):
     salary_multi_level_ratio: float = 1.4        # top/bottom above this => range spans levels
     salary_lower_middle: float = 0.33            # anchor position inside a multi-level range (0.5 = midpoint)
     requires_sponsorship: bool | None = None
-    graduation: str | None = None                # e.g. "2026-05"
+    graduation: str | None = None                # fallback when the profile has no education end date, e.g. "2026-05"
     exclude_employer_patterns: list[str] = Field(default_factory=list)
     stop_phrases: list[str] = Field(default_factory=lambda: [
         "personally completed", "my own work", "without the use of ai", "no ai", "ai policy",
@@ -364,6 +364,8 @@ class BrowserCfg(BaseModel):
     user_data_dir: str = Field(default_factory=lambda: paths.default_data_dir_str() + "/browser-profile")
     headless: bool = False
     keep_pages_open: bool = False       # debugging: leave the job's tab open
+    keep_unsubmitted_open: bool = True  # a tab the tool FILLED but did not submit stays open for the human (ADR-0067)
+    linger_after_disconnect_s: float = 3600.0   # stdio: keep the browser up this long after the client leaves while kept tabs are open (0 = off)
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
     timeout_s: float = 30.0
     upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)

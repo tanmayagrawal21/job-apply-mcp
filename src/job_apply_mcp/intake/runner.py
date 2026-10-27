@@ -304,8 +304,10 @@ class IntakeRunner:
                    # ADR-0057: unresolved essays the MCP client can draft and hand back through submit_application
                    "client_tasks": {c.target: {"approval_id": c.approval_id, "essays": c.prose}
                                     for c in cands if c.target and c.prose}}
-            rep = self._build(run_id, rows, cfg.report_rows)
-            await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"], "mode": "dry_run" if dry else "live",
+            rep = self._build(run_id, rows, cfg.report_rows, settings=self.s)
+            await self.store.finish_run(run_id, {**ctx, "counts": rep["counts"],
+                                                 **({"handoff_categories": rep["handoff_categories"]}
+                                                    if rep.get("handoff_categories") else {}), "mode": "dry_run" if dry else "live",
                                           "autonomy": self.s.answers.autonomy})
         out = {**rep, "mode": "dry_run" if dry else "live", "autonomy": self.s.answers.autonomy,
                "max_applications": n or None, "assumed": ctx["assumed"] or None,
@@ -623,16 +625,23 @@ class IntakeRunner:
 
     # ------------------------------------------------------------------------------------------ report
     @staticmethod
-    def _build(run_id: str, rows: list[dict[str, Any]], limit: int, category: str = "") -> dict[str, Any]:
+    def _build(run_id: str, rows: list[dict[str, Any]], limit: int, category: str = "",
+               settings: Any = None) -> dict[str, Any]:
+        from ..core.handoff import categorize
+        from ..core.handoff import count as count_handoffs
         rows = [{**r, "status": LEGACY_STATUS.get(r["status"], r["status"])} for r in rows]
         rows = [r for r in rows if r["status"] in CATEGORIES]
         cats: dict[str, list[dict[str, Any]]] = {k: [] for k in CATEGORIES}
         for r in rows:
             cats[r["status"]].append({k: v for k, v in (("ref", r["ref"]), ("src", r["source"]), ("co", r.get("co")),
                                                         ("title", r.get("title")), ("why", r.get("why")),
+                                                        ("cat", categorize(r["status"], r.get("why"), settings)),
                                                         ("approval_id", r.get("approval_id")
                                                          if r["status"] == "needs_human" else None)) if v})
         out: dict[str, Any] = {"run_id": run_id, "counts": {k: len(v) for k, v in cats.items() if v}}
+        handoffs = count_handoffs([x for v in cats.values() for x in v])   # ADR-0067: drive tool_gap down
+        if handoffs:
+            out["handoff_categories"] = handoffs
         for k, v in cats.items():
             if not v or (category and k != category):
                 continue
@@ -659,7 +668,7 @@ class IntakeRunner:
                 if st and st.get("state") == "confirmed":
                     it["status"] = "confirmed"
                     await self.store.set_item_status(it["id"], "confirmed")
-        rep = self._build(run["run_id"], items, limit or self.s.intake.report_rows, category)
+        rep = self._build(run["run_id"], items, limit or self.s.intake.report_rows, category, settings=self.s)
         summ = run["summary"]
         ctx = {k: summ.get(k) for k in ("applied_feedback", "feedback_notes", "notes", "pending_profile_answers",
                                  "awaiting_confirmation")

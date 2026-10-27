@@ -139,6 +139,7 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(run_doctor(as_json=args.json, network=not args.offline))
     else:
+        from .server import main as stdio_main
         from .server import mcp
 
         if args.transport == "http":
@@ -146,7 +147,7 @@ def main(argv: list[str] | None = None) -> None:
 
             run_http(mcp, args.host, args.port)
         else:
-            mcp.run()
+            stdio_main()        # stdio; lingers for kept tabs after the client leaves (ADR-0067)
 
 
 def _intake_cli(args: argparse.Namespace) -> int:

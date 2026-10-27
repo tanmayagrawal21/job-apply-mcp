@@ -300,10 +300,66 @@ from .persona.tools import register as _register_persona
 
 _register_persona(mcp, svc)
 
+# ---- candidate journal (ADR-0064) ------------------------------------------------------------------------------
+# A separate block on purpose: it APPENDS its paragraph to whatever server instructions are set above, so edits to
+# the main instruction text never conflict with it.
+from .journal.tools import CLIENT_INSTRUCTIONS as _JOURNAL_INSTRUCTIONS
+from .journal.tools import register as _register_journal
+
+_register_journal(mcp, lambda: svc().settings)
+mcp._mcp_server.instructions = "\n\n".join(x for x in (mcp._mcp_server.instructions, _JOURNAL_INSTRUCTIONS) if x)
+
+
+def _kept_drivers() -> list[Any]:
+    eng = getattr(_svc, "_engine", None) if _svc is not None else None
+    return [d for d in (getattr(eng, "_drivers", {}) or {}).values() if d is not None and hasattr(d, "kept_tabs")]
+
+
+def _pending(drivers: list[Any]) -> int:
+    """Open filled-but-unsubmitted tabs plus live final-click watchers (ADR-0058, ADR-0067)."""
+    n = 0
+    for d in drivers:
+        n += len(d.kept_tabs())
+        n += sum(1 for t in getattr(d, "_watchers", {}).values() if not t.done())
+    return n
+
+
+async def linger_for_kept_tabs(poll_s: float = 2.0, cap_s: float | None = None) -> int:
+    """After the stdio client disconnects, keep this process (and so its browser) alive while the person still has
+    filled-but-unsubmitted tabs or a final-click watcher running, up to browser.linger_after_disconnect_s
+    (ADR-0067). Playwright's browser is a child of this process: it cannot outlive it, so lingering is the closest
+    safe option (no remote-debugging port is opened). Returns the tabs still open when it stops."""
+    import asyncio
+    import logging
+    import time
+    drivers = _kept_drivers()
+    if cap_s is None:
+        try:
+            cap_s = float(svc().settings.browser.linger_after_disconnect_s)
+        except Exception:  # noqa: BLE001
+            cap_s = 0.0
+    if not drivers or cap_s <= 0 or not _pending(drivers):
+        return 0
+    log = logging.getLogger("job_apply_mcp.server")
+    log.warning("client disconnected; keeping the browser open for %d unsubmitted tab(s), up to %.0fs",
+                _pending(drivers), cap_s)
+    deadline = time.monotonic() + cap_s
+    while _pending(drivers) and time.monotonic() < deadline:
+        await asyncio.sleep(poll_s)
+    return _pending(drivers)
+
+
+async def serve_stdio() -> None:
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        await linger_for_kept_tabs()
+
 
 def main() -> None:
     """Stdio server (kept for 0.1 client configs). The full CLI lives in cli.py."""
-    mcp.run()
+    import anyio
+    anyio.run(serve_stdio)
 
 
 if __name__ == "__main__":
