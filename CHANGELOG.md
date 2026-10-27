@@ -9,6 +9,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
   (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal
   `captcha_rejected`, never retried. Ashby: Submit waits for in-flight uploads, and a refused "We're updating your
   application" click (nothing sent) is clicked once more after the upload settles.
+- Consent-window attestations `[consent] auto_attest` (trusted user config only; default none): inside an active
+  `approve_submissions` consent window, REQUIRED checkboxes of the opted-in classes (accuracy, policy_ack,
+  background_check, arbitration_terms) are ticked by a deny-by-default classifier; AI-use, export control,
+  citizenship, criminal history, restrictive covenants, specific facts and opt-ins are never ticked. Re-checked at
+  submit; every tick is logged (class, label, ref, consent id) in evidence, the audit log and the run report (ADR-0065).
 - Browser driver (ADR-0063): a Greenhouse board that redirects to a company site is reopened as the Greenhouse
   embed (#98, #99); field lookup is scoped to the application form when a page has several forms (job-alert boxes,
   #98); DOM self-ID surveys use the profile with closed equivalences (Male=Man, explanatory parentheticals, Yes/No
