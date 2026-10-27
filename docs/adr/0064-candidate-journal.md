@@ -33,12 +33,17 @@ refused. Use must stay as safe as the profile's: legal status and demographics c
 - **Risk classes, gated at use time, not at capture time.**
   - `everyday` facts can fill a form once stated.
   - `sensitive` facts can fill a form only once confirmed. Sensitive means authorization, visa, citizenship,
-    sponsorship, immigration, EEO/demographics, criminal history, clearance or background check, decided by the
-    key namespace or the text. Text can raise a class but never lower it.
+    sponsorship, immigration, EEO/demographics, criminal history, clearance or background check, and residence
+    (`contact.city/region/country`, which drives residence-coupled answers, ADR-0055). The class is decided by the
+    key or the text. Text can raise a class but never lower it.
   - Confirmation comes through MCP elicitation at capture time, when the client supports it
-    (`confirmed_via = elicitation`). Otherwise, an entry with `source=chat`, a verbatim `quote` and
-    `confidence=stated` is accepted as `confirmed_via = client_quote`. A `correction` with a quote also counts.
-    A declined dialog, a `document` source without a dialog, or a missing quote leaves the entry unconfirmed.
+    (`confirmed_via = elicitation`). Otherwise, an entry with `source=chat` or `correction`, `confidence=stated`
+    and a substantive verbatim `quote` is accepted as `confirmed_via = client_quote`. Substantive means at least
+    8 characters, and not just the value or a bare yes/no echoed back; this is re-checked at use time.
+    `client_quote` ranks below the profile. It can fill an empty sensitive key, because the owner wants their chat
+    answers reused. Each such answer is marked `assumed` with "from chat, unconfirmed by dialog (journal <id>,
+    <date>)", so it shows in the plan's `assumed` section and in the run report for the owner to review. A declined
+    dialog, a `document` source without a dialog, or a missing or trivial quote leaves the entry unconfirmed.
   - `attestation` entries (and any field whose label reads as a certification) are never filled from the journal.
   - `inferred` entries never fill any form field, everyday or sensitive. They are context only.
 - **Mapper.** `map_fields(..., journal=JournalView)` wraps the profile in a `ProfileOverlay`, a three-line hook in
@@ -60,17 +65,29 @@ refused. Use must stay as safe as the profile's: legal status and demographics c
     (`safe_default`/`infer`). This holds for every field class, and optional held fields are listed too.
   - The owner's choice goes back into the journal as `source=correction` with their words in `quote`. A correction
     that matches the profile ends the conflict. A correction that differs replaces the profile value for that key,
-    and the answer carries `journal:<id>@<date>` plus a rationale naming the replaced profile value. A verbatim
-    correction also counts as `client_quote` confirmation for sensitive keys.
+    and the answer carries `journal:<id>@<date>` plus a rationale naming the replaced profile value. For a
+    sensitive key, only a correction the owner confirmed in the elicitation dialog (`confirmed_via =
+    elicitation`) can replace an owner-set profile value. A client-asserted correction (`client_quote`) leaves the
+    conflict held, and the conflict note tells the client that the owner must confirm in the dialog or edit
+    `profile.toml`. This also protects the trust-guarded keys (citizenship, sponsorship, authorization).
+    U.S.-person and clearance facts have no form mapping at all.
+- **Echoed text is untrusted data.** `record_candidate_fact` and `list_candidate_facts` return fact, quote and
+  client text under an `untrusted` key, beside a `notice` that it is data and not instructions. Sentences that
+  address a model are stripped from the echo by `control.sanitize.sanitize_untrusted` and counted in
+  `untrusted.flagged`; the store keeps the original. The same applies to stories and to conflict quotes. The
+  `client` field is reduced to one line, with control and invisible characters removed, and capped at 60
+  characters when it is recorded.
 - **Stories.** `kind=story` entries never carry a form value. The essay path receives the three most relevant ones
   (word overlap; a company-scoped story only for that company) as `client_tasks[].context.stories` on prose fields.
   `list_candidate_facts(kind="story")` returns them all.
 
 ## Consequences
 - Facts the owner states in any client survive into later applications without anyone editing `profile.toml`.
-- The profile stays authoritative: the journal fills gaps and raises conflicts, and never overrides the profile.
-- The journal is client-written, so a client could fabricate a quote. Sensitive facts are therefore accepted only
-  with the user's verbatim words (or a dialog the user answered), every journal answer shows its entry and date in
-  `src`, and the human approval and plan review steps are unchanged.
+- The profile stays authoritative: the journal fills gaps and raises conflicts. Only an owner correction overrides
+  it, and for a sensitive key only a correction the owner confirmed in an elicitation dialog. Without one, the
+  conflict stays held until the owner edits profile.toml.
+- The journal is client-written, so a client could fabricate a quote. A quote-only sensitive fact can therefore
+  fill only an empty key, is marked for the owner's review, and never replaces the profile. Every journal answer
+  shows its entry and date in `src`, and the human approval and plan review steps are unchanged.
 - A held conflict blocks only its own field, and the owner settles it once: the recorded correction applies to
   every later plan.

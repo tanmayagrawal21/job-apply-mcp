@@ -86,7 +86,9 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 Clients should call `record_candidate_fact` whenever the user says something about themselves. The journal is
 dated and append-only: retracting adds a tombstone and deletes nothing. Secrets are redacted or refused. Sensitive
 facts (authorization, visa, citizenship, sponsorship, EEO, criminal history, clearance) fill a form only once
-confirmed, either through a dialog or through the user's verbatim chat quote. Inferred facts and attestations
+confirmed, either through a dialog or through the user's own substantive words (8 or more characters, not just the
+value). A quote-only answer is marked "from chat, unconfirmed by dialog" and never replaces a sensitive profile
+value. Echoed text comes back under `untrusted`. Inferred facts and attestations
 never fill a form. `plan_application` uses the journal after the profile: `src` shows `journal:<id>@<date>`, and
 a disagreement with the profile holds the field for the owner as a `conflict`, with both values' provenance. No
 model or autonomy assumption fills a held field. Record the owner's choice with `source=correction` to settle it. Stories reach prose tasks as

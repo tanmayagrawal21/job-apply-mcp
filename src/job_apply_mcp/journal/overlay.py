@@ -15,7 +15,8 @@ import contextlib
 import re
 from typing import Any
 
-from .store import CandidateJournal, Entry
+from ..control.sanitize import sanitize_untrusted
+from .store import UNTRUSTED, CandidateJournal, Entry
 
 _DEMOGRAPHIC = ("gender", "hispanic", "race", "veteran", "disability", "pronouns", "sexual_orientation")
 _AUTH_FACTS = ("work_authorized", "requires_sponsorship", "requires_sponsorship_now", "citizen")
@@ -159,15 +160,19 @@ class ProfileOverlay:
             return jv
         if _same(pv, jv):
             return pv
-        if e.source == "correction":           # the owner's own correction (how a conflict is resolved): it wins
+        # the owner's own correction wins; for a sensitive key only one the owner confirmed in a dialog (a
+        # client-supplied quote can fill a profile gap but never replace an owner-set legal, EEO or residence value)
+        if e.source == "correction" and (e.risk != "sensitive" or e.confirmed_via == "elicitation"):
             self.served.setdefault(self._cur, []).append(e)
             self.overrides.setdefault(self._cur, []).append(str(pv)[:80])
             return jv
         self.conflicts.setdefault(self._cur, []).append(
             {"journal_key": e.key, "lookup": key,
              "profile": {"value": str(pv)[:120], "from": "profile.toml"},
+             "sensitive": e.risk == "sensitive",
              "journal": {"value": str(jv)[:120], "entry": e.id, "date": e.date, "source": e.source,
-                         **({"quote": e.quote[:160]} if e.quote else {})}})
+                         "confirmed_via": e.confirmed_via,
+                         **({UNTRUSTED: {"quote": sanitize_untrusted(e.quote[:160]).text}} if e.quote else {})}})
         return pv
 
     def finish(self, res: Any, fields: list[Any]) -> None:
@@ -189,16 +194,26 @@ class ProfileOverlay:
                 if self.overrides.get(a.key):
                     a.rationale = "owner correction in the journal replaces profile value " + \
                         repr(self.overrides[a.key][0])
+                chat = [e for e in used if e.risk == "sensitive" and e.confirmed_via == "client_quote"]
+                if chat:            # lower trust than the profile: listed for the owner's review (plan, run report)
+                    a.assumed = True
+                    why = f"from chat, unconfirmed by dialog (journal {chat[0].id}, {chat[0].date})"
+                    a.rationale = f"{a.rationale}; {why}" if a.rationale else why
             keep.append(a)
         res.answers = keep
         for k, rows in self.conflicts.items():
             if by_key.get(k) is not None and by_key[k] not in res.unresolved:
                 res.unresolved.append(by_key[k])
             jk = rows[0]["journal_key"]
+            note = ("the profile and the candidate journal disagree. Show the owner both values and ask which is "
+                    "right; nothing fills this field until they choose. Record their choice with "
+                    "record_candidate_fact (source=correction, their words in quote), then plan again.")
+            if any(r.get("sensitive") for r in rows):
+                note += (" This is a sensitive key: a correction replaces the profile value only when the owner "
+                         "confirms it in the dialog record_candidate_fact opens. If your client cannot show that "
+                         "dialog, the owner must edit profile.toml.")
             res.hints.setdefault(k, {})["conflict"] = {
-                "note": "the profile and the candidate journal disagree. Show the owner both values and ask which "
-                        "is right; nothing fills this field until they choose. Record their choice with "
-                        "record_candidate_fact (source=correction, their words in quote), then plan again.",
+                "note": note,
                 "values": rows[:3],
                 "resolve": {"tool": "record_candidate_fact", "key": jk, "source": "correction",
                             "confidence": "stated"}}
