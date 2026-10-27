@@ -4,6 +4,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Submit outcomes (ADR-0066): per-ATS classification of each Submit click (success, emailed code, captcha
+  rejected, blocked, validation error, not sent). A Greenhouse low reCAPTCHA score now routes to `awaiting_code`
+  (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal
+  `captcha_rejected`, never retried. Ashby: Submit waits for in-flight uploads, and a refused "We're updating your
+  application" click (nothing sent) is clicked once more after the upload settles.
 - Consent-window attestations `[consent] auto_attest` (trusted user config only; default none): inside an active
   `approve_submissions` consent window, REQUIRED checkboxes of the opted-in classes (accuracy, policy_ack,
   background_check, arbitration_terms) are ticked by a deny-by-default classifier; AI-use, export control,
