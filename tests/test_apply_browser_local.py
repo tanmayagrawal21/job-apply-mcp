@@ -157,10 +157,13 @@ async def test_text_confirmation_requires_form_gone(drv, resume):
     assert res.status == "submitted", res.detail
 
 
-async def test_no_confirmation_is_needs_human_with_evidence(drv, resume):
+async def test_no_confirmation_after_a_sent_request_is_unknown_with_evidence(drv, resume):
+    """ADR-0066: the submit request WAS sent and answered without a verdict, so it may have been received. That is
+    `roadblock` (engine state `unknown`, blocking and reconcilable), never the re-enterable "not submitted"."""
     srv = Srv(page(), "{}")
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
-    assert res.status == "needs_human" and "no success confirmation" in res.detail and "evidence=" in res.detail
+    assert res.status == "roadblock" and "no success confirmation" in res.detail and "evidence=" in res.detail
+    assert "outcome unknown" in res.detail and "treat as NOT submitted" not in res.detail
     assert list(_evidence(drv).glob("no-confirmation-*.png")) and srv.posts == 1
 
 

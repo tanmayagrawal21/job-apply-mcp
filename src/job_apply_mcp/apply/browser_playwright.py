@@ -2489,12 +2489,18 @@ class PlaywrightDriver(VerificationMixin):
                 self._handoff_pages.add(id(page))          # keep the tab open for the human (ADR-0036)
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
         errs = (await self._validation_errors(page))[:5]
-        why = ("ATS rejected the submission" if outcome == "failed"
-               else "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)")
         # After an attempt-policy click, never return a re-enterable state: roadblock -> engine `unknown` (ADR-0036).
-        # ADR-0066: likewise once a submit request was issued (it may have arrived): unknown, never "not sent".
+        # ADR-0066: likewise when a submit request was issued but NO verdict came back (it may have arrived): unknown.
+        # An explicit ATS rejection (outcome "failed") is a verdict, not an ambiguity: needs_human, as before.
         sent_now = self._sent_count(page)
-        issued = sent0 is not None and sent_now is not None and sent_now != sent0
+        issued = outcome is None and sent0 is not None and sent_now is not None and sent_now != sent0
+        if outcome == "failed":
+            why = "ATS rejected the submission"
+        elif issued:
+            why = ("outcome unknown: a submit request was sent but no success confirmation appeared (it may have been "
+                   "received)")
+        else:
+            why = "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)"
         return SubmitResult(ref=ref, status="roadblock" if attempt or issued else "needs_human", via="browser",
                             detail=f"{why}; errors={errs}; do NOT retry, check manually.{ev}")
 
