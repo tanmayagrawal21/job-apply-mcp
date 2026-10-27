@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..config import PolicyCfg
+from ..core.legalflags import CITIZENSHIP_REQUIREMENT, requirement_kind
 from ..core.models import Decision, GateResult, Posting
 
 Verdict = tuple[Decision, str]
@@ -29,11 +30,12 @@ class GateContext:
     text: str = ""                  # posting description (and anything else worth scanning)
     form_text: str = ""             # application form labels / attestations, one field per line (ADR-0040)
     flags: dict[str, list[str]] = field(default_factory=dict)
+    graduation: str = ""            # ADR-0062: the profile's graduation (YYYY-MM); wins over policy.graduation
 
     @classmethod
-    def from_posting(cls, p: Posting, form_text: str = "") -> GateContext:
+    def from_posting(cls, p: Posting, form_text: str = "", graduation: str = "") -> GateContext:
         return cls(p.company, p.title, p.location, p.salary or "", p.description or "", form_text,
-                   dict(p.flags))
+                   dict(p.flags), graduation or "")
 
 
 # -- local fallback flagger ---------------------------------------------------------------------
@@ -43,9 +45,10 @@ _FLAG_PATTERNS: dict[str, str] = {
                       r"|without (?:the need for )?(?:visa )?sponsorship|not (?:eligible|available) for sponsorship"
                       r"|sponsorship (?:is )?not (?:available|offered|provided)"
                       r"|must be (?:legally )?authorized to work[^.]{0,60}without",
-    "citizenship": r"u\.?s\.?\s+citizen(?:ship)?|united states citizen(?:ship)?|citizenship (?:is )?required",
+    # ADR-0062: every explicit requirement form (core.legalflags); "citizen or eligible to work" is the one exemption
+    "citizenship": CITIZENSHIP_REQUIREMENT,
     "clearance": r"security clearance|\bts/sci\b|top secret|secret clearance|active clearance|polygraph",
-    "us_person": r"\bitar\b|u\.?s\.?[ -]person|export[- ]control|\bear\b regulations",
+    "us_person": r"\bitar\b|u\.?s\.?[ -]persons?\b|\bear\b regulations",
 }
 
 
@@ -59,9 +62,34 @@ def local_flags(text: str) -> dict[str, list[str]]:
     return out
 
 
+def _legal_kind(snippet: str) -> str:
+    """ADR-0062: the broad posting flag "citizenship" (platforms.textflags) carries citizenship, U.S.-person,
+    export-control, ITAR and clearance snippets; the gate's own narrow patterns sort each one to its gate, or to none
+    when it states no requirement."""
+    if re.search(_FLAG_PATTERNS["clearance"], snippet, re.IGNORECASE):
+        return "clearance"
+    if m := re.search(_FLAG_PATTERNS["citizenship"], snippet, re.IGNORECASE):
+        # only the requirement itself decides: "... or permanent resident" is a U.S.-person requirement, while a later
+        # clause in the snippet's tail ("(no green card holders)") never relaxes a citizens-only one
+        return requirement_kind(m.group(0))
+    if re.search(_FLAG_PATTERNS["us_person"], snippet, re.IGNORECASE):
+        return "us_person"
+    return ""                       # a mention that states no requirement (EEO / export boilerplate)
+
+
 def _flags(ctx: GateContext) -> dict[str, list[str]]:
-    merged = dict(local_flags(ctx.text))
+    merged: dict[str, list[str]] = {}
+    for k, v in local_flags(ctx.text).items():
+        for snip in v:
+            merged.setdefault((_legal_kind(snip) or k) if k == "citizenship" else k, []).append(snip)
     for k, v in (ctx.flags or {}).items():
+        if k == "citizenship":
+            if (ctx.text or "").strip():
+                continue          # the description itself is read above; the broad posting flag only fills in
+            for snip in v:
+                if kind := _legal_kind(snip):
+                    merged.setdefault(kind, []).append(snip)
+            continue
         merged.setdefault(k, list(v))
     return merged
 
@@ -89,41 +117,21 @@ def years_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
     return None
 
 
-_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
-_MON = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
-_DATE = re.compile(rf"\b{_MON}\s*,?\s*(20\d\d)\b", re.IGNORECASE)
-_CLASS_OF = re.compile(r"class of\s*(20\d\d)|graduat\w*\s+(?:in|by|before|during|between)?\s*(?:the\s+)?"
-                       r"(?:(?:spring|summer|fall|winter)\s+)?(20\d\d)\b", re.IGNORECASE)
-
-
 def _ym(s: str) -> tuple[int, int] | None:
     m = re.fullmatch(r"\s*(\d{4})-(\d{1,2})\s*", s or "")
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def graduation_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
-    grad = _ym(cfg.graduation or "")
-    if not grad:
+    """ADR-0062: skip only on a clear mismatch between the posting's stated graduation windows and the profile's
+    graduation (policy.graduation when the profile has none), widened by policy.graduation_flex_months. Ambiguous or
+    open-ended wording ("by 2028", "2026, 2027 or 2028", "2028 or earlier") never skips."""
+    from ..core.gradwindow import grad_mismatch
+    grad = ctx.graduation or cfg.graduation or ""
+    if not _ym(grad):
         return None
-    gi = grad[0] * 12 + grad[1]
-    flex = cfg.graduation_flex_months
-    text = ctx.text + " " + ctx.title
-    # explicit window: "graduating between December 2025 and August 2026" / "Dec 2025 - Aug 2026"
-    for m in re.finditer(r"graduat\w*|degree|class of|expected", text, re.IGNORECASE):
-        seg = text[max(0, m.start() - 120): m.end() + 200]
-        dates = [(int(y), _MONTHS[mo[:3].lower()]) for mo, y in _DATE.findall(seg)]
-        if len(dates) >= 2:
-            lo, hi = sorted(y * 12 + mo for y, mo in dates[:2])
-            if not (lo - flex <= gi <= hi + flex):
-                return Decision.skip, "grad date outside posting window"
-            return None
-    m = _CLASS_OF.search(text)
-    if m:
-        year = int(m.group(1) or m.group(2))
-        lo, hi = year * 12 + 1, year * 12 + 12
-        if not (lo - flex <= gi <= hi + flex):
-            return Decision.skip, f"wants class of {year}"
+    if grad_mismatch(ctx.text + "\n" + ctx.title, grad, cfg.graduation_flex_months):
+        return Decision.skip, "grad date outside posting window"
     return None
 
 
@@ -312,5 +320,5 @@ def evaluate(ctx: GateContext, cfg: PolicyCfg, gates: list[str] | None = None) -
     return GateResult(decision=Decision.submit)
 
 
-def evaluate_posting(p: Posting, cfg: PolicyCfg, form_text: str = "") -> GateResult:
-    return evaluate(GateContext.from_posting(p, form_text), cfg)
+def evaluate_posting(p: Posting, cfg: PolicyCfg, form_text: str = "", graduation: str = "") -> GateResult:
+    return evaluate(GateContext.from_posting(p, form_text, graduation), cfg)

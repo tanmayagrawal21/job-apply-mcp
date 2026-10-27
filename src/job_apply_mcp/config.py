@@ -163,7 +163,7 @@ class PolicyCfg(BaseModel):
     salary_multi_level_ratio: float = 1.4        # top/bottom above this => range spans levels
     salary_lower_middle: float = 0.33            # anchor position inside a multi-level range (0.5 = midpoint)
     requires_sponsorship: bool | None = None
-    graduation: str | None = None                # e.g. "2026-05"
+    graduation: str | None = None                # fallback when the profile has no education end date, e.g. "2026-05"
     exclude_employer_patterns: list[str] = Field(default_factory=list)
     stop_phrases: list[str] = Field(default_factory=lambda: [
         "personally completed", "my own work", "without the use of ai", "no ai", "ai policy",

@@ -8,6 +8,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
   in `<data_dir>/kept_tabs.json`; on stdio the process lingers after a client disconnect while such tabs exist
   (`browser.linger_after_disconnect_s`). Handoff reasons are categorised `hard_limit` / `unknown_fact` / `tool_gap`
   (`cat` on submit rows, `handoff_categories` in run reports); consented steps are tool gaps (ADR-0067).
+- Candidate journal: `record_candidate_fact`, `list_candidate_facts` and `retract_candidate_fact` keep a dated,
+  append-only log (0600 JSONL in the state dir) of what the user says about themselves. Server instructions ask
+  every client to record such facts. Secrets are redacted at capture. Sensitive facts are usable only once
+  confirmed (a dialog, or the user's verbatim quote from chat or a correction), and inferred facts and attestations
+  never fill forms. The mapper uses the journal after the profile, with `journal:<id>@<date>` provenance. When the
+  journal and the profile disagree, the field is held for the owner and no model or autonomy fallback fills it. The
+  owner's choice, recorded as a correction, settles it. Stories reach prose tasks (ADR-0064).
 - Submit outcomes (ADR-0066): per-ATS classification of each Submit click (success, emailed code, captcha
   rejected, blocked, validation error, not sent). A Greenhouse low reCAPTCHA score now routes to `awaiting_code`
   (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal

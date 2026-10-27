@@ -12,6 +12,7 @@ from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
 from .http import HttpError
 from .textflags import html_to_text
 
+_REMOTE_WORD = re.compile(r"\bremote\b", re.IGNORECASE)
 API = "https://boards-api.greenhouse.io/v1/boards"
 _URL = re.compile(r"greenhouse\.io/(?:embed/job_app\?for=)?([^/?#]+)/jobs/(\d+)")
 _KINDS = {"input_text": FieldKind.text, "textarea": FieldKind.textarea, "input_file": FieldKind.file,
@@ -72,12 +73,27 @@ class GreenhouseAdapter(BaseAdapter):
             loc = o.get("location") if isinstance(o, dict) else None
             tail = loc.rsplit(",", 1)[-1] if isinstance(loc, str) else ""
             code = self.country_code(tail, allow_codes=False) or (self.country_code(tail) if tail.strip() == "US" else None)
+            if not code and isinstance(loc, str) and loc.strip():
+                code = self._us_office(loc, str(o.get("name") or ""))
             if not code and isinstance(o, dict) and not (loc or "").strip() and isinstance(o.get("name"), str):
                 # ADR-0053: an office with no location whose NAME is exactly a full country name ("United States").
-                # Codes and labels such as "US-PERM" or "NYC" never confirm.
-                code = self.country_code(o["name"], allow_codes=False)
+                # ADR-0062: also "Remote - United States" / "United States (Remote)". Codes and labels such as
+                # "US-PERM" or "NYC" never confirm.
+                code = self.country_code(_REMOTE_WORD.sub(" ", o["name"]).strip(" -,()/"), allow_codes=False)
             out.append(code or "UNCONFIRMED")
         return sorted(set(out))
+
+    @staticmethod
+    def _us_office(loc: str, name: str = "") -> str | None:
+        """ADR-0062: an office location that is a strictly parsed US place ("Mountain View, CA", or the place after
+        an office name: "Acme HQ - Mountain View, CA"). The same strict parser as the mapper; an office whose name or
+        location names any other country never confirms."""
+        from ..apply.mapper import location_in_country, question_countries
+        from ..apply.places import MULTI_REGION, country_iso
+        if any(country_iso(c, allow_codes=False) != "US" for t in (name, loc) for c in question_countries(t)[1]):
+            return None
+        place = loc.rsplit(" - ", 1)[-1].strip()
+        return "US" if place and not MULTI_REGION.search(place) and location_in_country(place, "US") else None
 
     @staticmethod
     def _locations(j: dict) -> list[str]:

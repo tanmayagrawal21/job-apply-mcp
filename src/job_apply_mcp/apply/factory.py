@@ -53,7 +53,7 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
             raise ComponentMissing(str(e)) from e
     if gates is None:
         _need("policy.gates", "policy gates", "feat/store-policy")
-        gates = ad.PolicyGates(settings)
+        gates = ad.PolicyGates(settings, profile)
     if store is None:
         sqlite = _need("store.sqlite", "application store", "feat/store-policy")
         store = sqlite.SqliteStore(state_path(settings), dedupe_days=settings.policy.dedupe_days,
@@ -77,7 +77,17 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
                          profile=profile, router=router, gates=gates, store=store, driver_factory=driver_factory,
                          control=control)
     wire_persona(engine, settings)
+    wire_journal(engine, settings)
     return engine
+
+
+def wire_journal(engine: ApplyEngine, settings: Settings) -> None:
+    """Attach the candidate journal (ADR-0064). It is advisory: a state dir that cannot be resolved leaves it off."""
+    from ..journal import CandidateJournal
+    try:
+        engine.journal = CandidateJournal(state_path(settings))
+    except Exception:  # noqa: BLE001
+        engine.journal = None
 
 
 def wire_persona(engine: ApplyEngine, settings: Settings) -> None:

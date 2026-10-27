@@ -300,6 +300,15 @@ from .persona.tools import register as _register_persona
 
 _register_persona(mcp, svc)
 
+# ---- candidate journal (ADR-0064) ------------------------------------------------------------------------------
+# A separate block on purpose: it APPENDS its paragraph to whatever server instructions are set above, so edits to
+# the main instruction text never conflict with it.
+from .journal.tools import CLIENT_INSTRUCTIONS as _JOURNAL_INSTRUCTIONS
+from .journal.tools import register as _register_journal
+
+_register_journal(mcp, lambda: svc().settings)
+mcp._mcp_server.instructions = "\n\n".join(x for x in (mcp._mcp_server.instructions, _JOURNAL_INSTRUCTIONS) if x)
+
 
 def _kept_drivers() -> list[Any]:
     eng = getattr(_svc, "_engine", None) if _svc is not None else None

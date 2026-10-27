@@ -316,7 +316,9 @@ async def test_plan_and_submit_rows_carry_guidance():
 
 def test_server_instructions_tell_any_client_the_flow_and_the_rules():
     ins = server.mcp.instructions or ""
-    assert ins == server.INSTRUCTIONS and len(ins) < 1200
+    # ADR-0064: the candidate-journal paragraph is appended as its own block after the main instructions
+    assert ins == server.INSTRUCTIONS + "\n\n" + server._JOURNAL_INSTRUCTIONS
+    assert len(server.INSTRUCTIONS) < 1200 and len(server._JOURNAL_INSTRUCTIONS) < 500
     for must in ("plan_application", "client_tasks", "submit_application", "final_click", "give_feedback",
                  "Never edit this tool's files or databases", "outside these tools", "next_action"):
         assert must in ins, must

@@ -39,6 +39,7 @@ class Services:
         self._llm = None
         self._plan_pages: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()   # last plan/draft per ref
         self._skills: list[str] | None = None
+        self._graduation: str | None = None    # ADR-0062: the profile's graduation date, read once
         self._desc: dict[str, Posting | None] = {}
         self._late: set[asyncio.Task] = set()   # timed-out board fetches left to finish into the cache (ADR-0043)
 
@@ -155,12 +156,31 @@ class Services:
         pol, f = self.settings.policy, p.flags
         if pol.requires_sponsorship and ({"no_sponsorship", "opt_excluded"} & f.keys()):
             return True
-        if "citizenship" in f or "phd_only" in f:
+        if "phd_only" in f or self._legal_drop(p):
             return True
         if pol.max_years_required is not None and (y := years_required(" ".join(f.get("years", [])))) is not None \
                 and y > pol.max_years_required:
             return True
-        return bool(pol.graduation and "grad_window" in f and grad_window_conflict(f["grad_window"], pol.graduation))
+        grad = self._profile_graduation() or pol.graduation    # ADR-0062: the profile's date, then policy.graduation
+        return bool(grad and "grad_window" in f
+                    and grad_window_conflict(f["grad_window"], grad, pol.graduation_flex_months))
+
+    def _legal_drop(self, p: Posting) -> bool:
+        """ADR-0062: the broad citizenship flag drops a posting only when the citizenship gate (which alone decides,
+        on the description when there is one) would skip it under the owner's policy facts."""
+        if "citizenship" not in p.flags:
+            return False
+        from .policy.gates import GateContext, citizenship_gate
+        ctx = GateContext(text=p.description or "", flags={"citizenship": list(p.flags["citizenship"])})
+        return citizenship_gate(ctx, self.settings.policy) is not None
+
+    def _profile_graduation(self) -> str | None:
+        if self._graduation is None:
+            from .profile import load_profile
+            self._graduation = ""
+            with contextlib.suppress(OSError, ValueError):
+                self._graduation = load_profile(self.settings.paths.profile).graduation() or ""
+        return self._graduation or None
 
     @property
     def sessions(self) -> SessionStore:
