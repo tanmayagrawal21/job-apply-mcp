@@ -53,7 +53,7 @@ def build_engine(settings: Settings, *, store: Any = None, profile: Any = None, 
             raise ComponentMissing(str(e)) from e
     if gates is None:
         _need("policy.gates", "policy gates", "feat/store-policy")
-        gates = ad.PolicyGates(settings)
+        gates = ad.PolicyGates(settings, profile)
     if store is None:
         sqlite = _need("store.sqlite", "application store", "feat/store-policy")
         store = sqlite.SqliteStore(state_path(settings), dedupe_days=settings.policy.dedupe_days,

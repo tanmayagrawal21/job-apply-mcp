@@ -10,6 +10,12 @@ import html
 import re
 from dataclasses import dataclass
 
+from ..core.gradwindow import (  # noqa: F401 (ADR-0062 re-export)
+    grad_mismatch,
+    grad_ranges,
+    grad_window_conflict,
+)
+
 # --------------------------------------------------------------------------------------- text helpers
 
 _TAG = re.compile(r"<[^>]+>")
@@ -39,11 +45,22 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE),
     "opt_excluded": re.compile(
         r"(?:F-?1|OPT|STEM OPT|I-983|CPT)[^.]{0,80}(?:not|unable|ineligible)|not open to (?:F-?1|J-?1)", re.IGNORECASE),
+    # ADR-0062: a BROAD signal (a superset of every citizenship, U.S.-person, export-control, ITAR and clearance
+    # mention). Each hit carries up to 80 characters of the rest of its sentence so policy.gates, which alone
+    # decides, can tell "must be a U.S. citizen" from "... or eligible to work" and boilerplate.
     "citizenship": re.compile(
-        r"U\.?S\.? citizen(?:ship)? (?:is )?required|must be a U\.?S\.? citizen|security clearance"
-        r"|active clearance|TS/SCI|ITAR|export[- ]control", re.IGNORECASE),
+        r"(?:must|shall|need to|required to) (?:be|hold|have|possess) (?:an? )?(?:(?:lawful |legal )?permanent "
+        r"residents? or (?:an? )?)?(?:U\.?S\.?A?|United States|American) (?:citizen|national|person)\w*(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:must|shall|need to|required to) (?:be|hold|have|possess) (?:an? )?(?:citizen|national)\w* of (?:the )?"
+        r"(?:U\.?S\.?A?|United States)(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:U\.?S\.?A?|United States|American) (?:citizen|national|person)\w*(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:requires?|required) (?:U\.?S\.? |United States )?citizenship(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:no |not )?citizenship (?:is )?(?:required|mandatory|a requirement)"
+        r"|security clearance|active clearance|TS/SCI|ITAR(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}|export[- ]control(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}", re.IGNORECASE),
     "grad_window": re.compile(
-        r"graduat\w*[^.]{0,80}?20\d\d|(?:class|graduates?) of\s*20\d\d|20\d\d\s+(?:new\s+)?(?:grad|graduate)s?\b", re.IGNORECASE),
+        r"graduat\w*[^.]{0,80}?20\d\d(?:[^.\n]{0,40}?20\d\d)?(?:,? *or (?:earlier|later|before|after|sooner))?"
+        r"|(?:class|graduates?) of\s*20\d\d(?:(?: *,| *or| *and| */)+ *20\d\d)*(?:,? *or (?:earlier|later|before|after))?"
+        r"|20\d\d\s+(?:new\s+)?(?:grad|graduate)s?\b", re.IGNORECASE),
     "phd_only": re.compile(r"PhD (?:required|only)|currently pursuing a PhD|New PhD Graduate|PhD Graduate|New PhD"
                           r"|PhD (?:student|candidate)s?", re.IGNORECASE),
     "academic": re.compile(
@@ -56,7 +73,7 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
 _NEEDS: dict[str, tuple[str, ...]] = {
     "no_sponsorship": ("sponsor",),
     "opt_excluded": ("f-1", "f1", "opt", "i-983", "cpt", "j-1", "j1"),
-    "citizenship": ("citizen", "clearance", "ts/sci", "itar", "export"),
+    "citizenship": ("citizen", "national", "person", "clearance", "ts/sci", "itar", "export"),
     "grad_window": ("grad", "class"),
     "phd_only": ("phd",),
     "academic": ("university", "college", "school of medicine", "research institute", "academic medical center"),
@@ -84,7 +101,7 @@ def _may(kind: str, low: str) -> bool:
 # First characters of every alternative of each pattern (ADR-0043). A `(?=[...])` guard rejects other start
 # positions with one class test instead of trying every IGNORECASE alternative there; the set of matches is
 # unchanged (tests/test_textflags.py checks the guarded and plain patterns agree).
-_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "umsatie",
+_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "msnruacite",
                           "grad_window": "gc2", "phd_only": "pcn", "academic": "ucsra"}
 _FAST: dict[str, re.Pattern[str]] = {
     k: re.compile(f"(?=[{_FIRST[k]}])(?:{pat.pattern})", pat.flags) for k, pat in _PATTERNS.items()}
@@ -135,50 +152,8 @@ def citizenship_flags(text: str, max_hits: int = 3, hit_len: int = 140) -> list[
 
 # ----------------------------------------------------------------------------------- grad window
 
-_SEASON_MONTH = {"spring": 5, "may": 5, "summer": 7, "fall": 9, "autumn": 9, "winter": 12, "december": 12, "dec": 12,
-                 "june": 6, "july": 7, "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9,
-                 "october": 10, "oct": 10, "november": 11, "nov": 11, "january": 1, "jan": 1,
-                 "february": 2, "feb": 2, "march": 3, "mar": 3, "april": 4, "apr": 4}
-_SEASON_RE = re.compile(r"\b(" + "|".join(sorted(_SEASON_MONTH, key=len, reverse=True)) + r")\b\.?\s*(?:of\s*)?(20\d\d)?", re.IGNORECASE)
-
-
 def grad_windows(text: str, max_hits: int = 3, hit_len: int = 140) -> list[str]:
     return _hits(_PATTERNS["grad_window"], text, max_hits, hit_len)
-
-
-def _parse_window(s: str) -> tuple[int, int | None] | None:
-    years = [int(y) for y in re.findall(r"20\d\d", s)]
-    if not years:
-        return None
-    year = max(years)
-    month = None
-    for m in _SEASON_RE.finditer(s):
-        if m.group(2) and int(m.group(2)) == year or not m.group(2):
-            month = _SEASON_MONTH[m.group(1).lower()]
-    return year, month
-
-
-def grad_window_conflict(windows: list[str], graduation: str) -> bool:
-    """True when every graduation window in the posting starts after `graduation` ('YYYY-MM').
-
-    Windows that mention nothing parseable are ignored. A posting that mentions both a later and an
-    on-or-before window is not a conflict (it is open to both).
-    """
-    try:
-        gy, gm = (int(x) for x in graduation.split("-")[:2])
-    except ValueError:
-        return False
-    later = not_later = False
-    for w in windows:
-        parsed = _parse_window(w)
-        if not parsed:
-            continue
-        y, m = parsed
-        if y > gy or (y == gy and m is not None and m > gm):
-            later = True
-        else:
-            not_later = True
-    return later and not not_later
 
 
 # --------------------------------------------------------------------------------------------- pay
