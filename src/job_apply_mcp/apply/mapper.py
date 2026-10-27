@@ -2163,9 +2163,12 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
                min_score: float = 0.78, company: str = "", top_languages: int = 3,
                stop_phrases: Sequence[str] = (), company_aliases: Sequence[str] = (), persona: Any = None,
                job_in_us: bool = False, job_country: str | None = None,
-               job_locations: Sequence[str] = ()) -> MapResult:
+               job_locations: Sequence[str] = (), journal: Any = None) -> MapResult:
     """`job_country`: the job's confirmed ISO-2 country (see job_country()); `job_in_us=True` is the old alias for "US".
-    `job_locations`: the posting's location strings, for residence-coupled options (ADR-0055)."""
+    `job_locations`: the posting's location strings, for residence-coupled options (ADR-0055).
+    `journal`: a journal.overlay.JournalView; it answers after the profile, with provenance (ADR-0064)."""
+    if journal is not None:
+        profile = journal.overlay(profile)
     if job_country is None and job_in_us:
         job_country = "US"
     pref = DEFAULT_REFERRAL_PREFERENCE if referral_preference is None else referral_preference
@@ -2181,6 +2184,8 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             res.answers.append(Answer(key=f.key, value=v, source=src))
 
     for f in fields:
+        if journal is not None:
+            profile.begin(f)
         if f.kind == FieldKind.file:
             path = _file_for(f.label, profile)
             if path:
@@ -2314,6 +2319,8 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             res.unresolved.append(f)
         else:
             res.answers.append(Answer(key=f.key, value=coerced, source="persona:answer" if persona_src else "profile" if ck is None else f"rule:{ck}"))
+    if journal is not None:              # ADR-0064: provenance, conflicts and the attestation guard
+        profile.finish(res, fields)
     # ADR-0040 option domain: outside the EEO path, a chosen option may never name a demographic category
     by_key = {f.key: f for f in fields}
     keep: list[Answer] = []
