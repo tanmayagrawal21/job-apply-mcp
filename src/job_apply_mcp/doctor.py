@@ -82,15 +82,17 @@ def _profile_checks(s: Settings) -> list[Check]:
         out.append(Check("profile", WARN, f"{p} missing: {', '.join(missing)}", "Fill those fields in profile.toml."))
     else:
         out.append(Check("profile", OK, f"{p} complete ({c.full_name})"))
-    if s.paths.resume:
-        rp = Path(s.paths.resume).expanduser()
-        out.append(Check("resume", OK, f"{rp}") if rp.is_file()
-                   else Check("resume", FAIL, f"paths.resume not found: {rp}", "Point paths.resume at your PDF."))
-        if rp.is_file():
-            out.append(_resume_consistency_check(rp, prof))
+    from .resume_access import resolve_resume
+    acc = resolve_resume(s)                      # readable by THIS process? (macOS TCC, ADR-0061)
+    if acc.path is not None:
+        out.append(Check("resume", WARN if acc.why else OK, acc.why or f"{acc.path} readable", acc.fix))
+        out.append(_resume_consistency_check(acc.path, prof))
+    elif s.paths.resume:
+        out.append(Check("resume", FAIL, acc.why, acc.fix))
     else:
         out.append(Check("resume", WARN, "paths.resume not set; applications that need an upload will stop",
-                         'Set paths.resume = "/path/to/resume.pdf" in config.toml.'))
+                         'Set paths.resume = "/path/to/resume.pdf" in config.toml, or ' + acc.fix[0].lower()
+                         + acc.fix[1:]))
     return out
 
 

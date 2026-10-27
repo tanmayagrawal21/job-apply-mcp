@@ -34,7 +34,11 @@ class ProfileView:
 
     def __init__(self, profile: Any, settings: Settings):
         self.p = profile
-        self.resume_path = settings.paths.resume
+        from ..resume_access import resolve_resume
+        try:     # a readable copy in <data_dir>/documents wins over an OS-blocked path (ADR-0061)
+            self.resume_path = str(resolve_resume(settings).path or "") or settings.paths.resume
+        except Exception:  # noqa: BLE001 - never break profile loading over a path check
+            self.resume_path = settings.paths.resume
         self.cover_letter_path: str | None = None
         self.settings = settings
         self._fs: Any = None
