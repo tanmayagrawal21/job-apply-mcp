@@ -455,8 +455,9 @@ class Services:
                "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t,
                "client_tasks": getattr(r, "client_tasks", None), "unresolved": getattr(r, "unresolved", None)}
         from .core.handoff import categorize, category_hint, in_window
-        if (cat := categorize(r.status, r.detail, self.settings)):          # ADR-0067
-            row["cat"], row["cat_hint"] = cat, category_hint(cat, in_window(self.settings))
+        cfg = getattr(self, "settings", None)
+        if (cat := categorize(r.status, r.detail, cfg)):          # ADR-0067
+            row["cat"], row["cat_hint"] = cat, category_hint(cat, in_window(cfg))
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return {k: v for k, v in row.items() if v}
