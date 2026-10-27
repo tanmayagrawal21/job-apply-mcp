@@ -216,11 +216,12 @@ def test_readable_resume_is_used(tmp_path):
     assert acc.ok and acc.path == f and not acc.why
 
 
-def test_blocked_resume_falls_back_to_the_copy_in_documents(tmp_path, monkeypatch):
+def test_blocked_resume_uses_only_an_identical_copy_in_documents(tmp_path, monkeypatch):
     blocked = tmp_path / "Downloads" / "cv.pdf"
     blocked.parent.mkdir()
-    blocked.write_bytes(b"%PDF fictional")
+    blocked.write_bytes(b"%PDF fictional v2")
     s = _s(tmp_path, str(blocked))
+    assert resolve_resume(s).ok                          # readable once: its hash is recorded
     real_open = Path.open
 
     def fake_open(self, *a, **k):
@@ -232,10 +233,21 @@ def test_blocked_resume_falls_back_to_the_copy_in_documents(tmp_path, monkeypatc
     assert not acc.ok and acc.path is None and "permission denied" in acc.why
     assert str(documents_dir(s)) in acc.fix
     docs = documents_dir(s)
-    docs.mkdir(parents=True)
-    (docs / "cv.pdf").write_bytes(b"%PDF fictional copy")
+    (docs / "cv.pdf").write_bytes(b"%PDF fictional v1 (older)")      # an older same-named copy: never used
     acc = resolve_resume(s)
-    assert acc.ok and acc.path == docs / "cv.pdf" and "using the copy" in acc.why
+    assert not acc.ok and "cannot be verified" in acc.why and str(docs / "cv.pdf") in acc.fix
+    (docs / "cv.pdf").write_bytes(b"%PDF fictional v2")              # identical copy: used
+    acc = resolve_resume(s)
+    assert acc.ok and acc.path == docs / "cv.pdf" and "hash matches" in acc.why
+
+
+def test_missing_configured_resume_never_falls_back(tmp_path):
+    s = _s(tmp_path, str(tmp_path / "gone" / "cv.pdf"))
+    docs = documents_dir(s)
+    docs.mkdir(parents=True)
+    (docs / "cv.pdf").write_bytes(b"%PDF fictional old")
+    acc = resolve_resume(s)
+    assert not acc.ok and acc.path is None and "not found" in acc.why
 
 
 def test_relative_and_unset_resume_resolve_in_the_data_dir(tmp_path):
@@ -297,7 +309,7 @@ async def test_plan_and_submit_rows_carry_guidance():
     d = await svc.plan(POSTING.ref)
     assert d["status"] == "needs_input" and d["next_action"] == "ask_user"
     row = svc._submit_row(SubmitResult(ref="r", status="unknown"))
-    assert row["next_action"] == "verify_with_user" and "never resubmit" in row["hint"]
+    assert row["next_action"] == "reconcile" and "never resubmit" in row["hint"]
 
 
 # ---- 6. server instructions (ADR-0061) ------------------------------------------------------------------------

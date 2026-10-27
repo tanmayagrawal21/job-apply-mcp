@@ -5,12 +5,16 @@ process access to ~/Downloads, ~/Documents or ~/Desktop even though the same use
 configured `paths.resume` exists but cannot be read. The tool therefore also accepts a resume kept in its own data
 directory (`<data_dir>/documents`), which needs no extra permission.
 
-Resolution order: `paths.resume` (a relative path is resolved under the documents dir) if readable; else a file with
-the same name in the documents dir; else, when `paths.resume` is unset, the single `resume.*` file there.
+Resolution order: `paths.resume` (a relative path is resolved under the documents dir) if readable; else, ONLY when it
+exists but the OS denies access, a same-named copy in the documents dir whose SHA-256 matches the hash recorded the
+last time the configured file was readable (an older or different copy is never uploaded silently, ADR-0067); else,
+when `paths.resume` is unset, the single `resume.*` file there. A missing configured resume always fails with a fix.
 """
 from __future__ import annotations
 
 import errno
+import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,10 +80,17 @@ def resolve_resume(settings: Any) -> ResumeAccess:
             p = docs / p
         ok, why = readable(p)
         if ok:
+            _record_hash(settings, p)
             return ResumeAccess(p, conf, True)
         alt = docs / p.name
-        if alt != p and readable(alt)[0]:
-            return ResumeAccess(alt, conf, True, f"paths.resume is {why}; using the copy in {docs}")
+        if "permission" in why and alt != p and readable(alt)[0]:
+            if _sha256(alt) == _recorded(settings).get(str(p)):
+                return ResumeAccess(alt, conf, True,
+                                    f"paths.resume is {why}; using the identical copy in {docs} (hash matches)")
+            return ResumeAccess(None, conf, False,
+                                f"paths.resume {p} is {why}; the copy in {docs} cannot be verified as the same file",
+                                f"Set paths.resume = \"{alt}\" if that copy is your current resume, or grant this "
+                                "server's client app access to the original.")
         return ResumeAccess(None, conf, False, f"paths.resume {p} is {why} for this server process",
                             _fix(docs, p.name, why))
     found = sorted(x for x in docs.glob("resume*") if x.suffix.lower() in _EXTS and x.is_file()) \
@@ -89,3 +100,40 @@ def resolve_resume(settings: Any) -> ResumeAccess:
     why = ("paths.resume not set" if not found
            else f"paths.resume not set and {len(found)} resume files in {docs}; set one explicitly")
     return ResumeAccess(None, None, False, why, _fix(docs, "resume.pdf", ""))
+
+
+# ---- recorded hashes: the configured resume's SHA-256, written whenever it was readable --------------------------
+
+def _hash_file(settings: Any) -> Path:
+    return documents_dir(settings) / ".resume_hashes.json"
+
+
+def _sha256(p: Path) -> str | None:
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _recorded(settings: Any) -> dict[str, str]:
+    try:
+        d = json.loads(_hash_file(settings).read_text(encoding="utf-8"))
+        return {str(k): str(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_hash(settings: Any, p: Path) -> None:
+    h = _sha256(p)
+    if h is None:
+        return
+    rec = _recorded(settings)
+    if rec.get(str(p)) == h:
+        return
+    rec[str(p)] = h
+    try:
+        f = _hash_file(settings)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    except OSError:
+        pass     # recording is best effort; without it a blocked resume simply fails with a fix

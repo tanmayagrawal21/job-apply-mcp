@@ -1469,6 +1469,9 @@ class ApplyEngine:
                     with self._stage(ref, "submit"):
                         result = await self._dispatch(ctx, eff, dry)
                 except BaseException as e:  # incl. cancellation: the click may have happened
+                    if isinstance(e, Exception):    # tells the tool guard whether anything may have been sent
+                        with contextlib.suppress(Exception):
+                            e.dispatched = bool(ctx.meta.get("dispatched"))  # type: ignore[attr-defined]
                     if not dry:
                         st = "unknown" if ctx.meta.get("dispatched") else "failed"   # pre-dispatch is safe to retry
                         self.approvals.finish(ref, st, f"{type(e).__name__}: {e}"[:200],

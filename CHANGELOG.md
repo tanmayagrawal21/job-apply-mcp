@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- `browser.keep_unsubmitted_open` (default true): tabs the tool filled but did not submit stay open and are listed
+  in `<data_dir>/kept_tabs.json`; on stdio the process lingers after a client disconnect while such tabs exist
+  (`browser.linger_after_disconnect_s`). Handoff reasons are categorised `hard_limit` / `unknown_fact` / `tool_gap`
+  (`cat` on submit rows, `handoff_categories` in run reports); consented steps are tool gaps (ADR-0067).
 - Candidate journal: `record_candidate_fact`, `list_candidate_facts` and `retract_candidate_fact` keep a dated,
   append-only log (0600 JSONL in the state dir) of what the user says about themselves. Server instructions ask
   every client to record such facts. Secrets are redacted at capture. Sensitive facts are usable only once

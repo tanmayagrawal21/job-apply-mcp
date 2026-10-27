@@ -215,6 +215,8 @@ Self-improvement (ADR-0015). Everything about repo, remote, branches, coder and 
 | `user_data_dir` | `str` | `"~/.local/share/job-apply-mcp/browser-profile"` |  |
 | `headless` | `bool` | `false` |  |
 | `keep_pages_open` | `bool` | `false` | debugging: leave the job's tab open |
+| `keep_unsubmitted_open` | `bool` | `true` | a tab the tool FILLED but did not submit stays open for the human (ADR-0067) |
+| `linger_after_disconnect_s` | `float` | `3600.0` | stdio: keep the browser up this long after the client leaves while kept tabs are open (0 = off) |
 | `channel` | `str \| None` | `none` | e.g. "chrome" to use the installed Chrome |
 | `timeout_s` | `float` | `30.0` |  |
 | `upload_settle_s` | `float` | `4.0` | wait after a resume upload (parsers re-render the form) |
