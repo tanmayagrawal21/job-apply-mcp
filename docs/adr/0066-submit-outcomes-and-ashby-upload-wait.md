@@ -37,10 +37,18 @@ A read-only study of the shipped Greenhouse, Lever and Ashby front ends (2026-10
     captcha attempt policy), as before.
 - **Ashby upload wait.** Before the Submit click the driver waits (cap `upload_settle_s` + 15 s) until no "We're
   updating your application" toast and no uploading / parsing text is shown; if it never settles, Submit is not
-  clicked (`needs_human`, "not sent"). If the click still produces the toast and **no submit request was recorded**
-  (`not_sent`), the driver waits for the upload to settle and clicks Submit once more. That is not a resubmission:
-  the first click sent nothing. A second `not_sent`, any recorded submit request, or an upload that never settles
-  stops with `needs_human`.
+  clicked (`needs_human`, "not sent").
+- **Request-level gate (control review).** Every submit-endpoint REQUEST is counted the moment the page issues it
+  (`page.on("request")`, uncapped; the 30-record response cap no longer applies to submit responses). `not_sent` is
+  possible only when the counter did not move after the click; a request that is in flight, still being read, or
+  that failed after it was issued is "maybe sent". The single extra click happens only when ALL hold: no submit
+  request was ever issued for this click (re-checked after a 1 s grace and again after the upload settles), no submit
+  response was recorded, the upload settled, no blocker or visible challenge, and exactly one usable Submit button
+  (the form is still editable). Every other case stops without clicking: `roadblock` (engine `unknown`, blocking)
+  when anything may have been sent, `needs_human` when provably nothing was. A click whose request was issued but
+  whose outcome stays unclear also ends as `roadblock`/`unknown`, never as "not submitted". An untracked page fails
+  closed (no extra click).
+- The Ashby success panel counts only when visible.
 - Unchanged: the captcha policy (ADR-0036, handoff before the click on Ashby by default), the single-click rule for
   anything that reached the ATS, and the hard limit: the tool never solves, bypasses or evades a captcha.
 

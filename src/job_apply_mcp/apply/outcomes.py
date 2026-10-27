@@ -75,11 +75,12 @@ def _ashby_net(rec: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def classify(ats: str, records: list[dict[str, Any]], dom: dict[str, Any], *, since: int = 0,
-             after_code: bool = False) -> tuple[str, str] | None:
+             after_code: bool = False, requested: bool = True) -> tuple[str, str] | None:
     """(kind, reason) or None (undecided). `records` = recorded POST responses (submit ones carry `body`); only those
     at index >= `since` (made after this click) count. `dom` = _OUTCOME_DOM_JS snapshot. The network verdict
     outranks the page; the page is the fallback. `after_code`: the old code prompt may linger, so the DOM prompt is
-    not read as a new request."""
+    not read as a new request. `requested`: a submit-endpoint REQUEST was issued after this click (or that is unknown);
+    then the outcome is never `not_sent`, whatever the page shows (an in-flight or failed request may have arrived)."""
     subs = _submits(records, since)
     if subs:
         net = {"greenhouse": _greenhouse_net, "ashby": _ashby_net}.get(ats)
@@ -102,7 +103,7 @@ def classify(ats: str, records: list[dict[str, Any]], dom: dict[str, Any], *, si
             return "captcha_rejected", "Ashby could not verify the submission with CAPTCHA"
         if dom.get("corrections"):
             return "validation_error", "Ashby: your form needs corrections"
-        if dom.get("updating_toast") and not subs:
+        if dom.get("updating_toast") and not subs and not requested:
             return "not_sent", "Ashby was still updating the application (upload in flight); nothing was sent"
     elif ats == "lever":
         if dom.get("lever_success"):
@@ -124,7 +125,7 @@ OUTCOME_DOM_JS = r"""() => {
   return {
     gh_code: vis(gc),
     gh_submit_error: txt('#submit-error'),
-    ashby_success: !!document.querySelector('.ashby-application-form-success-container'),
+    ashby_success: vis(document.querySelector('.ashby-application-form-success-container')),
     ashby_blocked: txt('.ashby-application-form-blocked-application-container'),
     ashby_failure: txt('.ashby-application-form-failure-container'),
     lever_success: txt('[data-qa="msg-submit-success"]'),
