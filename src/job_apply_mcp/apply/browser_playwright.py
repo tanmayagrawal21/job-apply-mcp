@@ -53,6 +53,7 @@ from .mapper import (
     pick_school,
     privacy_ack_value,
 )
+from .outcomes import ASHBY_UPDATING, OUTCOME_DOM_JS, classify
 from .ports import final_click
 from .verification import VerificationMixin
 
@@ -842,6 +843,8 @@ class PlaywrightDriver(VerificationMixin):
         self._lock = asyncio.Lock()
         self._handoff_pages: set[int] = set()
         self._net: dict[int, list[dict[str, Any]]] = {}
+        # ADR-0066: submit-endpoint REQUESTS issued per page, counted when issued (uncapped, incl. ones that later fail)
+        self._sent: dict[int, list[int]] = {}
         self._tasks: dict[int, list[asyncio.Task]] = {}
         self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
         self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
@@ -926,6 +929,7 @@ class PlaywrightDriver(VerificationMixin):
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
+                self._sent.pop(id(page), None)
             self._filled.discard(id(page))
             if keep_unsent:
                 self._remember_kept(page, ref, res)
@@ -948,6 +952,8 @@ class PlaywrightDriver(VerificationMixin):
         self._kept[pid] = {"ref": ref, "status": st, "url": str(getattr(page, "url", "") or "")[:300]}
         if st in ("unknown", "roadblock", "error"):        # the click may have happened
             self._kept[pid]["note"] = "may already be sent; do not click Submit again"
+        elif st == "captcha_rejected":                     # ADR-0066: refused, nothing accepted; never retried by the tool
+            self._kept[pid]["note"] = "the site rejected the automated submit; the tool will not retry it"
         on_close = getattr(page, "on", None)
         if callable(on_close):
             try:
@@ -1222,25 +1228,42 @@ class PlaywrightDriver(VerificationMixin):
         recs: list[dict[str, Any]] = []
         tasks: list[asyncio.Task] = []
         self._net[id(page)], self._tasks[id(page)] = recs, tasks
+        sent = self._sent.setdefault(id(page), [0])
+
+        def on_request(req) -> None:                   # the moment it is issued, before any response (ADR-0066)
+            try:
+                if is_submit_request(ats, req.url, req.method):
+                    sent[0] += 1
+            except Exception:
+                sent[0] += 1                           # unreadable request: assume it may have been a submit
 
         async def grab(resp) -> None:
             try:
                 req = resp.request
-                if req.method.upper() != "POST" or len(recs) >= 30:
-                    return
                 url = resp.url
+                # the 30-record cap applies to other POSTs only; submit responses are always kept (ADR-0066)
+                if req.method.upper() != "POST" or (len(recs) >= 30 and not is_submit_request(ats, url, req.method)):
+                    return
                 rec: dict[str, Any] = {"url": trim(url.split("#")[0], 200), "status": resp.status,
                                        "submit": is_submit_request(ats, url, req.method)}
                 if rec["submit"]:
                     try:
-                        rec["body"] = trim(await asyncio.wait_for(resp.text(), 3), self.b.evidence_body_chars)
+                        raw = await asyncio.wait_for(resp.text(), 3)
                     except Exception:
-                        rec["body"] = ""
+                        raw = ""
+                    rec["body"] = trim(raw, self.b.evidence_body_chars)
+                    rec["_cls"] = raw[:8000]          # outcome classification only; never saved (ADR-0066)
                 recs.append(rec)
             except Exception:
                 pass
 
+        page.on("request", on_request)
         page.on("response", lambda r: tasks.append(asyncio.ensure_future(grab(r))))
+
+    def _sent_count(self, page) -> int | None:
+        """Submit-endpoint requests issued on this page so far; None if not tracked (callers fail closed)."""
+        c = self._sent.get(id(page))
+        return None if c is None else c[0]
 
     async def _records(self, page) -> list[dict[str, Any]]:
         pending = self._tasks.get(id(page), [])
@@ -1370,7 +1393,8 @@ class PlaywrightDriver(VerificationMixin):
             except Exception:
                 text = ""
             meta = {"ref": ref, "stage": stage, "url": trim(page.url, 300),
-                    "errors": await self._validation_errors(page), "network": await self._records(page),
+                    "errors": await self._validation_errors(page),
+                    "network": [{k: v for k, v in r.items() if not k.startswith("_")} for r in await self._records(page)],
                     "captcha_widgets": await self._captcha_widgets(page),
                     "submit_buttons": await self._button_summary(page),
                     "text": trim(text, self.b.evidence_text_chars),
@@ -2371,14 +2395,78 @@ class PlaywrightDriver(VerificationMixin):
                                 detail=f"{n} submit buttons found; refusing to guess")
         if (blk := detect_blocker(await page.locator("body").inner_text())) in ("captcha", "verification"):
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} challenge visible")
+        if ats.name == "ashby" and not await self._ashby_idle(page):     # ADR-0066: never click mid-upload
+            ev = await self._save_evidence(page, ref, "upload-pending")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent: an upload / autofill was still in progress; Submit not clicked{ev}")
         await target.scroll_into_view_if_needed()
+        since = len(self._net.get(id(page), []))
+        sent0 = self._sent_count(page)
         await target.click()                                   # the ONE submit click; never repeated
-        return await self._conclude(page, ats, ref, attempt=attempt)
+        res = await self._conclude(page, ats, ref, attempt=attempt, since=since, sent0=sent0)
+        if res.status != "not_sent":
+            return res
+        # ADR-0066: Ashby refused to SEND (its "We're updating your application" toast) and NO submit request was ever
+        # issued. Nothing reached the ATS, so one more click after the upload settles is the same single attempt.
+        # Every ambiguity stops instead: a request issued (even one in flight or failed), an untracked page, an upload
+        # that never settles, a challenge or blocker, or no single editable Submit button.
+        async def stop(why: str) -> SubmitResult:
+            ev = await self._save_evidence(page, ref, "not-sent-ambiguous")
+            self._handoff_pages.add(id(page))
+            return SubmitResult(ref=ref, status="roadblock", via="browser", confirmation=page.url[:200],
+                                detail=f"outcome unknown: {res.detail}; {why}; not clicked again, check the open tab{ev}")
+        await asyncio.sleep(1.0)                               # let a just-issued request surface
+        if sent0 is None or self._sent_count(page) != sent0:
+            return await stop("a submit request was issued")
+        if any(r.get("submit") for r in (await self._records(page))[since:]):
+            return await stop("a submit response was recorded")
+        if not await self._ashby_idle(page):
+            ev = await self._save_evidence(page, ref, "not-sent")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent: {res.detail}; upload did not settle, not clicked again{ev}")
+        if self._sent_count(page) != sent0:
+            return await stop("a submit request was issued while waiting")
+        if (blk := detect_blocker(await page.locator("body").inner_text())) in ("captcha", "verification", "duplicate"):
+            return await stop(f"{blk} shown")
+        if (await self._captcha_state(page))["visible"]:
+            return await stop("a captcha challenge is visible")
+        target, n = await self._pick_submit(page)
+        if target is None:
+            return await stop(f"{n} usable submit buttons (form not editable as before)")
+        since = len(self._net.get(id(page), []))
+        sent1 = self._sent_count(page)
+        await target.click()                                   # the click that actually sends (first one was refused)
+        res = await self._conclude(page, ats, ref, attempt=attempt, since=since, sent0=sent1)
+        if res.status == "not_sent":
+            ev = await self._save_evidence(page, ref, "not-sent")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail=f"not sent twice: {res.detail}; stopped{ev}")
+        return res
+
+    async def _ashby_idle(self, page) -> bool:
+        """True once no upload / autofill is in flight: no "We're updating your application" toast and no uploading /
+        parsing text (cap upload_settle_s + 15 s). Read-only."""
+        busy = re.compile(r"\buploading\b|\bparsing\b|analy[sz]ing (your )?(resume|cv|file)", re.IGNORECASE)
+        deadline = time.monotonic() + self.b.upload_settle_s + 15.0
+        while True:
+            try:
+                text = await page.locator("body").inner_text()
+            except Exception:
+                text = ""
+            if text and not ASHBY_UPDATING.search(text) and not busy.search(text):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.4)
 
     async def _conclude(self, page, ats: AtsProfile, ref: str, *, after_code: bool = False,
-                        attempt: bool = False) -> SubmitResult:
-        """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026)."""
+                        attempt: bool = False, since: int | None = None, sent0: int | None = None) -> SubmitResult:
+        """Poll for the outcome after a click. A verification-code prompt becomes `awaiting_code` (ADR-0026). The
+        per-ATS classifier (ADR-0066) runs first on responses made after this click and on the page; the older
+        URL/text rule is the fallback."""
         deadline = time.monotonic() + self.b.confirmation_wait_s
+        if since is None:
+            since = len(self._net.get(id(page), []))
         text, outcome = "", None
         while True:
             await asyncio.sleep(0.5)
@@ -2388,7 +2476,44 @@ class PlaywrightDriver(VerificationMixin):
                 still = await page.get_by_role("button", name=_SUBMIT_NAME).count() > 0
             except Exception:                              # page navigated mid-read: retry next poll
                 text, still = "", True
-            outcome = decide_outcome(ats, page.url, text, still, records)
+            try:
+                dom = await page.evaluate(OUTCOME_DOM_JS)
+            except Exception:
+                dom = {}
+            cur = self._sent_count(page)
+            requested = sent0 is None or cur is None or cur != sent0       # unknown counts as "maybe sent"
+            kind = classify(ats.name, records, dom, since=since, after_code=after_code, requested=requested)
+            if kind is not None:
+                k, why = kind
+                if k == "success":
+                    outcome = "submitted"
+                    break
+                if k == "code_requested":
+                    if (pending := await self._await_code(page, ats, ref)) is not None:
+                        return pending
+                    if time.monotonic() < deadline:
+                        continue                       # the code inputs render after the response: poll again
+                    ev = await self._save_evidence(page, ref, "verification")
+                    if attempt:
+                        self._handoff_pages.add(id(page))
+                    return SubmitResult(ref=ref, status="roadblock", via="browser",
+                                        detail=f"verification after submit: {why}{ev}")
+                if k == "not_sent":
+                    return SubmitResult(ref=ref, status="not_sent", via="browser", detail=why)
+                ev = await self._save_evidence(page, ref, k.replace("_", "-"))
+                if k == "captcha_rejected":         # terminal: never retried, never evaded (ADR-0066)
+                    return SubmitResult(ref=ref, status="captcha_rejected", via="browser",
+                                        detail=f"captcha_rejected: {why}; the ATS did not accept the application; "
+                                               f"not retried. A human may apply manually.{ev}")
+                if k == "blocked":
+                    return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"blocked: {why}{ev}")
+                errs = (await self._validation_errors(page))[:5]
+                return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
+                                    detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT retry "
+                                           f"automatically.{ev}")
+            outcome = decide_outcome(ats, page.url, text, still, records[since:])
+            if outcome == "failed" and ats.name in ("greenhouse", "ashby") and time.monotonic() < deadline:
+                outcome = None                         # let the page show which failure it is (code step, panel)
             if outcome:
                 break
             if attempt and (shown := [x for k in ("visible", "unsafe") for x in (await self._captcha_state(page))[k]]):
@@ -2424,7 +2549,10 @@ class PlaywrightDriver(VerificationMixin):
         why = ("ATS rejected the submission" if outcome == "failed"
                else "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)")
         # After an attempt-policy click, never return a re-enterable state: roadblock -> engine `unknown` (ADR-0036).
-        return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
+        # ADR-0066: likewise once a submit request was issued (it may have arrived): unknown, never "not sent".
+        sent_now = self._sent_count(page)
+        issued = sent0 is not None and sent_now is not None and sent_now != sent0
+        return SubmitResult(ref=ref, status="roadblock" if attempt or issued else "needs_human", via="browser",
                             detail=f"{why}; errors={errs}; do NOT retry, check manually.{ev}")
 
 

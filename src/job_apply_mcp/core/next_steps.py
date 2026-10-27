@@ -31,6 +31,8 @@ GUIDE: dict[str, tuple[str, str]] = {
                       "Ask the user for the code they received, then call provide_verification_code."),
     "awaiting_approval": ("approve",
                           "Ask the user to approve, then call submit_application with approval_id."),
+    "captcha_rejected": ("tell_user",
+                         "The site rejected the automated submit (captcha); never retry. The user may submit it."),
     "submitted": ("confirm_to_user", "Submitted. Tell the user; the confirmation email is matched later."),
     "dry_run": ("show_user", "Dry run: nothing was sent. Show the user what would be submitted."),
     "duplicate": ("stop", "Already applied (or in progress) for this posting; do not resubmit."),
@@ -67,7 +69,7 @@ RECONCILE = {"next_action": "reconcile",
 POST_CLICK = re.compile(r"already submitted|submitted once|not retried|verification prompt|code field|"
                         r"enter the code|after (?:the )?submit|may already be sent", re.IGNORECASE)
 # filled in an open tab or waiting for a code: never steered to a retry (a retry could submit twice)
-NO_RETRY = frozenset({"handoff", "awaiting_code", "submitting", "unknown"})
+NO_RETRY = frozenset({"handoff", "awaiting_code", "submitting", "unknown", "captcha_rejected"})
 
 
 def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | None = None,

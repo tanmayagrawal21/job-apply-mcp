@@ -61,6 +61,10 @@ hard limit or a genuinely unknown fact, and tool gaps must be counted so they ca
   `begin_submit` refuses a second click. Batch rows take the submission state from the approvals book. Kept
   tabs with status unknown, roadblock or error carry the note "may already be sent; do not click Submit again".
 
+- **With ADR-0066.** `captcha_rejected` is a handoff status and always a `hard_limit`: its next_action is
+  `tell_user` (never retried), and it is in `NO_RETRY`. Its tab stays open with the note "the site rejected the
+  automated submit; the tool will not retry it".
+
 ## Consequences
 Tabs can pile up only with filled work the person still has to finish. The `tool_gap` count becomes the metric
 for automation coverage.

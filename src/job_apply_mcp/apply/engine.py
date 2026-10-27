@@ -1459,13 +1459,14 @@ class ApplyEngine:
                 if not dry:
                     st = {"submitted": "submitted", "roadblock": "unknown", "needs_human": "handoff",   # roadblock may follow the click
                           "duplicate": "failed", "awaiting_code": "awaiting_code",
-                          "incomplete": "handoff"}.get(result.status, "unknown")
+                          "incomplete": "handoff",
+                          "captcha_rejected": "handoff"}.get(result.status, "unknown")   # ADR-0066: not received
                     if result.status == "error" and not ctx.meta.get("dispatched"):
                         st = "failed"
                     self.approvals.finish(ref, st, f"{result.status}: {result.detail or ''}",
                                           evidence_path(self.s.paths.data_dir, ref))
                     await self._release_unsent(ref, f"not sent: {result.status}", ctx.meta.get("control_event_id", ""))
-                if result.status in ("submitted", "needs_human", "roadblock", "incomplete"):
+                if result.status in ("submitted", "needs_human", "roadblock", "incomplete", "captcha_rejected"):
                     await self.store.record(result, company=ctx.posting.company, title=ctx.posting.title,
                                             url=ctx.posting.apply_url or ctx.posting.url)
                 if result.status == "submitted":
@@ -1488,7 +1489,8 @@ class ApplyEngine:
         """Persist the outcome of a code step. Never a second submit: an unclear outcome stays blocking."""
         ref = res.ref
         st = {"submitted": "submitted", "awaiting_code": "awaiting_code", "duplicate": "failed",
-              "roadblock": "unknown", "handoff": "unknown"}.get(res.status, "unknown")
+              "roadblock": "unknown", "handoff": "unknown",
+              "captcha_rejected": "handoff"}.get(res.status, "unknown")
         if res.status == "handoff":
             res = res.model_copy(update={"detail": f"handoff: {res.detail or ''}"[:400]})
         self.approvals.finish(ref, st, f"{res.status}: {res.detail or ''}",

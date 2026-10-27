@@ -20,7 +20,8 @@ HARD_LIMIT, UNKNOWN_FACT, TOOL_GAP = "hard_limit", "unknown_fact", "tool_gap"
 CATEGORIES = (HARD_LIMIT, UNKNOWN_FACT, TOOL_GAP)
 # statuses where a person is asked to act (or the outcome is unclear)
 HANDOFF_STATUSES = frozenset({"needs_human", "incomplete", "handoff", "roadblock", "unknown", "needs_input",
-                              "needs_review", "awaiting_code", "awaiting_approval", "quota_blocked"})
+                              "needs_review", "awaiting_code", "awaiting_approval", "quota_blocked",
+                              "captcha_rejected"})   # ADR-0066: terminal captcha verdict -> hard_limit
 
 # Checked FIRST: a detail matching a hard limit is a hard_limit even when a consented pattern also matches.
 _HARD = re.compile(

@@ -317,3 +317,23 @@ def test_degraded_hint_depends_on_dispatch():
     d = output.degraded(e)
     assert "never resubmit" in d["hint"] and "nothing was submitted" not in d["hint"]
     assert d["next_action"] == "verify_with_user"
+
+
+# ---- ADR-0066 x ADR-0067: a terminal captcha rejection --------------------------------------------------------
+
+def test_captcha_rejected_is_a_hard_limit_never_retried(tmp_path, monkeypatch):
+    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)
+    assert handoff.categorize("captcha_rejected", "Ashby rejected the submission", settings=object()) == "hard_limit"
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    svc = Services(s, engine=types.SimpleNamespace())
+    row = svc._submit_row(SubmitResult(ref="r", status="captcha_rejected", detail="Ashby reCAPTCHA score rejection"),
+                          {"state": "handoff"})
+    assert row["cat"] == "hard_limit" and row["next_action"] == "tell_user" and "never retry" in row["hint"]
+    assert "retry" not in row["cat_hint"]
+
+
+async def test_captcha_rejected_tab_is_kept_with_a_note(tmp_path):
+    d = _driver(tmp_path)
+    await _go(d, "captcha_rejected")
+    assert d.pages[0].closed == 0 and "will not retry" in d.kept_tabs()[0]["note"]
