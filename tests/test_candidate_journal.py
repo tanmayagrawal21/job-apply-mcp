@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import stat
+from typing import ClassVar
 
 import pytest
 from apply_fakes import F
@@ -150,7 +151,7 @@ def test_profile_value_wins_when_equal_and_conflict_is_flagged(tmp_path):
     got, r = mapped(j, RELOC, p=other)
     assert got is None and [f.key for f in r.unresolved] == ["q"]
     c = r.hints["q"]["conflict"]["values"][0]
-    assert c["profile"] == "No" and c["journal"] == "Yes" and c["entry"].startswith("cj_")
+    assert c["profile"]["value"] == "No" and c["journal"]["value"] == "Yes" and c["journal"]["entry"].startswith("cj_")
 
 
 def test_newest_entry_wins_and_retraction_removes_it(tmp_path):
@@ -262,3 +263,79 @@ def test_server_registers_tools_and_instructions():
     assert {"record_candidate_fact", "list_candidate_facts", "retract_candidate_fact"} <= names
     assert CLIENT_INSTRUCTIONS in (server.mcp.instructions or "")
     assert "record_candidate_fact" in CLIENT_INSTRUCTIONS
+
+
+# ---------------------------------------------------------------- conflicts are the owner's call (engine level)
+from apply_fakes import POSTING, FakeAdapter, FakeGates, FakeProfile, FakeRouter, FakeStore
+from apply_fakes import settings as fake_settings
+
+from job_apply_mcp.apply.engine import ApplyEngine
+from job_apply_mcp.core.models import ApplicationForm
+
+C_RELOC = "Are you willing to relocate for this role?"
+C_SPONS = "Will you now or in the future require sponsorship to work in the United States?"
+C_HEAR = "How did you hear about us?"
+
+
+class _ConflictProfile(FakeProfile):
+    VALUES: ClassVar[dict] = {**FakeProfile.VALUES, "home_country": "US", "willing_to_relocate": "No",
+                              "auth:US:requires_sponsorship": "No", "referral_source": "LinkedIn"}
+
+
+class _ConflictAdapter(FakeAdapter):
+    async def get_form(self, ref):
+        return ApplicationForm(ref=ref, submit_via=["api"], fields=[
+            F("first_name", "First Name"),
+            F("q_reloc", C_RELOC, FieldKind.select, required=False, options=YN),       # everyday, optional
+            F("q_spons", C_SPONS, FieldKind.select, options=YN),                       # sensitive
+            F("q_hear", C_HEAR, FieldKind.text)])                                      # not a fact-rule field
+
+
+def _conflict_engine(tmp_path, journal):
+    s = fake_settings(answers__autonomy="infer", answers__referral_default="Job board")
+    s.paths.data_dir = str(tmp_path / "data")
+    router = FakeRouter(short={k: {"value": v, "confidence": 0.99, "rationale": "fictional"}
+                               for k, v in (("q_reloc", "Yes"), ("q_spons", "No"), ("q_hear", "Job board"))})
+    e = ApplyEngine(s, resolve_adapter=lambda ref: _ConflictAdapter(), profile=_ConflictProfile(), router=router,
+                    gates=FakeGates(), store=FakeStore())
+    e.journal = journal
+    return e
+
+
+def _conflicting_journal(tmp_path):
+    j = jr(tmp_path)
+    j.record("Alex would relocate", key="preferences.willing_to_relocate", value="yes", quote="yes, I'd move")
+    j.record("Needs US sponsorship", key="authorization.US.requires_sponsorship", value="yes",
+             quote="I will need sponsorship")
+    j.record("Heard about Acme from a friend", key="referral.source", value="A friend at Acme",
+             quote="a friend told me")
+    return j
+
+
+async def test_conflicts_are_never_filled_by_model_autonomy_or_fallback(tmp_path):
+    out = await _conflict_engine(tmp_path, _conflicting_journal(tmp_path)).plan(POSTING.ref)
+    answered = {a.key for a in out.plan.answers}
+    assert {"q_reloc", "q_spons", "q_hear"}.isdisjoint(answered)      # no profile, journal, LLM or assumed value
+    assert "assumed" not in out.compact()
+    tasks = {t["key"]: t for t in out.client_tasks}
+    assert {"q_reloc", "q_spons", "q_hear"} <= set(tasks) <= set(out.plan.unresolved)  # optional one shown too
+    for key, prof, jour in (("q_reloc", "No", "Yes"), ("q_spons", "No", "Yes"), ("q_hear", "LinkedIn", "A friend at Acme")):
+        c = tasks[key]["known"]["conflict"]
+        v = c["values"][0]
+        assert v["profile"] == {"value": prof, "from": "profile.toml"}
+        assert v["journal"]["value"] == jour and v["journal"]["entry"].startswith("cj_") and v["journal"]["date"]
+        assert c["resolve"]["tool"] == "record_candidate_fact" and c["resolve"]["source"] == "correction"
+
+
+async def test_owner_choice_recorded_as_correction_resolves_the_conflict(tmp_path):
+    j = _conflicting_journal(tmp_path)
+    j.record("Owner: not relocating after all", key="preferences.willing_to_relocate", value="no",
+             source="correction", quote="no, the profile is right")
+    pick_journal, _ = j.record("Owner: does need sponsorship", key="authorization.US.requires_sponsorship",
+                               value="yes", source="correction", quote="yes, I need sponsorship")
+    out = await _conflict_engine(tmp_path, j).plan(POSTING.ref)
+    a = {x.key: x for x in out.plan.answers}
+    assert a["q_reloc"].value == "No" and a["q_reloc"].source == "rule:willing_to_relocate"   # same as profile
+    assert a["q_spons"].value == "Yes" and a["q_spons"].source == f"journal:{pick_journal.id}@{pick_journal.date}"
+    assert "profile value 'No'" in (a["q_spons"].rationale or "")
+    assert "q_hear" not in a and "conflict" in {t["key"]: t for t in out.client_tasks}["q_hear"]["known"]

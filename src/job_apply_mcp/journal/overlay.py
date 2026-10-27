@@ -133,7 +133,8 @@ class ProfileOverlay:
         object.__setattr__(self, "_view", view)
         object.__setattr__(self, "_cur", "")
         object.__setattr__(self, "served", {})       # field key -> [Entry]
-        object.__setattr__(self, "conflicts", {})    # field key -> [{lookup, profile, journal, entry, date}]
+        object.__setattr__(self, "conflicts", {})    # field key -> [{journal_key, lookup, profile, journal}]
+        object.__setattr__(self, "overrides", {})    # field key -> profile values an owner correction replaced
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -156,9 +157,17 @@ class ProfileOverlay:
         if pv is None or pv == "":
             self.served.setdefault(self._cur, []).append(e)
             return jv
-        if not _same(pv, jv):
-            self.conflicts.setdefault(self._cur, []).append(
-                {"lookup": key, "profile": str(pv)[:120], "journal": str(jv)[:120], "entry": e.id, "date": e.date})
+        if _same(pv, jv):
+            return pv
+        if e.source == "correction":           # the owner's own correction (how a conflict is resolved): it wins
+            self.served.setdefault(self._cur, []).append(e)
+            self.overrides.setdefault(self._cur, []).append(str(pv)[:80])
+            return jv
+        self.conflicts.setdefault(self._cur, []).append(
+            {"journal_key": e.key, "lookup": key,
+             "profile": {"value": str(pv)[:120], "from": "profile.toml"},
+             "journal": {"value": str(jv)[:120], "entry": e.id, "date": e.date, "source": e.source,
+                         **({"quote": e.quote[:160]} if e.quote else {})}})
         return pv
 
     def finish(self, res: Any, fields: list[Any]) -> None:
@@ -177,13 +186,28 @@ class ProfileOverlay:
             if used:
                 ids = list(dict.fromkeys(f"{e.id}@{e.date}" for e in used))
                 a.source = "journal:" + "+".join(ids)
+                if self.overrides.get(a.key):
+                    a.rationale = "owner correction in the journal replaces profile value " + \
+                        repr(self.overrides[a.key][0])
             keep.append(a)
         res.answers = keep
         for k, rows in self.conflicts.items():
+            if by_key.get(k) is not None and by_key[k] not in res.unresolved:
+                res.unresolved.append(by_key[k])
+            jk = rows[0]["journal_key"]
             res.hints.setdefault(k, {})["conflict"] = {
-                "note": "your profile and the candidate journal disagree; tell the owner both values and ask "
-                        "which is right (then fix profile.toml or record_candidate_fact a correction)",
-                "values": rows[:3]}
+                "note": "the profile and the candidate journal disagree. Show the owner both values and ask which "
+                        "is right; nothing fills this field until they choose. Record their choice with "
+                        "record_candidate_fact (source=correction, their words in quote), then plan again.",
+                "values": rows[:3],
+                "resolve": {"tool": "record_candidate_fact", "key": jk, "source": "correction",
+                            "confidence": "stated"}}
+
+
+def conflict_keys(hints: dict[str, dict[str, Any]]) -> set[str]:
+    """Field keys left open because the journal and the profile disagree (ADR-0064). The owner decides these:
+    no model, writer, autonomy assumption or other fallback may fill them."""
+    return {k for k, h in (hints or {}).items() if isinstance(h, dict) and "conflict" in h}
 
 
 def journal_view(journal: CandidateJournal | None, company: str = "", title: str = "",

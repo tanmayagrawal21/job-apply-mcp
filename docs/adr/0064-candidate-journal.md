@@ -37,8 +37,8 @@ refused. Use must stay as safe as the profile's: legal status and demographics c
     key namespace or the text. Text can raise a class but never lower it.
   - Confirmation comes through MCP elicitation at capture time, when the client supports it
     (`confirmed_via = elicitation`). Otherwise, an entry with `source=chat`, a verbatim `quote` and
-    `confidence=stated` is accepted as `confirmed_via = client_quote`. A declined dialog, a `document` source
-    without a dialog, or a missing quote leaves the entry unconfirmed.
+    `confidence=stated` is accepted as `confirmed_via = client_quote`. A `correction` with a quote also counts.
+    A declined dialog, a `document` source without a dialog, or a missing quote leaves the entry unconfirmed.
   - `attestation` entries (and any field whose label reads as a certification) are never filled from the journal.
   - `inferred` entries never fill any form field, everyday or sensitive. They are context only.
 - **Mapper.** `map_fields(..., journal=JournalView)` wraps the profile in a `ProfileOverlay`, a three-line hook in
@@ -53,8 +53,15 @@ refused. Use must stay as safe as the profile's: legal status and demographics c
     authorization, residence coupling, option checks.
   - Scope precedence is company > role > country > global, and the newest entry wins within a scope.
   - Each answer that used an entry gets `source = "journal:<id>@<date>"`.
-  - When a usable entry and the profile disagree, the field is left unresolved with a `conflict` hint (both
-    values, entry id and date) for the owner. Neither value is picked.
+  - When a usable entry and the profile disagree, the field is held for the owner as a `conflict`. The plan
+    leaves it unresolved, with both values and their provenance (`profile.toml`; journal entry id, date, source
+    and quote) and a `resolve` template. Nothing else may fill a held field: not the profile, the journal, the
+    short-answer model, the prose writer (in planning or `draft_answers`) or an autonomy assumption
+    (`safe_default`/`infer`). This holds for every field class, and optional held fields are listed too.
+  - The owner's choice goes back into the journal as `source=correction` with their words in `quote`. A correction
+    that matches the profile ends the conflict. A correction that differs replaces the profile value for that key,
+    and the answer carries `journal:<id>@<date>` plus a rationale naming the replaced profile value. A verbatim
+    correction also counts as `client_quote` confirmation for sensitive keys.
 - **Stories.** `kind=story` entries never carry a form value. The essay path receives the three most relevant ones
   (word overlap; a company-scoped story only for that company) as `client_tasks[].context.stories` on prose fields.
   `list_candidate_facts(kind="story")` returns them all.
@@ -65,5 +72,5 @@ refused. Use must stay as safe as the profile's: legal status and demographics c
 - The journal is client-written, so a client could fabricate a quote. Sensitive facts are therefore accepted only
   with the user's verbatim words (or a dialog the user answered), every journal answer shows its entry and date in
   `src`, and the human approval and plan review steps are unchanged.
-- An autonomy-level assumption (ADR-0052) can still fill an unresolved field that is not a fact-rule field; fields
-  in conflict that the profile-fact rules own are never assumed.
+- A held conflict blocks only its own field, and the owner settles it once: the recorded correction applies to
+  every later plan.

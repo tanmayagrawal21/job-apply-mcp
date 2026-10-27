@@ -88,7 +88,8 @@ dated and append-only: retracting adds a tombstone and deletes nothing. Secrets 
 facts (authorization, visa, citizenship, sponsorship, EEO, criminal history, clearance) fill a form only once
 confirmed, either through a dialog or through the user's verbatim chat quote. Inferred facts and attestations
 never fill a form. `plan_application` uses the journal after the profile: `src` shows `journal:<id>@<date>`, and
-a disagreement with the profile leaves the field open with a `conflict` hint. Stories reach prose tasks as
+a disagreement with the profile holds the field for the owner as a `conflict`, with both values' provenance. No
+model or autonomy assumption fills a held field. Record the owner's choice with `source=correction` to settle it. Stories reach prose tasks as
 `context.stories`.
 
 ## Operations and self-improvement

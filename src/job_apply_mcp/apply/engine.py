@@ -449,9 +449,13 @@ class ApplyEngine:
                                 job_locations=[ctx.posting.location, *ctx.posting.locations],
                                 journal=self._journal_view(ctx))
         answers = sal_answers + list(mapped.answers)
+        # ADR-0064: a journal/profile conflict is the owner's call: no model, writer or assumption ever sees it
+        from ..journal.overlay import conflict_keys
+        conflicted = conflict_keys(mapped.hints)
+        held = list({f.key: f for f in mapped.unresolved if f.key in conflicted}.values())
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
-        voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary}
-        pending = [f for f in mapped.unresolved if f.key not in voluntary]
+        voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary if f.key not in conflicted}
+        pending = [f for f in mapped.unresolved if f.key not in voluntary and f.key not in conflicted]
         owner_only = [f for f in pending if never_llm(f)]        # legal status / place: never a model (ADR-0040)
         pending = [f for f in pending if f not in owner_only]
         # ADR-0040: the short-answer model only sees allowlisted questions; _llm_allowed is defence in depth
@@ -479,6 +483,7 @@ class ApplyEngine:
             if assumptions:
                 audit["assumed"] = {x.field.key: {"rule": x.answer.source, "why": x.answer.rationale or ""}
                                     for x in assumptions}
+        long_ += held
         fmap = {f.key: f for f in ctx.form.fields}
         drafted = [Assumption(fmap[a.key], a, None) for a in answers if essays.is_essay(a.source) and a.key in fmap]
         if drafted:   # ADR-0057: generated essays are labelled like every other assumption
@@ -681,7 +686,8 @@ class ApplyEngine:
         for f in long_:
             if f.key in have:
                 continue
-            if not f.required and not (f.kind == FieldKind.textarea and self._write_optional()):
+            if (not f.required and not (f.kind == FieldKind.textarea and self._write_optional())
+                    and "conflict" not in hints.get(f.key, {})):     # ADR-0064: a conflict is always shown
                 continue
             unresolved_keys.append(f.key)
             tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
@@ -1049,12 +1055,15 @@ class ApplyEngine:
             if cached is None or cached.gate is None:
                 return out
         ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)
-        open_ = [f for f in ctx.form.fields if f.key in cached.unresolved]
+        from ..journal.overlay import conflict_keys
+        conflicted = conflict_keys(cached.extra.get("hints") or {})          # ADR-0064: never drafted
+        open_ = [f for f in ctx.form.fields if f.key in cached.unresolved and f.key not in conflicted]
         from ..persona import posting_scope
         with self._llm_timings(ref), self._stage(ref, "llm"), posting_scope(
                 ctx.posting.company, ctx.posting.title, ctx.summary):
             written, rest, tasks = await self._write_long(open_, ctx, deferred=False, ref=ref)
             tasks = [{**t, "prose": True} for t in tasks]
+        rest += [f for f in ctx.form.fields if f.key in cached.unresolved and f.key in conflicted]
         drafted = [a for a in written if essays.is_essay(a.source)]
         if drafted:   # ADR-0057: assumed essays join the ref's evidence next to the plan's other assumptions
             labels = {f.key: f.label for f in ctx.form.fields}

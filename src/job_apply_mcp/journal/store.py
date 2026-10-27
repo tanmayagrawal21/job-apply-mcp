@@ -222,14 +222,14 @@ class Entry:
 
 def confirmation(risk: str, source: str, quote: str, confidence: str, elicited: bool | None) -> str | None:
     """How an entry counts as confirmed. `elicited`: True/False = the user answered the confirmation dialog;
-    None = the client cannot elicit (then only a verbatim chat quote stated by the user counts)."""
+    None = the client cannot elicit (then only the user's verbatim words from chat, or their correction, count)."""
     if risk == "attestation" or confidence == "inferred":
         return None
     if risk == "everyday":
         return "stated"
     if elicited is True:
         return "elicitation"
-    if elicited is None and source == "chat" and quote.strip() and confidence in ("stated", "confirmed"):
+    if elicited is None and source in ("chat", "correction") and quote.strip() and confidence in ("stated", "confirmed"):
         return "client_quote"
     return None
 

@@ -71,7 +71,7 @@ async def record(settings: Settings, ctx: Any, *, fact: str, key: str = "", valu
     out.pop("quote", None)
     if e.risk == "sensitive" and not e.confirmed_via:
         out["note"] = ("recorded, not yet usable on forms: sensitive facts need the user's confirmation (dialog) or "
-                       "their verbatim chat quote with source=chat and confidence=stated")
+                       "their verbatim quote with source=chat or correction and confidence=stated")
     elif e.risk == "attestation":
         out["note"] = "recorded; attestations are never filled automatically"
     if warnings:
@@ -107,7 +107,7 @@ def register(mcp: Any, get_settings: Callable[[], Settings]) -> None:
         quote: the user's exact words. confidence: stated | inferred | confirmed (inferred never fills a form).
         client: your client name. kind: fact | story (stories are essay material, retrieved for prose questions).
         Sensitive facts (authorization, visa, citizenship, sponsorship, EEO, criminal history, clearance) may ask the
-        user to confirm; without a dialog, only a verbatim chat quote with confidence=stated counts as confirmed.
+        user to confirm; without a dialog, only a verbatim quote (source=chat or correction, confidence=stated) counts.
         Passwords, codes, tokens, SSNs and card numbers are redacted or refused."""
         return _dump(await record(get_settings(), ctx, fact=fact, key=key, value=value, scope=scope, source=source,
                                   quote=quote, confidence=confidence, client=client, kind=kind))
