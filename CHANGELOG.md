@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- `browser.keep_unsubmitted_open` (default true): tabs the tool filled but did not submit stay open and are listed
+  in `<data_dir>/kept_tabs.json`; on stdio the process lingers after a client disconnect while such tabs exist
+  (`browser.linger_after_disconnect_s`). Handoff reasons are categorised `hard_limit` / `unknown_fact` / `tool_gap`
+  (`cat` on submit rows, `handoff_categories` in run reports); consented steps are tool gaps (ADR-0067).
 - Autonomy level `[answers] autonomy = strict | safe_default | infer` (trusted user config only; default strict):
   safe declines for genuine contact/marketing permission asks, the configured "how did you hear" default and
   "decline to self-identify"; at `infer`, conservative resume-based answers to an allowlist of skill/experience questions. Hard limits

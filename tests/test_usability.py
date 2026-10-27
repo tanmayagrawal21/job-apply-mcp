@@ -129,7 +129,9 @@ def test_doctor_unwritable_data_dir(cfgdir, monkeypatch, tmp_path):
 
 def test_cli_defaults_to_serve(monkeypatch):
     seen = {}
-    monkeypatch.setattr("job_apply_mcp.server.mcp.run", lambda *a, **k: seen.setdefault("run", True))
+    async def fake_stdio():          # stdio now runs through serve_stdio (lingers for kept tabs, ADR-0067)
+        seen.setdefault("run", True)
+    monkeypatch.setattr("job_apply_mcp.server.mcp.run_stdio_async", fake_stdio)
     cli.main([])
     assert seen["run"]
     args = cli.build_parser().parse_args(["serve", "--transport", "http", "--port", "9000"])

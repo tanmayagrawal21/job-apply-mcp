@@ -778,6 +778,9 @@ class PlaywrightDriver(VerificationMixin):
         self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
         # final_click="human" (ADR-0058): ref -> background confirmation watcher; the engine sets the callback
         self._watchers: dict[str, asyncio.Task] = {}
+        # keep_unsubmitted_open (ADR-0067): pages the tool started filling; filled-but-unsubmitted tabs it kept
+        self._filled: set[int] = set()
+        self._kept: dict[int, dict[str, Any]] = {}
         self.on_human_confirmed: Callable[[SubmitResult], Awaitable[Any]] | None = None
 
     # -- lifecycle ------------------------------------------------------------------------------
@@ -809,6 +812,9 @@ class PlaywrightDriver(VerificationMixin):
             await route.continue_()
 
     async def aclose(self) -> None:
+        if self._kept and not self.b.keep_pages_open:
+            log.warning("closing the browser with %d filled-but-unsubmitted tab(s); they are listed in "
+                        "kept_tabs.json for the person", len(self._kept))
         for t in self._watchers.values():
             t.cancel()
         self._watchers.clear()
@@ -831,12 +837,16 @@ class PlaywrightDriver(VerificationMixin):
         ctx = await self._context()
         page = await ctx.new_page()
         self._attach_recorder(page, ats)
+        res: SubmitResult | None = None
         try:
-            return await self._run(page, ats, greenhouse_embed_url(apply_url, ref) if ats_name == "greenhouse"
-                                   else apply_url, form, answers, files, dry_run)
+            res = await self._run(page, ats, greenhouse_embed_url(apply_url, ref) if ats_name == "greenhouse"
+                                  else apply_url, form, answers, files, dry_run)
+            return res
         except Exception as e:
-            return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
+            res = SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
+            return res
         finally:
+            keep_unsent = self._keep_unsubmitted(page, res)
             self._api_keys.pop(id(page), None)
             self._exempt.pop(id(page), None)
             for k in [k for k in self._combo if k[0] == id(page)]:
@@ -844,8 +854,50 @@ class PlaywrightDriver(VerificationMixin):
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
-            if not self.b.keep_pages_open and id(page) not in self._handoff_pages:
+            self._filled.discard(id(page))
+            if keep_unsent:
+                self._remember_kept(page, ref, res)
+            elif not self.b.keep_pages_open and id(page) not in self._handoff_pages:
                 await page.close()
+
+    # -- keep_unsubmitted_open (ADR-0067) -------------------------------------------------------
+    _NOT_KEPT = frozenset({"submitted", "skipped", "duplicate"})
+
+    def _keep_unsubmitted(self, page, res: SubmitResult | None) -> bool:
+        """Keep a tab the tool FILLED but did not submit (needs_human, incomplete, handoff, roadblock, a filled
+        dry run, no confirmation, error after filling). Closed postings and never-filled pages still close."""
+        if not self.b.keep_unsubmitted_open or self.b.headless or id(page) not in self._filled:
+            return False
+        return res is None or res.status not in self._NOT_KEPT
+
+    def _remember_kept(self, page, ref: str, res: SubmitResult | None) -> None:
+        pid = id(page)
+        self._kept[pid] = {"ref": ref, "status": res.status if res else "error",
+                           "url": str(getattr(page, "url", "") or "")[:300]}
+        on_close = getattr(page, "on", None)
+        if callable(on_close):
+            try:
+                on_close("close", lambda *_: self._forget_kept(pid))
+            except Exception:
+                pass
+        self._write_kept()
+
+    def _forget_kept(self, pid: int) -> None:
+        if self._kept.pop(pid, None) is not None:
+            self._write_kept()
+
+    def kept_tabs(self) -> list[dict[str, Any]]:
+        """Filled-but-unsubmitted tabs still open (no secrets: ref, status and the page URL only)."""
+        return list(self._kept.values())
+
+    def _write_kept(self) -> None:
+        """<data_dir>/kept_tabs.json lists the kept tabs so they can be reopened if the browser goes away."""
+        try:
+            p = Path(self.s.paths.data_dir).expanduser() / "kept_tabs.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(self.kept_tabs(), indent=1), encoding="utf-8")
+        except Exception:
+            log.debug("could not write kept_tabs.json", exc_info=True)
 
     async def _run(self, page, ats: AtsProfile, url: str, form: ApplicationForm, answers: dict[str, Any],
                    files: dict[str, str], dry_run: bool) -> SubmitResult:
@@ -896,6 +948,7 @@ class PlaywrightDriver(VerificationMixin):
                                     "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases),
                                     "ats": ats.name}
         steps = fill_order(form, answers, files)
+        self._filled.add(id(page))                   # from here on the tab holds the tool's work (ADR-0067)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
         failed: list[str] = []

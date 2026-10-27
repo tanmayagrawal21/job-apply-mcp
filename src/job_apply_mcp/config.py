@@ -347,6 +347,8 @@ class BrowserCfg(BaseModel):
     user_data_dir: str = Field(default_factory=lambda: paths.default_data_dir_str() + "/browser-profile")
     headless: bool = False
     keep_pages_open: bool = False       # debugging: leave the job's tab open
+    keep_unsubmitted_open: bool = True  # a tab the tool FILLED but did not submit stays open for the human (ADR-0067)
+    linger_after_disconnect_s: float = 3600.0   # stdio: keep the browser up this long after the client leaves while kept tabs are open (0 = off)
     channel: str | None = None          # e.g. "chrome" to use the installed Chrome
     timeout_s: float = 30.0
     upload_settle_s: float = 4.0        # wait after a resume upload (parsers re-render the form)
