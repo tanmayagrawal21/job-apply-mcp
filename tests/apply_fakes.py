@@ -85,7 +85,7 @@ class FakeRouter:
         self.calls.append((task_class, prompt))
         if task_class == "short":
             return json.dumps(self.short if self.short is not None else {})
-        if task_class == "review":
+        if task_class in ("review", "essay_review"):
             return json.dumps(self.review or {"pass": True, "violations": [], "corrected": ""})
         return self.prose(prompt) if callable(self.prose) else self.prose
 
