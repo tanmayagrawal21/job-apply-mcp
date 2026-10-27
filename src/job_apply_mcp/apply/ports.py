@@ -5,6 +5,7 @@ implementations can land independently and be swapped or faked in tests.
 """
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
@@ -13,6 +14,16 @@ from ..core.models import ApplicationForm, GateResult, Posting
 
 class ComponentMissing(RuntimeError):
     """A component the engine needs has not been wired in (or is not installed)."""
+
+
+# Per-call final click (ADR-0060): submit_application(final_click="human") sets this for the call's task. TIGHTEN-ONLY:
+# only "human" is ever stored here; a per-call "agent" never overrides a configured "human".
+FINAL_CLICK: contextvars.ContextVar[str | None] = contextvars.ContextVar("jam_final_click", default=None)
+
+
+def final_click(configured: str) -> str:
+    """Effective final click: "human" if the config OR this call asks for it, else the configured value."""
+    return "human" if configured == "human" or FINAL_CLICK.get() == "human" else configured
 
 
 @runtime_checkable
