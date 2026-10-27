@@ -14,6 +14,8 @@ from job_apply_mcp.core.models import ApplicationForm, SubmitResult
 from job_apply_mcp.intake.runner import IntakeRunner
 from job_apply_mcp.services import Services
 
+POSTING_REF = "greenhouse:acme:1"          # apply_fakes.POSTING.ref (the conflict engine's posting)
+
 URL = "https://jobs.ashbyhq.com/example-co/00000000-0000-0000-0000-000000000001"
 REF = "ashby:example-co:00000000-0000-0000-0000-000000000001"
 
@@ -161,7 +163,7 @@ async def test_linger_also_waits_for_a_final_click_watcher(monkeypatch):
     ("needs_human", "unresolved required: ['q_visa']", "unknown_fact"),
     ("needs_input", "", "unknown_fact"),
     ("needs_human", "could not fill/verify: ['q_school']", "tool_gap"),
-    ("incomplete", "required fields still empty: ['Phone']", "tool_gap"),
+    ("incomplete", "required fields still empty: ['Phone']", "unknown_fact"),
     ("needs_human", "form did not render", "tool_gap"),
     ("needs_human", "unsupported_site: no deterministic filler for this host", "tool_gap"),
     ("unknown", "no confirmation detected", "tool_gap"),
@@ -222,8 +224,8 @@ def test_run_report_counts_tool_gaps():
         ("submitted", ""),
     ])]
     rep = IntakeRunner._build("run-1", rows, 10)
-    assert rep["handoff_categories"] == {"tool_gap": 2, "unknown_fact": 1, "hard_limit": 1}
-    assert [r["cat"] for r in rep["needs_human"]] == ["tool_gap", "tool_gap", "unknown_fact", "hard_limit"]
+    assert rep["handoff_categories"] == {"tool_gap": 1, "unknown_fact": 2, "hard_limit": 1}
+    assert [r["cat"] for r in rep["needs_human"]] == ["tool_gap", "unknown_fact", "unknown_fact", "hard_limit"]
 
 
 # ---- next_action respects the category (ADR-0059 x ADR-0067) -------------------------------------------------
@@ -337,3 +339,79 @@ async def test_captcha_rejected_tab_is_kept_with_a_note(tmp_path):
     d = _driver(tmp_path)
     await _go(d, "captcha_rejected")
     assert d.pages[0].closed == 0 and "will not retry" in d.kept_tabs()[0]["note"]
+
+
+
+# ---- control review e9e79ae: real reason texts from the real code paths are unknown_fact, never retry ---------
+
+def _all_consent(monkeypatch):
+    monkeypatch.setattr(handoff, "_consented", lambda s, sc: True)
+
+
+def _svc_row(tmp_path, res, state=None):
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    return Services(s, engine=types.SimpleNamespace())._submit_row(res, {"state": state} if state else None)
+
+
+def _intake_why():
+    from apply_fakes import F
+    form = ApplicationForm(ref=REF, fields=[F("q_visa", "Will you require visa sponsorship?"),
+                                            F("q_start", "Earliest start date"), F("q_x", "Anything else?")])
+    return IntakeRunner._unresolved_why(["q_visa", "q_start", "q_x"], types.SimpleNamespace(form=form))
+
+
+@pytest.mark.parametrize("status", ["needs_human", "incomplete", "roadblock"])
+def test_intake_unresolved_wording_is_unknown_fact(monkeypatch, status):
+    _all_consent(monkeypatch)
+    why = _intake_why()
+    assert " unresolved (" in why                              # produced by the real IntakeRunner code
+    assert handoff.categorize(status, why, settings=object()) == "unknown_fact"
+    rep = IntakeRunner._build("run-1", [{"ref": "r", "source": "links", "status": "needs_human", "why": why}], 5,
+                              settings=object())
+    assert rep["needs_human"][0]["cat"] == "unknown_fact" and rep["handoff_categories"] == {"unknown_fact": 1}
+
+
+async def test_engine_unresolved_required_and_journal_conflict_are_unknown_fact(tmp_path, monkeypatch):
+    from test_candidate_journal import _conflict_engine, _conflicting_journal
+
+    from job_apply_mcp.core.next_steps import plan_status
+    _all_consent(monkeypatch)
+    e = _conflict_engine(tmp_path, _conflicting_journal(tmp_path))
+    out = await e.plan(POSTING_REF)
+    conflict_tasks = [t for t in out.client_tasks if "conflict" in (t.get("known") or {})]
+    assert conflict_tasks                                       # produced by the real journal overlay
+    s = Settings()
+    s.paths.data_dir = str(tmp_path)
+    svc = Services(s, engine=types.SimpleNamespace())
+    full = out.compact()
+    plan_row = svc._guided({**full, "status": plan_status(full)})
+    assert plan_row["cat"] == "unknown_fact" and plan_row["next_action"] == "ask_user"
+    # a conflict task alone (structure, no wording) is enough
+    assert handoff.categorize("needs_human", "", object(), client_tasks=conflict_tasks) == "unknown_fact"
+    # the engine's own submit refusal for the same posting (real detail + unresolved list)
+    r = await e.submit(POSTING_REF, {}, None, dry_run=True)
+    assert r.status == "needs_human" and r.unresolved
+    row = _svc_row(tmp_path, r)
+    assert row["cat"] == "unknown_fact" and row["next_action"] == "ask_user"
+    row = _svc_row(tmp_path, r.model_copy(update={"detail": "", "status": "incomplete"}))   # structure only
+    assert row["cat"] == "unknown_fact" and row["next_action"] == "ask_user"
+
+
+def test_driver_incomplete_wording_is_unknown_fact(tmp_path, monkeypatch):
+    import inspect
+
+    from job_apply_mcp.apply import browser_playwright as bp
+    _all_consent(monkeypatch)
+    src = inspect.getsource(bp)
+    assert 'detail=f"required fields still empty: {labels[:10]}{ev}"' in src     # the driver's real wording
+    detail = "required fields still empty: ['Phone', 'LinkedIn']"
+    row = _svc_row(tmp_path, SubmitResult(ref="r", status="incomplete", detail=detail))
+    assert row["cat"] == "unknown_fact" and row["next_action"] == "ask_user"
+    assert "retry" not in row["next_action"]
+
+
+def test_hard_limit_tasks_win_over_structure(monkeypatch):
+    _all_consent(monkeypatch)
+    tasks = [{"key": "q_ai", "needs_human": True, "reason": "attestation/AI-use question: no explicit profile answer"}]
+    assert handoff.categorize("needs_human", "", object(), client_tasks=tasks) == "hard_limit"

@@ -504,7 +504,8 @@ class Services:
         """Category (ADR-0067) + next-step guidance (ADR-0059) for one status row."""
         from .core.handoff import categorize, category_hint, in_window
         cfg = getattr(self, "settings", None)
-        cat = categorize(row.get("status"), row.get("detail") or row.get("why"), cfg)
+        cat = categorize(row.get("status"), row.get("detail") or row.get("why"), cfg,
+                         unresolved=row.get("unresolved"), client_tasks=row.get("client_tasks"))
         from .core.next_steps import NO_RETRY, POST_CLICK
         blocked = ({row.get("status"), state} & NO_RETRY       # may be sent / filled in an open tab: never "retry"
                    or POST_CLICK.search(str(row.get("detail") or "")))

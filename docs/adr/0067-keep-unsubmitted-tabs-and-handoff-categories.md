@@ -61,6 +61,12 @@ hard limit or a genuinely unknown fact, and tool gaps must be counted so they ca
   `begin_submit` refuses a second click. Batch rows take the submission state from the approvals book. Kept
   tabs with status unknown, roadblock or error carry the note "may already be sent; do not click Submit again".
 
+- **Structure before wording (control review e9e79ae).** `categorize(..., unresolved=, client_tasks=)` checks,
+  in order: hard-limit wording; the result's own lists (an attestation task -> `hard_limit`; a journal/profile
+  conflict task, any other client task or an unresolved field -> `unknown_fact`); status `incomplete`,
+  `needs_input` and `needs_review` -> `unknown_fact`; then wording fallbacks for rows without structure (run
+  reports: "N unresolved (K shown)", "still/stayed empty", conflict). An unknown_fact is never steered to a
+  retry. A table test takes its strings from the real IntakeRunner, engine, journal overlay and driver code.
 - **With ADR-0066.** `captcha_rejected` is a handoff status and always a `hard_limit`: its next_action is
   `tell_user` (never retried), and it is in `NO_RETRY`. Its tab stays open with the note "the site rejected the
   automated submit; the tool will not retry it".

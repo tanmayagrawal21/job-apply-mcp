@@ -31,9 +31,13 @@ _HARD = re.compile(
     r"secret|password|passcode|api[ _-]?key|\btoken\b|credential|"
     r"final_click=human|click submit in the open tab|quota|daily limit|control: block",
     re.IGNORECASE)
+# Fallback only: structure (unresolved / client_tasks / conflict hints / status) is checked before any wording.
 _UNKNOWN = re.compile(
-    r"unresolved required|no explicit profile answer|profile (?:gap|question|answer)|needs_input|"
-    r"not approved yet|prose (?:left )?open|essay|client_tasks|ask the user", re.IGNORECASE)
+    r"\bunresolved\b|no explicit profile answer|profile (?:gap|question|answer)|needs_input|"
+    r"not approved yet|prose (?:left )?open|essay|client_tasks|ask the user|"
+    r"(?:stayed|still|left) empty|required fields?|conflict|disagree|candidate journal", re.IGNORECASE)
+# statuses whose reason is, by construction, an answer the tool does not have (ADR-0067 control review)
+_UNKNOWN_STATUSES = frozenset({"needs_input", "needs_review", "incomplete"})
 # steps an active consent scope automates: (pattern, scope)
 _CONSENTED = (
     (re.compile(r"awaiting_approval|approval required|awaiting approval", re.IGNORECASE), "approve_submissions"),
@@ -55,19 +59,37 @@ def _consented(settings: Any, scope: str) -> bool:
         return False
 
 
-def categorize(status: str | None, detail: str | None, settings: Any = None) -> str | None:
-    """Category of a handoff (None for a status that is not a handoff, e.g. submitted or skipped)."""
+def _structural(unresolved: Any, client_tasks: Any) -> str | None:
+    """Category from the result's own lists, preferred over any wording: an attestation task is a hard_limit; a
+    journal/profile conflict, an unresolved field or any other client task is an unknown_fact."""
+    tasks = [t for t in (client_tasks or []) if isinstance(t, dict)]
+    if any(t.get("needs_human") for t in tasks):
+        return HARD_LIMIT
+    if tasks or unresolved:
+        return UNKNOWN_FACT
+    return None
+
+
+def categorize(status: str | None, detail: Any, settings: Any = None, *, unresolved: Any = None,
+               client_tasks: Any = None) -> str | None:
+    """Category of a handoff (None for a status that is not a handoff, e.g. submitted or skipped). Order: hard-limit
+    wording, then the result's structure (unresolved / client_tasks / conflicts / status), then consented steps,
+    then wording fallbacks."""
     st = str(status or "")
     if st not in HANDOFF_STATUSES:
         return None
     text = f"{st} {detail or ''}"
     if _HARD.search(text):                   # hard limits first, before any consented pattern
         return HARD_LIMIT
+    if (c := _structural(unresolved, client_tasks)) is not None:
+        return c
+    if st in _UNKNOWN_STATUSES:
+        return UNKNOWN_FACT
+    if _UNKNOWN.search(text):                # wording fallback for rows without structure (run reports)
+        return UNKNOWN_FACT
     for pat, scope in _CONSENTED:            # a consented step left to a person is the tool's gap
         if pat.search(text) and _consented(settings, scope):
             return TOOL_GAP
-    if st in ("needs_input", "needs_review") or _UNKNOWN.search(text):
-        return UNKNOWN_FACT
     if st in ("awaiting_code", "awaiting_approval") or _HARD_NO_CONSENT.search(text):
         return HARD_LIMIT
     return TOOL_GAP
