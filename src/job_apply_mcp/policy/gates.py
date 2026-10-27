@@ -68,8 +68,10 @@ def _legal_kind(snippet: str) -> str:
     when it states no requirement."""
     if re.search(_FLAG_PATTERNS["clearance"], snippet, re.IGNORECASE):
         return "clearance"
-    if re.search(_FLAG_PATTERNS["citizenship"], snippet, re.IGNORECASE):
-        return requirement_kind(snippet)          # "... or permanent resident" is a U.S.-person requirement
+    if m := re.search(_FLAG_PATTERNS["citizenship"], snippet, re.IGNORECASE):
+        # only the requirement itself decides: "... or permanent resident" is a U.S.-person requirement, while a later
+        # clause in the snippet's tail ("(no green card holders)") never relaxes a citizens-only one
+        return requirement_kind(m.group(0))
     if re.search(_FLAG_PATTERNS["us_person"], snippet, re.IGNORECASE):
         return "us_person"
     return ""                       # a mention that states no requirement (EEO / export boilerplate)

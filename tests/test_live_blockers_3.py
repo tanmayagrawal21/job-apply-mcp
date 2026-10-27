@@ -142,6 +142,10 @@ MUST_GATE = {   # requirement text -> the gate that must apply (control and revi
     "U.S. citizens only.": CIT,
     "Must be a U.S. citizen.": CIT,
     "U.S. citizenship is required for this role.": CIT,
+    # a later clause in the same sentence never turns a citizens-only requirement into a U.S.-person one
+    "Must be a US citizen (no green card holders).": CIT,
+    "Must be a U.S. citizen; permanent residents are not eligible.": CIT,
+    "U.S. citizenship is required, which excludes lawful permanent residents.": CIT,
 }
 MUST_NOT_GATE = [
     "We consider all applicants without regard to race, sex, national origin or citizenship status.",
