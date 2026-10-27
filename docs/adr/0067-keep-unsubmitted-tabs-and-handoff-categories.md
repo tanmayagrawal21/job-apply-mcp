@@ -51,4 +51,4 @@ hard limit or a genuinely unknown fact, and tool gaps must be counted so they ca
 
 ## Consequences
 Tabs can pile up only with filled work the person still has to finish. The `tool_gap` count becomes the metric
-for automation coverage. 
+for automation coverage.
