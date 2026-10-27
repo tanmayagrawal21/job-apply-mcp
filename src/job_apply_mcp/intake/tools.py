@@ -43,7 +43,8 @@ def register(mcp: Any, get_svc: Callable[[], Any]) -> None:
     async def run_report(run_id: str = "", category: str = "", limit: int = 20) -> str:
         """Report of a run (default: the latest): counts plus rows per status (submitted, confirmed, dry_run_ok,
         needs_human, quota_blocked, skipped, unsupported_site, unknown, failed; see run_applications), each with
-        `why`. `category` shows one only (the old names handed_off and dry_run still work)."""
+        `why`. `category` shows one only (the old names handed_off and dry_run still work).
+        `auto_attested` lists every attestation ticked under the owner's consent window (ADR-0065) for review."""
         return _dump(await runner().report(run_id, category, limit))
 
     @mcp.tool()
