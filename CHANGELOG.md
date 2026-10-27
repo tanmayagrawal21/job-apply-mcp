@@ -9,6 +9,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
   (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal
   `captcha_rejected`, never retried. Ashby: Submit waits for in-flight uploads, and a refused "We're updating your
   application" click (nothing sent) is clicked once more after the upload settles.
+- Browser driver (ADR-0063): a Greenhouse board that redirects to a company site is reopened as the Greenhouse
+  embed (#98, #99); field lookup is scoped to the application form when a page has several forms (job-alert boxes,
+  #98); DOM self-ID surveys use the profile with closed equivalences (Male=Man, explanatory parentheticals, Yes/No
+  leads) and are rescanned for conditional questions (#97, #100); the demographic-data processing consent box is
+  ticked only with the privacy opt-in, a committed profile demographic answer and an exact template (#97); Lever
+  pronouns groups are filled only from `[demographics].pronouns`.
 - Any-client usability: a missing optional component (local model, reviewer, browser extra) now returns
   `status: needs_human` with `why` and `next_action` instead of an error (ADR-0059); every status carries a
   machine-readable `next_action` and a one-line `hint` (ADR-0059); `submit_application(final_click="human")`
