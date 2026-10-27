@@ -97,6 +97,7 @@ class ApplicationPlan(BaseModel):
 class SubmitResult(BaseModel):
     ref: str
     status: str  # submitted | duplicate | incomplete | needs_human | roadblock | error | dry_run | handoff | awaiting_code | skipped (closed posting, ADR-0056)
+    #              | captcha_rejected (the ATS refused on its captcha verdict; terminal, never retried, ADR-0066)
     #              | skipped (closed posting, ADR-0056)
     via: str | None = None
     confirmation: str | None = None
