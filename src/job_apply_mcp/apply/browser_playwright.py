@@ -385,23 +385,33 @@ def network_verdict(ats: AtsProfile, records: list[dict[str, Any]]) -> str | Non
     return None
 
 
-_REJECT_STATUS = (400, 409, 422)
+_GH_REJECT_CODES = ("invalid-attributes", "invalid-attachment")
+
+
+def _gql_errors(data: dict[str, Any]) -> bool:
+    """A GraphQL error payload: `errors` is a non-empty list of objects each with a string `message`, and the
+    response is GraphQL-shaped (a `data` key, or `extensions` / `path` / `locations` on the errors)."""
+    errs = data.get("errors")
+    if not (isinstance(errs, list) and errs and all(isinstance(e, dict) and isinstance(e.get("message"), str)
+                                                    for e in errs)):
+        return False
+    return "data" in data or any(isinstance(e.get("extensions"), dict) or "path" in e or "locations" in e
+                                 for e in errs)
 
 
 def explicit_rejection(ats: AtsProfile, records: list[dict[str, Any]]) -> bool:
-    """True only for an UNAMBIGUOUS refusal in the latest submit response (ADR-0068): the ATS processed the request
-    and said no. Accepted signatures: Ashby GraphQL with a non-empty structured `errors` array (any 2xx/4xx status)
-    and no FormSubmitSuccess; any ATS answering 400/409/422 with a JSON body that carries a non-empty `errors` /
-    `field_errors` / `errorMessages`. Everything else (408, 429, 5xx, gateway/timeouts, bodies that merely CONTAIN
-    words like "required" or "invalid", unparseable bodies) is NOT a rejection: the request may have been processed,
-    so the outcome is unknown."""
+    """True only for an UNAMBIGUOUS refusal in the latest submit response (ADR-0068): the ATS itself processed the
+    request and said no, in its OWN response shape:
+      - Ashby: a GraphQL error payload (_gql_errors) without FormSubmitSuccess, status 200, 400 or 422;
+      - Greenhouse: its error schema {"code": "invalid-attributes" | "invalid-attachment", ...}, status 400 or 422.
+    Everything else is NOT a rejection, so the outcome stays unknown: other statuses (403 from a WAF/CDN, 408, 409,
+    429, 5xx, timeouts), other ATSs (Lever posts a form), JSON that merely has an `errors` key, unparseable bodies and
+    bodies that only contain words like "required" or "invalid"."""
     subs = [r for r in records if r.get("submit")]
     if not subs:
         return False
     r = subs[-1]
     status = int(r.get("status") or 0)
-    if status in (408, 429) or status >= 500 or status == 0:
-        return False
     body = str(r.get("_cls") or r.get("body") or "")
     try:
         data = json.loads(body)
@@ -409,12 +419,11 @@ def explicit_rejection(ats: AtsProfile, records: list[dict[str, Any]]) -> bool:
         return False
     if not isinstance(data, dict):
         return False
-
-    def nonempty(*keys: str) -> bool:
-        return any(isinstance(data.get(k), (list, dict)) and data.get(k) for k in keys)
-    if ats.name == "ashby" and status < 500 and nonempty("errors") and "FormSubmitSuccess" not in body:
-        return True
-    return status in _REJECT_STATUS and nonempty("errors", "field_errors", "errorMessages")
+    if ats.name == "ashby":
+        return status in (200, 400, 422) and _gql_errors(data) and "FormSubmitSuccess" not in body
+    if ats.name == "greenhouse":
+        return status in (400, 422) and data.get("code") in _GH_REJECT_CODES
+    return False
 
 
 def decide_outcome(ats: AtsProfile, url: str, text: str, form_present: bool,

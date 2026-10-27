@@ -4,9 +4,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
-- Submit outcome fix (ADR-0068): only an unambiguous ATS rejection after the click (structured 400/409/422 errors,
-  Ashby GraphQL errors) is `needs_human`. 408/429/5xx, keyword-only bodies, Lever error text and a sent request with
-  no verdict are `roadblock`/`unknown` (blocking; worded "outcome unknown").
+- Submit outcome fix (ADR-0068): only an unambiguous ATS rejection after the click, in the ATS's own response shape
+  (Ashby GraphQL errors on 200/400/422; Greenhouse invalid-attributes / invalid-attachment on 400/422), is
+  `needs_human`. 403/408/409/429/5xx, other shapes, keyword-only bodies, Lever error text and a sent request with no
+  verdict are `roadblock`/`unknown` (blocking). Documents Chrome's own 408 / dropped-socket POST replay (not
+  interceptable) as a residual risk.
 - Submit outcomes (ADR-0066): per-ATS classification of each Submit click (success, emailed code, captcha
   rejected, blocked, validation error, not sent). A Greenhouse low reCAPTCHA score now routes to `awaiting_code`
   (and otp_unattended in a consent window); Ashby's `RECAPTCHA_SCORE_BELOW_THRESHOLD` is a terminal

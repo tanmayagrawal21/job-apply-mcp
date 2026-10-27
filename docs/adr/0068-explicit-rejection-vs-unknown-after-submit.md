@@ -14,17 +14,32 @@ so every local-fixture browser test is skipped there.
 - If a submit request was issued and NO verdict came back (no success, no rejection), the result stays `roadblock`
   (engine `unknown`), and the detail now says "outcome unknown: a submit request was sent but no success
   confirmation appeared (it may have been received)" instead of the contradictory "treat as NOT submitted".
-- **What counts as an explicit rejection (control review on #108).** `network_verdict` says "failure" for any status
+- **What counts as an explicit rejection (control reviews on #108).** `network_verdict` says "failure" for any status
   >= 400 and, outside Ashby, for any body containing words like "required" or "invalid", which is too loose to
-  re-open an application. `explicit_rejection` accepts only:
-  - an Ashby GraphQL response with a non-empty structured `errors` array and no `FormSubmitSuccess`;
-  - a 400/409/422 response whose JSON body carries a non-empty `errors`, `field_errors` or `errorMessages`;
-  - the structured per-ATS codes `classify` already handles (Greenhouse `invalid-attributes` / `invalid-attachment`,
-    Ashby `FormRender` errors).
-  408, 429, 5xx, gateway/timeouts, unparseable bodies and keyword-only bodies are NOT rejections. The request may
-  have been processed, so the result is `roadblock` (engine `unknown`, blocking until reconciled). Lever's re-rendered
-  error text is an inferred signal, so a Lever `validation_error` after the click is also `roadblock`. Only an
-  explicit rejection returns the re-enterable `needs_human` (engine `handoff`).
+  re-open an application. `explicit_rejection` accepts only the ATS's OWN response shape:
+  - Ashby: a GraphQL error payload (`errors` is a non-empty list of objects with a string `message`, plus a `data`
+    key or `extensions` / `path` / `locations`) without `FormSubmitSuccess`, with status 200, 400 or 422;
+  - Greenhouse: its error schema `{"code": "invalid-attributes" | "invalid-attachment", ...}` with status 400 or 422.
+  Everything else stays `roadblock` (engine `unknown`, blocking until reconciled), because the request may have been
+  processed: 403 (WAF/CDN), 408, 409, 429, 5xx, gateway/timeouts, other ATSs, unparseable bodies, JSON that merely has
+  an `errors` key, and keyword-only bodies. Lever's re-rendered error text is an inferred signal, so a Lever
+  `validation_error` after the click is also `roadblock`. Only an explicit rejection returns the re-enterable
+  `needs_human` (engine `handoff`).
+- **Browser-level POST replay (residual risk).** Chrome replays a POST on its own when the server answers 408, or
+  when a reused keep-alive socket closes with no response. The test server saw 2 POSTs for one click. Playwright
+  interception does not see the replay: probe with Chrome 155 and Playwright 1.63, one click on a `fetch` POST:
+  - 408: server 2 POSTs, `page.route` 1 call, `request` events 1;
+  - dropped socket: server 2 POSTs, `page.route` 1 call, 1 `requestfailed` (`ERR_EMPTY_RESPONSE`).
+  The replay happens inside the network stack, below the CDP Fetch domain, so "allow exactly one submit request and
+  abort duplicates" cannot be enforced there. Fulfilling the submit through `route.fetch(max_retries=0)` does avoid
+  the replay (1 server POST in both cases), but it was **not adopted**. It would send the application from
+  Playwright's own HTTP client instead of the browser, so the ATS would see a different client than the page. That
+  is a fingerprint change the captcha rules (ADR-0036) do not allow, and it bypasses browser behaviour such as
+  service workers. Consequences:
+  - The tool clicks exactly once (tests assert one submit event on the page).
+  - A 408, a dropped connection, or any other unanswered submit stays `unknown` and is never re-enterable without
+    reconciliation.
+  - The ATS's own duplicate-application detection is the backstop for a replay the browser makes.
 - If no submit request was issued, the old `needs_human` "treat as NOT submitted" text is unchanged. So is the
   attempt-policy rule (ADR-0036: always `roadblock`).
 - The test is renamed to `test_no_confirmation_after_a_sent_request_is_unknown_with_evidence` and asserts the
