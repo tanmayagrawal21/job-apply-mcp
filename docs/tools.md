@@ -26,7 +26,7 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 |---|---|---|---|
 | `plan_application` | `ref_or_url`, `cursor=0` | `{ref, gate, why?, answers, src, unresolved, client_tasks?, approval_id?, t, next?, total?}` | Runs gates and duplicate check, fills from profile and local LLMs. `client_tasks` are the only things you must write (short, with bounded context). `src` names every answer source other than `profile`. A result over the response budget is paged: pass `next` as `cursor` until it is null; later pages come from memory, with no re-plan (ADR-0049). |
 | `draft_answers` | `ref_or_url`, `cursor=0` | same shape as `plan_application` | Runs the local writer + reviewer for prose fields a plan left open (`writing.mode="deferred"` lists them with `deferred:true`; a `timed_out` task carries a partial `draft`). Bounded by `writing.timeout_s`; re-issues `approval_id` over the grown answer set (ADR-0041). |
-| `submit_application` | `ref_or_url`, `answers=None`, `dry_run=None`, `approval_id=None` | `{ok, ref, status, via, confirmation?, detail?}`; status is one of `submitted`, `dry_run`, `duplicate`, `needs_human`, `needs_review` (+`client_tasks`: supplied prose that failed review, agent mode, ADR-0044), `roadblock`, `error`, `awaiting_code` (+`pending_id`) | Real submits need the server-issued `approval_id` from `plan_application` (human approval unless `approval_mode=agent`). Global `dry_run` wins. |
+| `submit_application` | `ref_or_url`, `answers=None`, `dry_run=None`, `approval_id=None`, `final_click=None` (`"human"`: fill only, the user clicks; tighten-only, ADR-0060) | `{ok, ref, status, via, confirmation?, detail?}`; status is one of `submitted`, `dry_run`, `duplicate`, `needs_human`, `needs_review` (+`client_tasks`: supplied prose that failed review, agent mode, ADR-0044), `roadblock`, `error`, `awaiting_code` (+`pending_id`) | Real submits need the server-issued `approval_id` from `plan_application` (human approval unless `approval_mode=agent`). Global `dry_run` wins. |
 | `provide_verification_code` | `pending_id`, `code` | same row shape as `submit_application` (`submitted`, `awaiting_code` on a bad format, or `handoff`) | The USER types the code they received by email/SMS after a submit returned `awaiting_code`; ask them, never read their mail. Format-checked only, typed into the open page, verify clicked once, no resubmit. Expires after `verification.code_ttl_s` (ADR-0026). |
 | `resolve_submission` | `ref`, `outcome=""`, `note=""`, `evidence=""` | `{ok, state, ...}` | Only exposed when `apply.approval_mode=agent`; resolves a submission stuck in submitting/unknown, evidence folder required. |
 | `apply_batch` | `refs`, `dry_run=None`, `max_parallel=None` | `{results:[{ref,status,...}]}` one row per ref; unresolved items come back as `needs_input` with `client_tasks`, never silently skipped | Use for dozens of refs; rows stay under ~60 tokens each unless they carry `client_tasks`. |
@@ -96,9 +96,14 @@ model or autonomy assumption fills a held field. Record the owner's choice with 
 
 | Tool | Inputs | Output |
 |---|---|---|
-| `health` | none | enabled platforms, LLM providers, browser drivers, `dry_run`, which local models answer |
+| `health` | none | enabled platforms, LLM providers, browser drivers, `dry_run`, `final_click`, which local models answer, `resume` (readable by this process? + `fix`, ADR-0061) |
 | `improvement_report` | `limit=10`, `cursor=0` | ranked proposals learned from recent failures |
 | `request_feature` | `description`, `kind=None` | a proposal; a PR only if `improve.coder` is configured (default `none`) |
+
+## Statuses and next steps (ADR-0059)
+
+Every status result carries `next_action` (machine-readable) and `hint` (one line). A missing optional component
+returns `status: needs_human`, `next_action: fix_setup` and a `why`, never a bare error.
 
 ## Recommended call order (lowest token cost)
 

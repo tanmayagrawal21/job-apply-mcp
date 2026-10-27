@@ -13,15 +13,10 @@ from .store import CandidateJournal
 
 # Appended to the server instructions (server.py) as a separate block, so edits to the main text merge cleanly.
 CLIENT_INSTRUCTIONS = """\
-Candidate journal: whenever the user says anything about themselves, call record_candidate_fact at once, one fact \
-per call, with their exact words in `quote`. This covers where they live, work authorization, visa, citizenship, \
-sponsorship, availability or start date, salary, relocation/hybrid/onsite preferences, current and past employers, \
-projects and stories, constraints, and every correction of an answer. Do it mid-task and for small facts too: it \
-is how their answers reach future applications. confidence=stated for what they said, inferred for what you \
-concluded (inferred never fills a form). Put a structured `key` and short `value` when one fits \
-(authorization.US.requires_sponsorship=yes, preferences.willing_to_relocate=no, availability.start_date=...). \
-Experiences go in as kind=story (essay material). Never record passwords, one-time codes, tokens, SSNs or card \
-numbers. list_candidate_facts shows what is known; retract_candidate_fact when the user says an entry is wrong."""
+Whenever the user states a fact about themselves (residence, authorization, visa, availability, salary, \
+preferences, employers, constraints, stories) or corrects an answer, call record_candidate_fact at once: one fact \
+per call, with their exact words in `quote`. Use confidence=inferred for your own conclusions, and kind=story for \
+experiences. Never record passwords, codes, tokens, SSNs or card numbers."""
 
 
 class _ConfirmFact(BaseModel):

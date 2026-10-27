@@ -18,7 +18,20 @@ from .core import output as _output
 from .grants.otp import assist_code, make_elicitor
 from .services import Services
 
-mcp = FastMCP("job-apply")
+# What every client (ChatGPT, Claude, an IDE agent) must know before its first call (ADR-0061). Kept short: it is
+# sent once per session in the initialize result.
+INSTRUCTIONS = """\
+job-apply applies to jobs for the user. Flow: (1) search_jobs or a posting URL; (2) plan_application; \
+(3) every client_tasks item is a question for the USER: ask it with its full label and options, never guess \
+legal, demographic or attestation answers; (4) submit_application with approval_id and the user's answers \
+(final_click="human" to fill only and let the user click Submit); (5) confirm the result to the user. \
+Every result has status, next_action and hint: follow next_action. needs_human means a person must act; \
+never retry a submit whose status is unknown or handoff. Never edit this tool's files or databases, and never \
+fill or submit an application form outside these tools. If an answer the tool used is wrong, report it with \
+give_feedback (feedback={"kind":"answer","pattern":...,"value":...}) or answer_profile_question; do not patch \
+it by hand. Call health when something is missing (models, browser, resume access)."""
+
+mcp = FastMCP("job-apply", instructions=INSTRUCTIONS)
 mcp._mcp_server.version = __version__   # serverInfo.version: the package, not the mcp library (#83)
 _raw_tool = mcp.tool
 
@@ -157,14 +170,17 @@ async def _elicit_code(ctx: Context, row: dict[str, Any]) -> dict[str, Any]:
 @mcp.tool()
 async def submit_application(ctx: Context, ref_or_url: str, answers: dict[str, Any] | None = None,
                              dry_run: bool | None = None, approval_id: str | None = None,
-                             token: str | None = None) -> str:
+                             token: str | None = None, final_click: str | None = None) -> str:
     """Submit using the best available path (platform API, else browser driver). Honors global dry_run; a per-call
     dry_run can only make it safer. `approval_id` is the server-issued id from plan_application. With
-    approval_mode=human a person must approve (dialog, or `job-apply-mcp approve <id>`)."""
+    approval_mode=human a person must approve (dialog, or `job-apply-mcp approve <id>`).
+    final_click="human": fill and verify only, keep the tab open and let the user click Submit (status handoff; the
+    click is recorded when the confirmation page appears). It can only tighten: "agent" never overrides a configured
+    "human"."""
     if token is not None:
         return _out({"status": "error", "detail": "token is no longer accepted; use approval_id from plan_application"})
     row = await svc().submit(ref_or_url, answers=answers or {}, dry_run=dry_run, approval_id=approval_id,
-                             approver=_elicit_approver(ctx))
+                             approver=_elicit_approver(ctx), final_click=final_click)
     if row.get("status") == "awaiting_code" and row.get("pending_id"):
         row = await _elicit_code(ctx, row)
     return _out(row)
@@ -249,7 +265,8 @@ async def provenance(id: str, include_text: bool = False) -> str:
 
 @mcp.tool()
 async def health() -> str:
-    """Report enabled platforms, LLM providers and which local models are reachable."""
+    """Report enabled platforms, LLM providers, which local models are reachable, the final-click mode, and whether
+    this server process can read the resume (`resume.ok`; `resume.fix` says how when it cannot)."""
     return _out(await svc().health())
 
 

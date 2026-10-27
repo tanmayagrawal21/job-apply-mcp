@@ -36,6 +36,7 @@ from ..core.models import (
     Posting,
     SubmitResult,
 )
+from ..core.output import full_label
 from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
 from ..platforms.base import PostingClosed
@@ -62,7 +63,7 @@ from .mapper import (
     polarity,
     tokens,
 )
-from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike
+from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, RouterLike, final_click
 from .salary import compute_ask, format_ask, is_salary_field
 from .writing import WriteProgress, load_exemplar, review_rubric, review_text, summarize_posting, write_text
 
@@ -210,6 +211,9 @@ class PlanOut(BaseModel):
         return d
 
 
+# Options returned to the client with a question (ADR-0061): enough for any real select, still bounded.
+OPTIONS_MAX = 100
+
 # Per-task override of writing.mode (ADR-0045): batch runs plan with "deferred" without mutating settings.
 WRITE_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("jam_write_mode", default=None)
 
@@ -260,6 +264,13 @@ class _Ctx:
     form: ApplicationForm
     summary: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+
+
+def _batch_error(ref: str, e: BaseException) -> dict[str, Any]:
+    """One failed ref of a batch. A missing optional component is needs_human with its reason (ADR-0059)."""
+    if isinstance(e, ComponentMissing):
+        return {"ref": ref, "status": "needs_human", "detail": f"component missing: {e}"[:200]}
+    return {"ref": ref, "status": "error", "detail": str(e)[:160]}
 
 
 class ApplyEngine:
@@ -454,7 +465,7 @@ class ApplyEngine:
         conflicted = conflict_keys(mapped.hints)
         held = list({f.key: f for f in mapped.unresolved if f.key in conflicted}.values())
         # ADR-0040: optional self-identification questions stay blank and are listed, never sent to an LLM
-        voluntary = {f.key: f.label[:80] for f in mapped.skipped_voluntary if f.key not in conflicted}
+        voluntary = {f.key: full_label(f.label) for f in mapped.skipped_voluntary if f.key not in conflicted}
         pending = [f for f in mapped.unresolved if f.key not in voluntary and f.key not in conflicted]
         owner_only = [f for f in pending if never_llm(f)]        # legal status / place: never a model (ADR-0040)
         pending = [f for f in pending if f not in owner_only]
@@ -789,11 +800,11 @@ class ApplyEngine:
                     or geo_kind(f) or f.kind == FieldKind.file)
 
     def _task(self, f: FormField, ctx: _Ctx, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        t: dict[str, Any] = {"key": f.key, "label": f.label, "max_len": f.max_length or 0,
+        t: dict[str, Any] = {"key": f.key, "label": full_label(f.label), "max_len": f.max_length or 0,   # ADR-0061
                              "context": {"role": f"{ctx.posting.title} @ {ctx.posting.company}",
                                          "posting": ctx.summary, "facts": self.profile.facts(f.label, 6)}}
         if f.options:
-            t["options"] = f.options[:30]
+            t["options"] = list(f.options[:OPTIONS_MAX])
         if self._needs_human(f):
             t["needs_human"] = True
             t["reason"] = "attestation/AI-use question: no explicit profile answer"
@@ -1620,7 +1631,10 @@ class ApplyEngine:
         form, ref = ctx.form, ctx.form.ref
         values, files = self._split(form, eff)
         last = SubmitResult(ref=ref, status="needs_human", detail="no submission path available")
+        human = not dry and final_click(self.s.browser.final_click) == "human"
         for path in form.submit_via or ["api", "browser"]:
+            if path == "api" and human:       # an API submit has no human click: browser only (ADR-0060)
+                continue
             if path == "api":
                 ctx.meta["dispatched"] = True
                 res = await ctx.adapter.submit(form, values, files, dry_run=dry)
@@ -1637,9 +1651,12 @@ class ApplyEngine:
                        dry: bool) -> SubmitResult | None:
         url = ctx.posting.apply_url or ctx.posting.url
         last: SubmitResult | None = None
+        human = not dry and final_click(self.s.browser.final_click) == "human"
         for name in (self.s.browser.driver, self.s.browser.fallback_driver):
             drv = self._driver(name)
             if drv is None:
+                continue
+            if human and not hasattr(drv, "on_human_confirmed"):   # cannot hand off a final click (ADR-0060)
                 continue
             demo = {f"demographic:{k}": v for k in DEMOGRAPHIC_KEYS if (v := self.profile.lookup(k))}
             if g := self.profile.lookup("gender_if_required"):   # the driver fills required EEO selects only
@@ -1690,5 +1707,4 @@ class ApplyEngine:
 
         # every ref starts at once; the pools above (plan_sem, browser_cap/_browser_sem) do the limiting
         rows = await bounded_gather((one(r) for r in refs), max(len(refs), 1))
-        return [r if not isinstance(r, BaseException) else {"status": "error", "detail": str(r)[:160]}
-                for r in rows]
+        return [r if not isinstance(r, BaseException) else _batch_error(ref, r) for ref, r in zip(refs, rows, strict=True)]

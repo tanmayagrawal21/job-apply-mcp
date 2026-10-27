@@ -7,9 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - Candidate journal: `record_candidate_fact`, `list_candidate_facts` and `retract_candidate_fact` keep a dated,
   append-only log (0600 JSONL in the state dir) of what the user says about themselves. Server instructions ask
   every client to record such facts. Secrets are redacted at capture. Sensitive facts are usable only once
-  confirmed (dialog or verbatim chat quote), and inferred facts and attestations never fill forms. The mapper uses
-  the journal after the profile, with `journal:<id>@<date>` provenance, and flags conflicts instead of choosing a
-  value. Stories reach prose tasks (ADR-0064).
+  confirmed (a dialog, or the user's verbatim quote from chat or a correction), and inferred facts and attestations
+  never fill forms. The mapper uses the journal after the profile, with `journal:<id>@<date>` provenance. When the
+  journal and the profile disagree, the field is held for the owner and no model or autonomy fallback fills it. The
+  owner's choice, recorded as a correction, settles it. Stories reach prose tasks (ADR-0064).
+- Any-client usability: a missing optional component (local model, reviewer, browser extra) now returns
+  `status: needs_human` with `why` and `next_action` instead of an error (ADR-0059); every status carries a
+  machine-readable `next_action` and a one-line `hint` (ADR-0059); `submit_application(final_click="human")`
+  fills and verifies only, tighten-only, and skips the API path (ADR-0060); full question labels (up to 500 chars)
+  and options reach the client; `health`/`doctor` check that the resume is readable by the server process and
+  accept a copy in `<data_dir>/documents`; server `instructions` give the canonical flow and rules (ADR-0061).
 - Autonomy level `[answers] autonomy = strict | safe_default | infer` (trusted user config only; default strict):
   safe declines for genuine contact/marketing permission asks, the configured "how did you hear" default and
   "decline to self-identify"; at `infer`, conservative resume-based answers to an allowlist of skill/experience questions. Hard limits
