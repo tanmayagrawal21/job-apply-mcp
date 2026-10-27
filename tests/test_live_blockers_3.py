@@ -208,3 +208,30 @@ def test_owner_correction_for_a_relocation_gap_is_used():
     no = _Stored({"profile.preferences.willing_to_relocate": "No"})
     assert run(BASED, p=view(persona=no)) == (False, "rule:based_or_relocate")
     assert run(BASED, p=view(reloc=False, persona=owner)) == (False, "rule:based_or_relocate")   # the profile wins
+
+
+# ---------------------------------------------------------------- candidate journal (ADR-0064) on top of ADR-0062
+def _with_journal(tmp_path, label, p, job, *entries, locs=()):
+    from job_apply_mcp.journal import CandidateJournal
+    from job_apply_mcp.journal.overlay import journal_view
+    j = CandidateJournal(tmp_path / "state")
+    for key, value in entries:
+        j.record(f"Jane Doe: {key}", key=key, value=value, source="document", elicited=True)
+    f = F("q", label, FieldKind.boolean, options=YN)
+    r = map_fields([f], p, company="Acme Robotics", job_country=job, job_locations=list(locs),
+                   journal=journal_view(j, "Acme Robotics", "Engineer", job))
+    return {a.key: (a.value, a.source) for a in r.answers}.get("q")
+
+
+def test_journal_relocation_fact_answers_based_or_relocate(tmp_path):
+    got = _with_journal(tmp_path, BASED, view(), "US", ("preferences.willing_to_relocate", "yes"))
+    assert got is not None and got[0] is True and got[1].startswith("journal:")
+
+
+def test_journal_facts_never_bypass_job_country_confirmation(tmp_path):
+    auth = [("authorization.US.work_authorized", "yes"), ("authorization.US.requires_sponsorship", "no")]
+    for label in ("Are you legally authorized to work in the country where the job is located?",
+                  "Are you authorized to work in the U.S. for Acme Robotics?",
+                  "Will Acme Robotics need to sponsor you to work in the US?"):
+        assert _with_journal(tmp_path, label, view(), None, *auth) is None, label
+        assert _with_journal(tmp_path, label, view(), "CA", *auth) is None, label
