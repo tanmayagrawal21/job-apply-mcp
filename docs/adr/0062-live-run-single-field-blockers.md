@@ -1,4 +1,4 @@
-# ADR-0059: Live-run blockers (residence region, explicit-country authorization, job country, graduation and citizenship gates, based-or-relocate)
+# ADR-0062: Live-run blockers (residence region, explicit-country authorization, job country, graduation and citizenship gates, based-or-relocate)
 
 Status: accepted · Date: 2026-10-27 · Amends ADR-0009, ADR-0040, ADR-0053, ADR-0055
 

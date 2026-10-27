@@ -186,7 +186,7 @@ class ProfileView:
         return [Project(name=f.title or f.org, summary="; ".join(f.bullets[:2]))
                 for f in self.resume_facts if f.section == "projects" and (f.title or f.org)]
 
-    # ADR-0059: [preferences] facts whose profile gap ("profile.preferences.<field>") the owner may answer through
+    # ADR-0062: [preferences] facts whose profile gap ("profile.preferences.<field>") the owner may answer through
     # answer_profile_question / `profile ask`. The profile value always wins; the owner's stored answer fills it only
     # when the profile leaves it unset.
     _PREF_GAP_FIELD: ClassVar[dict[str, str]] = {"willing_to_relocate": "willing_to_relocate",
@@ -234,7 +234,7 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
-        if key == "work:several_current":           # ADR-0059
+        if key == "work:several_current":           # ADR-0062
             return "Yes" if sum(1 for w in self.p.work if not w.end) > 1 else None
         if key == "work:last_internship":           # ADR-0055
             return self._last_internship()
@@ -377,7 +377,7 @@ class PolicyGates:
         from ..policy.gates import evaluate_posting
         self._eval = evaluate_posting
         self.cfg = settings.policy
-        self.graduation = ""                 # ADR-0059: the profile's graduation date drives the graduation gate
+        self.graduation = ""                 # ADR-0062: the profile's graduation date drives the graduation gate
         with contextlib.suppress(Exception):
             p = getattr(profile, "p", profile)
             self.graduation = (p.graduation() if p is not None and hasattr(p, "graduation") else None) or ""

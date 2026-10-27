@@ -77,7 +77,7 @@ class GreenhouseAdapter(BaseAdapter):
                 code = self._us_office(loc, str(o.get("name") or ""))
             if not code and isinstance(o, dict) and not (loc or "").strip() and isinstance(o.get("name"), str):
                 # ADR-0053: an office with no location whose NAME is exactly a full country name ("United States").
-                # ADR-0059: also "Remote - United States" / "United States (Remote)". Codes and labels such as
+                # ADR-0062: also "Remote - United States" / "United States (Remote)". Codes and labels such as
                 # "US-PERM" or "NYC" never confirm.
                 code = self.country_code(_REMOTE_WORD.sub(" ", o["name"]).strip(" -,()/"), allow_codes=False)
             out.append(code or "UNCONFIRMED")
@@ -85,7 +85,7 @@ class GreenhouseAdapter(BaseAdapter):
 
     @staticmethod
     def _us_office(loc: str, name: str = "") -> str | None:
-        """ADR-0059: an office location that is a strictly parsed US place ("Mountain View, CA", or the place after
+        """ADR-0062: an office location that is a strictly parsed US place ("Mountain View, CA", or the place after
         an office name: "Acme HQ - Mountain View, CA"). The same strict parser as the mapper; an office whose name or
         location names any other country never confirms."""
         from ..apply.mapper import location_in_country, question_countries

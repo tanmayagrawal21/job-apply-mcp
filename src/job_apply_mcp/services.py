@@ -38,7 +38,7 @@ class Services:
         self._llm = None
         self._plan_pages: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()   # last plan/draft per ref
         self._skills: list[str] | None = None
-        self._graduation: str | None = None    # ADR-0059: the profile's graduation date, read once
+        self._graduation: str | None = None    # ADR-0062: the profile's graduation date, read once
         self._desc: dict[str, Posting | None] = {}
         self._late: set[asyncio.Task] = set()   # timed-out board fetches left to finish into the cache (ADR-0043)
 
@@ -160,12 +160,12 @@ class Services:
         if pol.max_years_required is not None and (y := years_required(" ".join(f.get("years", [])))) is not None \
                 and y > pol.max_years_required:
             return True
-        grad = self._profile_graduation() or pol.graduation    # ADR-0059: the profile's date, then policy.graduation
+        grad = self._profile_graduation() or pol.graduation    # ADR-0062: the profile's date, then policy.graduation
         return bool(grad and "grad_window" in f
                     and grad_window_conflict(f["grad_window"], grad, pol.graduation_flex_months))
 
     def _legal_drop(self, snippets: list[str]) -> bool:
-        """ADR-0059: a citizenship / U.S.-person / clearance flag drops a posting only when the owner's policy facts
+        """ADR-0062: a citizenship / U.S.-person / clearance flag drops a posting only when the owner's policy facts
         do not meet it (the same split as the citizenship gate)."""
         from .policy.gates import _legal_kind
         pol = self.settings.policy

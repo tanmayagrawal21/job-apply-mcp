@@ -1,4 +1,4 @@
-"""ADR-0059: e2e blockers - unconfirmed US job country, graduation and citizenship false gates, "based in, or willing
+"""ADR-0062: e2e blockers - unconfirmed US job country, graduation and citizenship false gates, "based in, or willing
 to relocate to" questions and owner corrections. Fictional data only (Jane Doe, Springfield IL, Acme Robotics)."""
 import pytest
 from apply_fakes import F
@@ -45,7 +45,7 @@ def run(label, kind=FieldKind.boolean, options=YN, p=None, job="US", locs=(), co
     return {a.key: (a.value, a.source) for a in r.answers}.get("q")
 
 
-# ---------------------------------------------------------------- explicit country vs. abbreviations (ADR-0059 #54)
+# ---------------------------------------------------------------- explicit country vs. abbreviations (ADR-0062 #54)
 def test_explicit_country_rule_needs_the_full_country_name():
     full = "Are you authorized to work lawfully in the United States for Acme Robotics?"
     assert run(full, job=None) == (True, "rule:work_authorized")

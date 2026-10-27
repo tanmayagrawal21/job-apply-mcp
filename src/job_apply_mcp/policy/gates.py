@@ -29,7 +29,7 @@ class GateContext:
     text: str = ""                  # posting description (and anything else worth scanning)
     form_text: str = ""             # application form labels / attestations, one field per line (ADR-0040)
     flags: dict[str, list[str]] = field(default_factory=dict)
-    graduation: str = ""            # ADR-0059: the profile's graduation (YYYY-MM); wins over policy.graduation
+    graduation: str = ""            # ADR-0062: the profile's graduation (YYYY-MM); wins over policy.graduation
 
     @classmethod
     def from_posting(cls, p: Posting, form_text: str = "", graduation: str = "") -> GateContext:
@@ -44,7 +44,7 @@ _FLAG_PATTERNS: dict[str, str] = {
                       r"|without (?:the need for )?(?:visa )?sponsorship|not (?:eligible|available) for sponsorship"
                       r"|sponsorship (?:is )?not (?:available|offered|provided)"
                       r"|must be (?:legally )?authorized to work[^.]{0,60}without",
-    # ADR-0059: an explicit requirement sentence only (not EEO "citizenship status", not "citizen or eligible ...")
+    # ADR-0062: an explicit requirement sentence only (not EEO "citizenship status", not "citizen or eligible ...")
     "citizenship": r"(?:u\.?s\.?|united states) citizen(?:ship)? (?:is )?(?:required|mandatory)"
                    r"|must (?:be|hold) (?:a )?(?:u\.?s\.?|united states) citizen(?:ship)?(?!\w*,? *(?:or|and/or)\b)"
                    r"|(?:u\.?s\.?|united states) citizens? only|only (?:open to )?(?:u\.?s\.?|united states) citizens",
@@ -65,7 +65,7 @@ def local_flags(text: str) -> dict[str, list[str]]:
 
 
 def _legal_kind(snippet: str) -> str:
-    """ADR-0059: the posting flag "citizenship" also carries clearance and ITAR snippets; sort each to its gate."""
+    """ADR-0062: the posting flag "citizenship" also carries clearance and ITAR snippets; sort each to its gate."""
     if re.search(_FLAG_PATTERNS["clearance"], snippet, re.IGNORECASE):
         return "clearance"
     if re.search(_FLAG_PATTERNS["citizenship"], snippet, re.IGNORECASE):
@@ -116,7 +116,7 @@ def _ym(s: str) -> tuple[int, int] | None:
 
 
 def graduation_gate(ctx: GateContext, cfg: PolicyCfg) -> Verdict | None:
-    """ADR-0059: skip only on a clear mismatch between the posting's stated graduation windows and the profile's
+    """ADR-0062: skip only on a clear mismatch between the posting's stated graduation windows and the profile's
     graduation (policy.graduation when the profile has none), widened by policy.graduation_flex_months. Ambiguous or
     open-ended wording ("by 2028", "2026, 2027 or 2028", "2028 or earlier") never skips."""
     from ..core.gradwindow import grad_mismatch

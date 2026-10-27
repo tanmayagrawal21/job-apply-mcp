@@ -1,4 +1,4 @@
-"""Graduation windows stated in posting text (ADR-0059). Pure text, no I/O: used by the search prefilter
+"""Graduation windows stated in posting text (ADR-0062). Pure text, no I/O: used by the search prefilter
 (platforms.textflags) and the graduation policy gate alike, so both read a posting the same way."""
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _tok_months(m: re.Match[str]) -> tuple[int, int]:
 
 
 def grad_ranges(text: str) -> list[tuple[int | None, int | None]]:
-    """ADR-0059: every graduation window a posting text states, as (first, last) month indices (year*12+month; None =
+    """ADR-0062: every graduation window a posting text states, as (first, last) month indices (year*12+month; None =
     open). "class of 2028" -> 2028-01..2028-12; "between Dec 2025 and Aug 2026" -> one range; "by June 2028" /
     "2028 or earlier" -> no lower bound; "2026, 2027 or 2028" -> three windows (any one fits)."""
     out: list[tuple[int | None, int | None]] = []

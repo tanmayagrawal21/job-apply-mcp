@@ -10,7 +10,7 @@ import html
 import re
 from dataclasses import dataclass
 
-from ..core.gradwindow import (  # noqa: F401 (ADR-0059 re-export)
+from ..core.gradwindow import (  # noqa: F401 (ADR-0062 re-export)
     grad_mismatch,
     grad_ranges,
     grad_window_conflict,
@@ -45,7 +45,7 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE),
     "opt_excluded": re.compile(
         r"(?:F-?1|OPT|STEM OPT|I-983|CPT)[^.]{0,80}(?:not|unable|ineligible)|not open to (?:F-?1|J-?1)", re.IGNORECASE),
-    # ADR-0059: an explicit requirement only. "must be a U.S. citizen or eligible to work ...", an EEO line
+    # ADR-0062: an explicit requirement only. "must be a U.S. citizen or eligible to work ...", an EEO line
     # ("regardless of citizenship status") and a bare export-control mention are not a citizenship requirement.
     "citizenship": re.compile(
         r"U\.?S\.? citizen(?:ship)? (?:is )?required|must be a U\.?S\.? citizen(?!\w*,? *(?:or|and/or)\b)"
