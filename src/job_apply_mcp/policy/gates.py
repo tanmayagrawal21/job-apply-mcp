@@ -63,7 +63,9 @@ def local_flags(text: str) -> dict[str, list[str]]:
 
 
 def _legal_kind(snippet: str) -> str:
-    """ADR-0062: the posting flag "citizenship" also carries clearance and ITAR snippets; sort each to its gate."""
+    """ADR-0062: the broad posting flag "citizenship" (platforms.textflags) carries citizenship, U.S.-person,
+    export-control, ITAR and clearance snippets; the gate's own narrow patterns sort each one to its gate, or to none
+    when it states no requirement."""
     if re.search(_FLAG_PATTERNS["clearance"], snippet, re.IGNORECASE):
         return "clearance"
     if re.search(_FLAG_PATTERNS["citizenship"], snippet, re.IGNORECASE):
@@ -80,6 +82,8 @@ def _flags(ctx: GateContext) -> dict[str, list[str]]:
             merged.setdefault((_legal_kind(snip) or k) if k == "citizenship" else k, []).append(snip)
     for k, v in (ctx.flags or {}).items():
         if k == "citizenship":
+            if (ctx.text or "").strip():
+                continue          # the description itself is read above; the broad posting flag only fills in
             for snip in v:
                 if kind := _legal_kind(snip):
                     merged.setdefault(kind, []).append(snip)

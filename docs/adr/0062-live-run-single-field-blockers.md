@@ -49,15 +49,19 @@ sponsorship select whose options are legal statuses, and a bare "Visa" checkbox.
     `policy.graduation_flex_months` on both sides. A posting is gated only on a clear mismatch: it states at least one
     window and the date fits none. Lists ("class of 2026, 2027 or 2028") are alternatives; "by June 2028", "2028 or
     earlier" and "from 2024 onwards" are open-ended; text with no parseable window never gates.
-12. **Citizenship gate.** One pattern set (`core/legalflags.py`) serves the search prefilter and the gate. Every
-    requirement form is flagged: "must be a U.S. citizen", "must be a citizen of the United States", "U.S.
-    citizenship is a requirement", "citizenship required", "U.S. citizens only", "must be a U.S. national", and the
-    permanent-resident forms ("... or green card holder", "U.S. citizens and permanent residents only", "must be a
-    lawful permanent resident or U.S. citizen"), which go to the U.S.-person gate. The one exemption is "citizen OR
-    <work eligibility>" ("or eligible / authorized to work", "or have work authorization"). EEO lines ("citizenship
-    status") and bare export-control mentions contain no requirement form. Posting-flag snippets are sorted to their
-    own gate (clearance, U.S. person, citizenship), and the search prefilter honours `policy.us_citizen`,
-    `us_person` and `has_clearance` like the gate instead of dropping every flagged posting.
+12. **Citizenship gate.** The posting flagger (`platforms/textflags.py`, flag `citizenship`) stays a broad signal:
+    a superset of every citizenship, U.S.-person, export-control, ITAR and clearance mention, each hit carrying the
+    rest of its clause. Only the gate decides, with its narrow patterns (`policy/gates.py`, `core/legalflags.py`).
+    Every requirement form gates: "must be a U.S. citizen", "applicants must be U.S. citizens", "must be a citizen of
+    the United States", "U.S. citizenship is a requirement", "requires U.S. citizenship", "citizenship required",
+    "U.S. citizens only" and "must be a U.S. national" go to the citizenship gate. The permanent-resident and
+    U.S.-person forms ("... or green card holder", "... or permanent resident", "U.S. citizens and permanent residents
+    only", "must be a lawful permanent resident or U.S. citizen", "must be a U.S. person") go to the U.S.-person gate.
+    The one exemption is "citizen OR <work eligibility>" ("or eligible / authorized to work", "or have work
+    authorization"). EEO lines ("citizenship status") and export-control boilerplate that imposes nothing never
+    gate. With a description the gate reads it; without one (search listings) it sorts the flag's snippets. The
+    search prefilter drops a posting only when this gate would skip it under `policy.us_citizen`, `us_person` and
+    `has_clearance`, instead of dropping every flagged posting.
 13. **Based in, or willing to relocate to, <place>.** Answered from `[contact]` residence and
     `[preferences].willing_to_relocate`: Yes when relocation is true or the owner lives there (confirmed city +
     region); No only when the owner is confirmed elsewhere and relocation is false; otherwise unresolved with the

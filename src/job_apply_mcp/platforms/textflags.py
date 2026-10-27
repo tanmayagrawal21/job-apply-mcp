@@ -15,7 +15,6 @@ from ..core.gradwindow import (  # noqa: F401 (ADR-0062 re-export)
     grad_ranges,
     grad_window_conflict,
 )
-from ..core.legalflags import CITIZENSHIP_REQUIREMENT
 
 # --------------------------------------------------------------------------------------- text helpers
 
@@ -46,9 +45,18 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
         re.IGNORECASE),
     "opt_excluded": re.compile(
         r"(?:F-?1|OPT|STEM OPT|I-983|CPT)[^.]{0,80}(?:not|unable|ineligible)|not open to (?:F-?1|J-?1)", re.IGNORECASE),
-    # ADR-0062: an explicit citizenship / U.S.-person requirement (core.legalflags), clearance or ITAR. EEO lines,
-    # bare export-control mentions and "citizen or eligible to work" are not flagged.
-    "citizenship": re.compile(CITIZENSHIP_REQUIREMENT + r"|security clearance|active clearance|TS/SCI|ITAR", re.IGNORECASE),
+    # ADR-0062: a BROAD signal (a superset of every citizenship, U.S.-person, export-control, ITAR and clearance
+    # mention). Each hit carries up to 80 characters of the rest of its sentence so policy.gates, which alone
+    # decides, can tell "must be a U.S. citizen" from "... or eligible to work" and boilerplate.
+    "citizenship": re.compile(
+        r"(?:must|shall|need to|required to) (?:be|hold|have|possess) (?:an? )?(?:(?:lawful |legal )?permanent "
+        r"residents? or (?:an? )?)?(?:U\.?S\.?A?|United States|American) (?:citizen|national|person)\w*(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:must|shall|need to|required to) (?:be|hold|have|possess) (?:an? )?(?:citizen|national)\w* of (?:the )?"
+        r"(?:U\.?S\.?A?|United States)(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:U\.?S\.?A?|United States|American) (?:citizen|national|person)\w*(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:requires?|required) (?:U\.?S\.? |United States )?citizenship(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}"
+        r"|(?:no |not )?citizenship (?:is )?(?:required|mandatory|a requirement)"
+        r"|security clearance|active clearance|TS/SCI|ITAR(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}|export[- ]control(?:[^.;\n]|\.(?=\S)|(?<=\b[a-z])\.){0,80}", re.IGNORECASE),
     "grad_window": re.compile(
         r"graduat\w*[^.]{0,80}?20\d\d(?:[^.\n]{0,40}?20\d\d)?(?:,? *or (?:earlier|later|before|after|sooner))?"
         r"|(?:class|graduates?) of\s*20\d\d(?:(?: *,| *or| *and| */)+ *20\d\d)*(?:,? *or (?:earlier|later|before|after))?"
@@ -65,7 +73,7 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
 _NEEDS: dict[str, tuple[str, ...]] = {
     "no_sponsorship": ("sponsor",),
     "opt_excluded": ("f-1", "f1", "opt", "i-983", "cpt", "j-1", "j1"),
-    "citizenship": ("citizen", "national", "clearance", "ts/sci", "itar"),
+    "citizenship": ("citizen", "national", "person", "clearance", "ts/sci", "itar", "export"),
     "grad_window": ("grad", "class"),
     "phd_only": ("phd",),
     "academic": ("university", "college", "school of medicine", "research institute", "academic medical center"),
@@ -93,7 +101,7 @@ def _may(kind: str, low: str) -> bool:
 # First characters of every alternative of each pattern (ADR-0043). A `(?=[...])` guard rejects other start
 # positions with one class test instead of trying every IGNORECASE alternative there; the set of matches is
 # unchanged (tests/test_textflags.py checks the guarded and plain patterns agree).
-_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "umacostid",
+_FIRST: dict[str, str] = {"no_sponsorship": "uncdws", "opt_excluded": "fosicn", "citizenship": "msnruacite",
                           "grad_window": "gc2", "phd_only": "pcn", "academic": "ucsra"}
 _FAST: dict[str, re.Pattern[str]] = {
     k: re.compile(f"(?=[{_FIRST[k]}])(?:{pat.pattern})", pat.flags) for k, pat in _PATTERNS.items()}

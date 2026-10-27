@@ -1,8 +1,8 @@
-"""Citizenship / U.S.-person requirement wording in posting text (ADR-0062). Pure regex text, no I/O: one source for the
-search prefilter (platforms.textflags) and the citizenship policy gate (policy.gates).
+"""Citizenship / U.S.-person requirement wording in posting text (ADR-0062). Pure regex text, no I/O: used only by the
+citizenship policy gate (policy.gates), which alone decides; the posting flagger (platforms.textflags) stays broad.
 
 A requirement sentence is flagged in every common form ("must be a U.S. citizen", "must be a citizen of the United
-States", "U.S. citizenship is a requirement", "citizenship required", "U.S. citizens and permanent residents only",
+States", "U.S. citizenship is a requirement", "citizenship required", "requires U.S. citizenship", "U.S. citizens and permanent residents only",
 "must be a U.S. national", "must be a lawful permanent resident or U.S. citizen", "... or green card holder").
 Exactly one alternative is exempt: "citizen OR <work eligibility>" ("or eligible to work", "or authorized to work",
 "or have work authorization"), which asks for the right to work, not for citizenship. EEO lines ("citizenship
@@ -25,7 +25,8 @@ CITIZENSHIP_REQUIREMENT = (
     rf"|{_US} (?:citizen(?:ship)?|national(?:ity)?)s? (?:is |are )?(?:required|mandatory|a (?:requirement|must))"
     rf"|{_US} citizens?(?: (?:and|or|&) {_PR})? only\b"
     rf"|only (?:open to )?{_US} citizens"
-    r"|(?<!no )(?<!not )citizenship (?:is )?(?:required|mandatory|a requirement)")
+    r"|(?<!no )(?<!not )citizenship (?:is )?(?:required|mandatory|a requirement)"
+    rf"|requires? (?:{_US} )?citizenship(?! status| information| details)")
 
 # a requirement that U.S. permanent residents also meet (the U.S.-person gate, not the citizenship gate)
 _US_PERSON_FORM = re.compile(rf"{_PR}", re.IGNORECASE)

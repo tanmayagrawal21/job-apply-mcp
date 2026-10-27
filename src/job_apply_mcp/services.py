@@ -155,7 +155,7 @@ class Services:
         pol, f = self.settings.policy, p.flags
         if pol.requires_sponsorship and ({"no_sponsorship", "opt_excluded"} & f.keys()):
             return True
-        if "phd_only" in f or self._legal_drop(f.get("citizenship", [])):
+        if "phd_only" in f or self._legal_drop(p):
             return True
         if pol.max_years_required is not None and (y := years_required(" ".join(f.get("years", [])))) is not None \
                 and y > pol.max_years_required:
@@ -164,15 +164,14 @@ class Services:
         return bool(grad and "grad_window" in f
                     and grad_window_conflict(f["grad_window"], grad, pol.graduation_flex_months))
 
-    def _legal_drop(self, snippets: list[str]) -> bool:
-        """ADR-0062: a citizenship / U.S.-person / clearance flag drops a posting only when the owner's policy facts
-        do not meet it (the same split as the citizenship gate)."""
-        from .policy.gates import _legal_kind
-        pol = self.settings.policy
-        need = {_legal_kind(x) for x in snippets}
-        return (("citizenship" in need and not pol.us_citizen)
-                or ("us_person" in need and not (pol.us_person or pol.us_citizen))
-                or ("clearance" in need and not pol.has_clearance))
+    def _legal_drop(self, p: Posting) -> bool:
+        """ADR-0062: the broad citizenship flag drops a posting only when the citizenship gate (which alone decides,
+        on the description when there is one) would skip it under the owner's policy facts."""
+        if "citizenship" not in p.flags:
+            return False
+        from .policy.gates import GateContext, citizenship_gate
+        ctx = GateContext(text=p.description or "", flags={"citizenship": list(p.flags["citizenship"])})
+        return citizenship_gate(ctx, self.settings.policy) is not None
 
     def _profile_graduation(self) -> str | None:
         if self._graduation is None:

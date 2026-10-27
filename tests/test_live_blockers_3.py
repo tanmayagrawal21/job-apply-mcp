@@ -124,22 +124,26 @@ async def test_policy_gates_read_the_profile_graduation():
     assert res.decision == Decision.submit
 
 
-# ---------------------------------------------------------------- citizenship gate: explicit requirement only
-MUST_FLAG = [   # every requirement form main flagged (control review of ADR-0062): none may be lost
-    "Must be a U.S. citizen or green card holder",
-    "US citizens and permanent residents only",
-    "Must be a citizen of the United States",
-    "U.S. citizenship is a requirement",
-    "citizenship required",
-    "Must be a U.S. national",
-    "must be a lawful permanent resident or U.S. citizen",
-    "Must be a U.S. citizen.",
-    "US citizens only.",
-    "U.S. citizenship is required for this role.",
-]
-PERMANENT_RESIDENTS_OK = {"Must be a U.S. citizen or green card holder", "US citizens and permanent residents only",
-                          "must be a lawful permanent resident or U.S. citizen"}
-MUST_NOT_FLAG = [
+# ---------------------------------------------------------------- citizenship: broad flag, narrow gate
+CIT, USP = "US citizenship required", "US-person/ITAR restriction"
+MUST_GATE = {   # requirement text -> the gate that must apply (control and reviewer cases of ADR-0062)
+    "Must be a U.S. citizen or green card holder": USP,
+    "US citizens and permanent residents only": USP,
+    "Must be a citizen of the United States": CIT,
+    "U.S. citizenship is a requirement": CIT,
+    "citizenship required": CIT,
+    "Must be a U.S. national": CIT,
+    "must be a lawful permanent resident or U.S. citizen": USP,
+    "Must be a US citizen or permanent resident.": USP,
+    "Subject to export control regulations; must be a U.S. person.": USP,
+    "Applicants must be U.S. citizens.": CIT,
+    "This role requires U.S. citizenship.": CIT,
+    "Requires US citizenship.": CIT,
+    "U.S. citizens only.": CIT,
+    "Must be a U.S. citizen.": CIT,
+    "U.S. citizenship is required for this role.": CIT,
+}
+MUST_NOT_GATE = [
     "We consider all applicants without regard to race, sex, national origin or citizenship status.",
     "Applicants must be U.S. citizens or eligible to work in the United States.",
     "Must be a U.S. citizen or authorized to work in the U.S.",
@@ -149,28 +153,27 @@ MUST_NOT_FLAG = [
 ]
 
 
-@pytest.mark.parametrize("text", MUST_FLAG)
-def test_every_requirement_form_is_flagged_by_textflags(text):
-    assert tf.flag_text(text).get("citizenship")
-    assert tf.citizenship_flags(text)
-
-
-@pytest.mark.parametrize("text", MUST_FLAG)
-def test_every_requirement_form_gates(text):
-    assert g.local_flags(text).get("citizenship")
-    assert gate("citizenship", text, PolicyCfg())[0] == S
+@pytest.mark.parametrize("text", list(MUST_GATE))
+def test_every_requirement_is_flagged_and_the_right_gate_applies(text):
+    assert tf.flag_text(text).get("citizenship") and tf.citizenship_flags(text)    # the broad posting signal fires
+    want = MUST_GATE[text]
+    assert gate("citizenship", text, PolicyCfg()) == (S, want)                      # gate on the description
+    assert gate("citizenship", "", PolicyCfg(), flags=tf.flag_text(text)) == (S, want)   # gate on the flag alone
     assert gate("citizenship", text, PolicyCfg(us_citizen=True)) is None
-    # "... or permanent resident" admits U.S. persons; every other form still needs citizenship
-    assert (gate("citizenship", text, PolicyCfg(us_person=True)) is None) == (text in PERMANENT_RESIDENTS_OK)
-    # the same snippet carried as a posting flag (search listings without a description) gates the same way
-    assert gate("citizenship", "", PolicyCfg(), flags=tf.flag_text(text))[0] == S
+    assert (gate("citizenship", text, PolicyCfg(us_person=True)) is None) == (want == USP)
 
 
-@pytest.mark.parametrize("text", MUST_NOT_FLAG)
-def test_boilerplate_and_work_eligibility_alternatives_do_not_flag(text):
-    assert "citizenship" not in tf.flag_text(text)
-    assert "citizenship" not in g.local_flags(text)
+@pytest.mark.parametrize("text", MUST_NOT_GATE)
+def test_work_eligibility_alternatives_and_boilerplate_never_gate(text):
+    assert "citizenship" not in g.local_flags(text) and "us_person" not in g.local_flags(text)
     assert gate("citizenship", text, PolicyCfg()) is None
+    assert gate("citizenship", "", PolicyCfg(), flags=tf.flag_text(text)) is None   # broad flag, narrow gate
+
+
+def test_the_posting_flagger_stays_broad():
+    for text in ("Subject to export control regulations.", "ITAR applies.", "Active TS/SCI clearance required",
+                 "Must be a U.S. citizen or eligible to work in the U.S."):
+        assert tf.flag_text(text).get("citizenship"), text
 
 
 def test_posting_flag_snippets_are_sorted_to_their_own_gate():
