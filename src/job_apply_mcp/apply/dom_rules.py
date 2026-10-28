@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from .mapper import demographic_label_ok, normalize
 
@@ -38,19 +38,52 @@ def greenhouse_offsite_embed(requested: str, landed: str, ref: str) -> str | Non
     return f"https://job-boards.greenhouse.io/embed/job_app?for={parts[1]}&token={parts[2]}"
 
 
-def greenhouse_frame_target(page_url: str, src: str) -> str | None:
-    """The URL to open for a Greenhouse application iframe found on a company page (ADR-0069), or None. The frame's
-    src is resolved against the page; only http(s) on greenhouse.io or on the page's own origin is accepted, so a
-    company page can never steer the driver to a third-party host."""
-    if not src or not page_url:
+def _unambiguous(u: str) -> bool:
+    """False for any string a WHATWG parser (the browser) and urllib could read differently: a backslash (WHATWG
+    treats it as '/' in http(s)), ASCII control/space characters including tab and newline (WHATWG strips them),
+    DEL, or any non-ASCII character (IDNA)."""
+    return bool(u) and all(0x21 <= ord(c) < 0x7f and c != "\\" for c in u)
+
+
+def _authority_ok(u: str) -> bool:
+    """No userinfo ('@') and no percent-encoding in the authority, so the checked host is the host that is opened."""
+    netloc = urlparse(u).netloc
+    return bool(netloc) and "@" not in netloc and "%" not in netloc
+
+
+def greenhouse_frame_target(page_url: str, src: str, *, resolved: str | None = None,
+                            job_id: str | None = None) -> str | None:
+    """The URL to open for a Greenhouse application iframe found on a company page (ADR-0069), or None.
+
+    `src` is the raw iframe src (or a frame URL); `resolved` is the browser's own WHATWG resolution of it
+    (`new URL(src, document.baseURI).href`). Both must be unambiguous (no backslash, control/space or non-ASCII
+    characters, no userinfo or percent-encoding in the authority), and when `resolved` is given its scheme and host
+    must equal urllib's reading of `src`; `resolved` is then what is opened. Only http(s) on greenhouse.io or on the
+    page's own origin is accepted. With `job_id` (the ref's posting id) the target's `token` or `gh_jid` must equal
+    it, so a page embedding another job's form is refused."""
+    if not src or not page_url or not _unambiguous(src.strip()) or not _unambiguous(page_url):
         return None
     target = urljoin(page_url, src.strip())
+    if not _authority_ok(target):
+        return None
+    if resolved is not None:
+        r, t0 = urlparse(resolved), urlparse(target)
+        if (not _unambiguous(resolved) or not _authority_ok(resolved) or r.scheme != t0.scheme
+                or (r.hostname or "").lower() != (t0.hostname or "").lower() or r.port != t0.port):
+            return None
+        target = resolved
     t, p = urlparse(target), urlparse(page_url)
     if t.scheme not in ("http", "https") or not t.hostname:
         return None
-    if _gh_host(t.hostname.lower()) or (t.scheme, t.netloc) == (p.scheme, p.netloc):
-        return None if target.split("#")[0] == page_url.split("#")[0] else target
-    return None
+    if not (_gh_host(t.hostname.lower()) or (t.scheme, t.netloc.lower()) == (p.scheme, p.netloc.lower())):
+        return None
+    if target.split("#")[0] == page_url.split("#")[0]:
+        return None
+    if job_id:
+        q = parse_qs(t.query)
+        if str(job_id) not in (q.get("token", []) + q.get("gh_jid", [])):
+            return None
+    return target
 
 
 def app_form_missing(api_keys: list[str], found: int) -> bool:

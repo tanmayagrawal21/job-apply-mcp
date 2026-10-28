@@ -7,7 +7,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 - Greenhouse company-hosted embeds (ADR-0069): the driver opens the `#grnhse_app` application iframe (bounded wait
   for a lazily inserted one) instead of filling the host page, and never fills a page that holds none of the
   posting's own fields (`needs_human`, "application form not found"), so a job-alert box is never filled and a dry
-  run never reports success for it (#98, #99).
+  run never reports success for it (#98, #99). The frame URL is checked with the browser's own (WHATWG) parse,
+  refusing backslash/control/non-ASCII/userinfo/percent-encoded authorities, must name the ref's job id, and the
+  gate fails closed.
 - Submit outcome fix (ADR-0068): only an unambiguous ATS rejection after the click, in the ATS's own response shape
   (Ashby GraphQL errors on 200/400/422; Greenhouse invalid-attributes / invalid-attachment on 400/422), is
   `needs_human`. 403/408/409/429/5xx, other shapes, keyword-only bodies, Lever error text and a sent request with no

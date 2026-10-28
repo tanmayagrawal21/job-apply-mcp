@@ -820,6 +820,8 @@ _APPFORM_JS = """(keys) => { const K = new Set(keys || []);
 _GH_FRAME_SEL = ('#grnhse_app iframe, iframe#grnhse_iframe, iframe[src*="greenhouse.io/embed/job_app"], '
                  'iframe[src*="job-boards.greenhouse.io/"]')
 _GH_EMBED_WAIT_S = 10.0                  # bounded wait for a lazily inserted embed iframe
+_RESOLVE_SRC_JS = """e => { try { return new URL(e.getAttribute('src') || '', document.baseURI).href; }
+  catch (_) { return ''; } }"""
 _GH_EMBED_HINT_JS = """() => !!document.querySelector('#grnhse_app, script[src*="greenhouse.io/embed"]')"""
 # ADR-0069: how many of the posting's own field ids/names the application root (marked form, else the document) holds.
 _APPKEYS_JS = """(keys) => { const root = document.querySelector('[data-jam-appform]') || document;
@@ -1044,7 +1046,7 @@ class PlaywrightDriver(VerificationMixin):
         if ats.name == "greenhouse" and (emb := greenhouse_offsite_embed(url, page.url, ref)):
             url = emb                                    # ADR-0063: board redirected to a company site
             await page.goto(url, wait_until="domcontentloaded")
-        if ats.name == "greenhouse" and (emb := await self._greenhouse_frame(page)):
+        if ats.name == "greenhouse" and (emb := await self._greenhouse_frame(page, ref)):
             url = emb                                    # ADR-0069: company page embeds the form in an iframe
             await page.goto(url, wait_until="domcontentloaded")
         try:
@@ -1526,7 +1528,7 @@ class PlaywrightDriver(VerificationMixin):
             except Exception:
                 pass
 
-    async def _greenhouse_frame(self, page) -> str | None:
+    async def _greenhouse_frame(self, page, ref: str = "") -> str | None:
         """ADR-0069: the Greenhouse application iframe's URL on a company page, else None. Waits (bounded) only when
         the page shows an embed is coming (gh_jid, #grnhse_app or the embed script) but has not inserted it yet."""
         cur = str(page.url or "")
@@ -1543,14 +1545,19 @@ class PlaywrightDriver(VerificationMixin):
                                                  timeout=min(float(self.b.timeout_s), _GH_EMBED_WAIT_S) * 1000)
                 except Exception:
                     return None
+            parts = ref.split(":")
+            job_id = parts[2] if len(parts) >= 3 and parts[0] == "greenhouse" and parts[2] else None
             for i in range(min(await loc.count(), 4)):
                 el = loc.nth(i)
                 src = await el.get_attribute("src") or ""
-                if not greenhouse_frame_target(cur, src):
-                    fr = await (await el.element_handle()).content_frame()
-                    src = fr.url if fr else ""
-                if t := greenhouse_frame_target(cur, src):
+                resolved = await el.evaluate(_RESOLVE_SRC_JS) if src else ""   # the browser's own (WHATWG) parse
+                if t := greenhouse_frame_target(cur, src, resolved=resolved or "", job_id=job_id):
                     return t
+                if not src or src.strip().lower() == "about:blank":         # srcdoc/script-navigated frame
+                    fr = await (await el.element_handle()).content_frame()
+                    furl = str(fr.url) if fr else ""
+                    if t := greenhouse_frame_target(cur, furl, resolved=furl, job_id=job_id):
+                        return t
         except Exception:
             log.debug("greenhouse embed probe failed", exc_info=True)
         return None
@@ -1559,8 +1566,9 @@ class PlaywrightDriver(VerificationMixin):
         keys = [f.key for f in form.fields if f.key]
         try:
             found = int(await page.evaluate(_APPKEYS_JS, keys))
-        except Exception:
-            return False
+        except Exception:                            # fail closed: an unreadable page is never filled
+            log.debug("application-form probe failed", exc_info=True)
+            return len(keys) >= 2
         return app_form_missing(keys, found)
 
     async def _mark_app_form(self, page, form: ApplicationForm) -> bool:

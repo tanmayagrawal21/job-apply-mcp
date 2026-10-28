@@ -35,6 +35,52 @@ def test_frame_target_accepts_greenhouse_or_same_origin_only():
     assert greenhouse_frame_target(page, page + "#apply") is None
 
 
+AT = "@"   # kept apart so userinfo URLs below are not mistaken for e-mail addresses
+P = "https://careers.initech.example/careers?gh_jid=55"
+GOOD = "https://job-boards.greenhouse.io/embed/job_app?for=initech&token=55"
+
+
+@pytest.mark.parametrize("bad", [
+    "https://evil.example\\@job-boards.greenhouse.io/embed/job_app?for=initech&token=55",   # WHATWG: host evil.example
+    "https://evil.example\\.greenhouse.io/embed/job_app?token=55",
+    "https:\\\\evil.example/embed/job_app?token=55",
+    "https://u" + AT + "job-boards.greenhouse.io/embed/job_app?token=55",                  # userinfo
+    "https://evil.example:pw" + AT + "job-boards.greenhouse.io/embed/job_app?token=55",
+    "https://evil.example%40job-boards.greenhouse.io/embed/job_app?token=55",             # percent-encoded '@'
+    "https://evil.example%5C" + AT + "job-boards.greenhouse.io/embed/job_app?token=55",            # percent-encoded '\\'
+    "https://evil.example%2f.greenhouse.io/embed/job_app?token=55",                       # percent-encoded '/'
+    "https://job-boards.greenhouse.io%2eevil.example/embed/job_app?token=55",
+    "https://job-boards.greenhouse.io\t.evil.example/embed/job_app?token=55",            # tab (WHATWG strips)
+    "https://job-boards.greenhouse.io\n.evil.example/embed/job_app?token=55",            # newline
+    "https://job-boards.greenhouse.io\r/embed/job_app?token=55",
+    "https://job-boards.greenhouse.io /embed/job_app?token=55",                           # inner space
+    "https://job-boards.greenhouse.io\x00/embed/job_app?token=55",
+    "https://job-boards.greenhouse.\u0131o/embed/job_app?token=55",                      # non-ASCII (IDNA)
+])
+def test_frame_target_refuses_anything_the_browser_could_parse_differently(bad):
+    assert greenhouse_frame_target(P, bad) is None
+    assert greenhouse_frame_target(P, bad, resolved=bad) is None
+
+
+def test_frame_target_uses_and_checks_the_browser_resolution():
+    assert greenhouse_frame_target(P, GOOD, resolved=GOOD) == GOOD
+    # the browser's resolution names another host than urllib's reading: refused
+    assert greenhouse_frame_target(P, GOOD, resolved="https://evil.example/embed/job_app?token=55") is None
+    assert greenhouse_frame_target(P, GOOD, resolved="http://job-boards.greenhouse.io/embed/job_app?token=55") is None
+    assert greenhouse_frame_target(P, GOOD, resolved="") is None                  # browser could not resolve it
+    rel = greenhouse_frame_target("http://127.0.0.1:9/careers", "/embed/job_app?token=55",
+                                  resolved="http://127.0.0.1:9/embed/job_app?token=55")
+    assert rel == "http://127.0.0.1:9/embed/job_app?token=55"
+
+
+def test_frame_target_must_be_the_refs_job():
+    assert greenhouse_frame_target(P, GOOD, job_id="55") == GOOD
+    assert greenhouse_frame_target(P, GOOD.replace("token=55", "token=56"), job_id="55") is None
+    assert greenhouse_frame_target(P, "https://job-boards.greenhouse.io/embed/job_app?for=initech", job_id="55") is None
+    assert greenhouse_frame_target(P, "https://job-boards.greenhouse.io/embed/job_app?gh_jid=55", job_id="55")
+    assert greenhouse_frame_target(P, "https://job-boards.greenhouse.io/embed/job_app?for=initech") is not None
+
+
 def test_app_form_missing_needs_two_keys_and_zero_hits():
     assert app_form_missing(["first_name", "last_name", "email"], 0)
     assert not app_form_missing(["first_name", "last_name", "email"], 1)
@@ -154,6 +200,26 @@ async def test_unreached_embed_is_not_filled_and_not_a_successful_dry_run(drv):
     assert time.monotonic() - t0 < 30
     assert res.status == "needs_human" and "application form not found" in res.detail, res.detail
     assert not _filled(posts, "/careers/ml-engineer")
+
+
+async def test_failing_probe_fails_closed(drv, monkeypatch):
+    """If the application-form probe cannot run, nothing is filled (needs_human), never a fill on a guess."""
+    import job_apply_mcp.apply.browser_playwright as bp
+    monkeypatch.setattr(bp, "_APPKEYS_JS", "() => { throw new Error('probe broken'); }")
+    srv, posts = _serve({"/embed/job_app": EMBED})
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/embed/job_app?for=initech&token=55", FORM,
+                                    ANS, {}, dry_run=True)
+    assert res.status == "needs_human" and "application form not found" in res.detail, res.detail
+    assert not _filled(posts, "/embed/job_app")
+
+
+async def test_embed_of_another_job_is_not_followed(drv):
+    other = LAZY_IFRAME.replace("token=55", "token=77")
+    srv, posts = _serve({"/careers/ml-engineer": OUTER.replace("__INSERT__", other), "/embed/job_app": EMBED})
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/careers/ml-engineer", FORM, ANS, {},
+                                    dry_run=True)
+    assert res.status == "needs_human" and "application form not found" in res.detail, res.detail
+    assert not _filled(posts, "/embed/job_app") and not _filled(posts, "/careers/ml-engineer")
 
 
 async def test_foreign_iframe_in_the_embed_slot_is_never_followed(drv):
