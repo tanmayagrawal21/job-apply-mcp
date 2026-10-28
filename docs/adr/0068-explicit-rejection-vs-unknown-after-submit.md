@@ -52,3 +52,22 @@ An application the ATS explicitly refused is not left blocking as `unknown`. An 
 ## Verify / revert
 `uv run pytest tests/test_apply_browser_local.py tests/test_submit_outcomes.py` with a local Chrome. Revert by
 reverting this PR.
+
+## Amendment (review follow-up on #108): Ashby "your form needs corrections" banner
+`outcomes.classify` read the Ashby DOM banner "your form needs corrections" as `validation_error` (re-enterable
+`needs_human`) whatever had happened on the network. Ashby's client-side validation shows it before any send, but the
+banner can also be on screen beside a submit request that was sent and got no structured verdict (a 502, a dropped
+socket, a response still in flight). That broke the rule above. The banner now counts only when no submit response
+was recorded after the click (`not subs`) AND no submit request was issued (`not requested`; an untracked count
+counts as "maybe sent"), the same guard as the `not_sent` toast. Otherwise only Ashby's own response decides
+(`_ashby_net`, then `explicit_rejection`); with no verdict the outcome stays `roadblock` (engine `unknown`).
+The reviewer suggested `not subs` alone. `not requested` is added as well because a request that never got a
+response leaves `subs` empty. Tests: `test_ashby_dom` and the three `test_corrections_banner_*` browser fixtures.
+
+**Greenhouse field rejections (same review).** `_greenhouse_net` returned `validation_error` for the
+`invalid-attributes` / `invalid-attachment` code on ANY status, which is looser than `explicit_rejection`. It now
+needs the same narrow shape: one of those codes AND status 400 or 422. With the same code on any other status
+(5xx, 403, 408, 200, unknown), `_greenhouse_net` returns None and the outcome goes on to `explicit_rejection`. That
+also says no, so a sent request stays `roadblock` (engine `unknown`). If nothing was sent (client-side validation,
+inline field errors), the result is still the re-enterable `needs_human`. The captcha and security-code codes did
+not change. Tests: `test_greenhouse_network` and the `test_greenhouse_*` fixtures added with this amendment.

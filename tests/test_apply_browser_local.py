@@ -579,3 +579,75 @@ async def test_structured_422_rejection_is_needs_human(drv, resume):
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
     assert res.status == "needs_human" and "rejected" in res.detail, res.detail
     assert srv.posts == 1 and srv.clicks == 1
+
+
+# ---------------------------------------------------------------- ADR-0068 amendment: Ashby "needs corrections" banner
+CORRECTIONS = ("document.getElementById('err').innerHTML="
+               "'<div role=alert>Your form needs corrections</div>';")
+CLIENT_SIDE_BLOCK = ("window.addEventListener('submit', ev => { ev.preventDefault(); ev.stopImmediatePropagation(); "
+                     "fetch('/clicked'); " + CORRECTIONS + " }, true);")
+
+
+async def test_corrections_banner_without_a_request_is_needs_human(drv, resume):
+    """Client-side validation: the banner shows and nothing is sent, so the handoff is re-enterable."""
+    srv = Srv(page(extra=CLIENT_SIDE_BLOCK), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "needs_human" and "needs corrections" in res.detail, res.detail
+    assert srv.posts == 0 and srv.clicks == 1
+
+
+async def test_corrections_banner_after_a_sent_request_without_verdict_is_unknown(drv, resume):
+    """A submit was sent and answered 502 (no Ashby verdict); the banner beside it is not a verdict: unknown."""
+    srv = Srv(page(extra=CLICK_BEACON, onresp=CORRECTIONS), "Bad Gateway", api_status=502)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "roadblock" and "outcome unknown" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1
+
+
+async def test_corrections_banner_with_structured_ashby_rejection_is_needs_human(drv, resume):
+    srv = Srv(page(extra=CLICK_BEACON, onresp=CORRECTIONS), GQL, api_status=422)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "needs_human" and "rejected" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1
+
+
+# ---------------------------------------------------------------- ADR-0068 amendment: Greenhouse field rejections
+GH_ERR_HTML = """<html><body><form id=f>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<div id=err></div><button type=submit>Submit application</button></form><script>
+const showErr = () => { document.getElementById('first_name').setAttribute('aria-invalid','true');
+  document.getElementById('err').innerHTML='<div class=error-message>First Name is invalid</div>'; };
+__GH_SUBMIT__
+</script></body></html>"""
+GH_SENDS = ("document.getElementById('f').addEventListener('submit', async ev => { ev.preventDefault(); "
+            "fetch('/clicked'); await fetch('/acme/jobs/1', {method:'POST', body:'x'}); showErr(); });")
+GH_BLOCKS = ("document.getElementById('f').addEventListener('submit', ev => { ev.preventDefault(); "
+             "fetch('/clicked'); showErr(); });")
+GH_INVALID = '{"code":"invalid-attributes","message":"First Name is invalid"}'
+
+
+def _gh(script, body, status):
+    srv = Srv(GH_ERR_HTML.replace("__GH_SUBMIT__", script), body, api_status=status)
+    return srv, srv.url.replace("/application", "/jobs/1")
+
+
+@pytest.mark.parametrize("status", [500, 502, 403])
+async def test_greenhouse_field_error_shape_on_other_status_is_unknown(drv, status):
+    srv, url = _gh(GH_SENDS, GH_INVALID, status)
+    res = await drv.fill_and_submit(url, GH_FORM, {"first_name": "Alex"}, {}, dry_run=False)
+    assert res.status == "roadblock" and "outcome unknown" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1
+
+
+async def test_greenhouse_422_invalid_attributes_is_needs_human(drv):
+    srv, url = _gh(GH_SENDS, GH_INVALID, 422)
+    res = await drv.fill_and_submit(url, GH_FORM, {"first_name": "Alex"}, {}, dry_run=False)
+    assert res.status == "needs_human" and "invalid-attributes" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1
+
+
+async def test_greenhouse_inline_errors_with_nothing_sent_is_needs_human(drv):
+    srv, url = _gh(GH_BLOCKS, GH_INVALID, 422)
+    res = await drv.fill_and_submit(url, GH_FORM, {"first_name": "Alex"}, {}, dry_run=False)
+    assert res.status == "needs_human" and "outcome unknown" not in res.detail, res.detail
+    assert srv.posts == 0 and srv.clicks == 1
