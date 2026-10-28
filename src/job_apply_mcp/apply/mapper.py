@@ -43,6 +43,11 @@ _OPTIONAL = re.compile(r"\((optional|required)\)|\b(optional|required)\b$")
 _SPONSOR_TYPO = re.compile(r"\bspon(?!sor)[a-z]{0,3}(?:or|er)(s|ed|ing|ship|ships)?\b")
 
 
+# ADR-0073 (control): the only words allowed in the free slot of the office question ("Can you regularly work from
+# our HQ?"). A closed list: any other word ("mind", "hate", "not", "hesitate to") leaves the question unresolved.
+_SLOT_ADVERBS = "regularly|also|ever|possibly|please|consistently|occasionally|sometimes|comfortably|reliably"
+
+
 def normalize(label: str) -> str:
     s = label.lower().replace("’", "'")
     s = _OPTIONAL.sub(" ", s)
@@ -132,11 +137,10 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
                         # ADR-0055: "able to work from our office in X", "open to working out of our X Office"
                         (r"\b(open|willing|able|comfortable)\b.*\bwork(?:ing)? (?:from|in|out of|at) (?:one of )?"
                          r"(?:our|the|an?) (?:\w+ ){0,4}offices?\b"),
-                        # ADR-0073: "Can you work from our San Francisco HQ (4 days a week)?"
-                        # (reviewer: the free slot never takes a negation: "Can you not work from our office?")
-                        (r"^(?:can|could|will|would) you (?:(?!(?:not|never|rather|unable|unwilling|refuse|avoid|"
-                         r"no|t|stop|decline|prefer not)\b)\w+ ){0,2}work(?:ing)? (?:from|in|out of|at) (?:one of )?"
-                         r"our (?:\w+ ){0,4}(?:offices?|hq|headquarters)\b"))),
+                        # ADR-0073: "Can you work from our San Francisco HQ (4 days a week)?". Control: the slot
+                        # before "work" is a closed list of neutral adverbs (never "mind", "not", "hate", ...)
+                        (rf"^(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:from|in|out of|at) "
+                         r"(?:one of )?our (?:\w+ ){0,4}(?:offices?|hq|headquarters)\b"))),
     ("located_in_us", ((r"(located|based|reside|live|residing)\b.*\b(in|within) the ((continental|contiguous) )?"
                         r"(us|u s|usa|united states)\b"),)),
     # ADR-0053: "Do you live within 50 miles of Austin, TX?" / "Are you located in Canada?" (from [contact] only)
@@ -912,6 +916,13 @@ def _home_job_core(label: str, country: str, company: str) -> str | None:
     return auth_core(strip_co(q) + (mark + " " + strip_co(note) if mark else ""), country)
 
 
+# reviewer/control: scope / negation words. Stripping one changes the question ("work outside the United States"),
+# so a company name containing one ("Outside Inc") is never stripped either: the question stays unresolved.
+_SCOPE_WORDS = frozenset([
+    "not", "no", "never", "none", "neither", "nor", "nowhere", "only", "except", "outside", "abroad", "overseas",
+    "elsewhere", "foreign", "beyond", "other", "another", "rather", "instead", "inside", "within", "without",
+    "across", "temporary", "temporarily", "permanent", "permanently", "contract", "domestic", "local", "locally",
+    "nationwide", "worldwide", "anywhere", "everywhere"])
 # ADR-0073 (control): place and generic words are never the company word taken from a board token
 _NOT_COMPANY_WORD = (frozenset(normalize(v) for v in US_STATES.values())
                      | frozenset(w for v in US_STATES.values() for w in normalize(v).split() if len(w) >= 4)
@@ -919,13 +930,8 @@ _NOT_COMPANY_WORD = (frozenset(normalize(v) for v in US_STATES.values())
                      | frozenset(["office", "offices", "remote", "team", "teams", "careers", "career", "jobs", "hiring",
                                   "global", "labs", "group", "hybrid", "onsite", "america", "americas", "europe",
                                   "asia", "africa", "pacific", "north", "south", "east", "west", "central", "world",
-                                  "international", "national", "company", "headquarters",
-                                  # reviewer: scope / negation words - stripping one changes the question
-                                  # ("work outside the United States")
-                                  "outside", "abroad", "overseas", "elsewhere", "foreign", "beyond", "except", "other",
-                                  "another", "never", "rather", "instead", "inside", "within", "without", "across",
-                                  "temporary", "temporarily", "permanent", "permanently", "contract", "domestic",
-                                  "local", "locally", "nationwide", "worldwide", "anywhere", "everywhere"]))
+                                  "international", "national", "company", "headquarters"])
+                     | _SCOPE_WORDS)
 
 
 def company_names(label: str, company: str, aliases: Sequence[str] = ()) -> list[str]:
@@ -945,7 +951,8 @@ def company_names(label: str, company: str, aliases: Sequence[str] = ()) -> list
                     and w not in _AUTH_VOCAB and not question_countries(w)[1] and w not in _HUB_REGION
                     and w not in _NOT_COMPANY_WORD):
                 names.append(w)
-    return list(dict.fromkeys(names))
+    # control: a name that contains a scope word ("Outside Inc") is never stripped from the question
+    return [x for x in dict.fromkeys(names) if not set(normalize(x).split()) & _SCOPE_WORDS]
 
 
 # ADR-0073: "Do you require sponsorship to work in Canada or the United States?" - one sponsorship question about
@@ -1655,7 +1662,13 @@ _HYBRID_DAYS = re.compile(r"\b(?:[1-4]|one|two|three|four) (?:days?|x) (?:a|per|
 _OFFICE_PICK = re.compile(r"\b(?:which|what|preferred|prefer|preference)\b.*\b(?:location|office)s?\b")
 
 
-_OFFICE_NEG = re.compile(r"\b(?:not|never|unable|unwilling|cannot|refuse|avoid|rather|instead|except)\b|\bn t\b")
+# ADR-0073 (control): a negated or aversive preference question ("Are you not able to work onsite?", "Would you mind
+# working from our office?") is the owner's. Defence in depth for the ADR-0055 open-wording aliases, whose words
+# around the keyword are not a closed list; the ADR-0073 slot itself is a closed list (_SLOT_ADVERBS).
+_OFFICE_NEG = re.compile(r"\b(?:not|no|never|unable|unwilling|cannot|refuse\w*|avoid\w*|rather|instead|except|mind|"
+                         r"dislike\w*|hate\w*|resent\w*|object\w*|resist\w*|oppos\w*|hesitat\w*|struggl\w*|"
+                         r"against|reluctant\w*|hardly|barely|only|nowhere|neither|nor|without|unless|"
+                         r"no longer|difficult\w*|problem\w*|concern\w*)\b|\bn t\b")
 
 
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
@@ -1818,6 +1831,11 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         return _auth_answer(f, ck, profile, job_country, gaps, company, company_aliases, reasons)
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
+            return True, None
+        if _OFFICE_NEG.search(n) and ck != "relocation_support":   # ADR-0073 (control): polarity
+            if reasons is not None:
+                reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
+                    "negated or aversive preference wording: the owner answers it")})
             return True, None
         v = profile.lookup(ck)
         if v is None and gaps is not None:                    # ADR-0053: [preferences] fact missing

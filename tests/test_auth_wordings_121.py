@@ -244,6 +244,44 @@ def test_office_question_with_a_negation_is_not_answered(label):
     assert v is None
 
 
+AVERSE = ["mind", "dislike", "hate", "resent", "object to", "resist", "oppose", "hesitate to", "struggle to",
+          "be against", "hardly", "barely", "only", "nowhere", "neither", "not", "never", "rather not"]
+
+
+@pytest.mark.parametrize("word", AVERSE)
+@pytest.mark.parametrize("form", ["Would you {w} working from our office?", "Would you {w} work from our Riverside HQ?",
+                                  "Can you {w} work from our Riverside office (4 days a week)?"])
+def test_office_slot_is_a_closed_list(word, form):
+    p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
+    assert run(form.format(w=word), p, locations=["Shelbyville, OR"])[0] is None
+
+
+@pytest.mark.parametrize("label", ["Are you not able to work onsite?", "Are you unable to work on site?",
+                                   "Would you mind working onsite?", "Would you hate working in office?",
+                                   "Are you not open to a hybrid schedule?", "Are you not willing to relocate?",
+                                   "Would you hesitate to relocate?"])
+def test_negated_preference_questions_stay_with_the_owner(label):
+    # control: ADR-0055 open-wording aliases flipped polarity ("not able to work onsite" -> Yes)
+    p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
+    why = unresolved(label, p)
+    assert why["category"] == "unknown_fact"
+
+
+@pytest.mark.parametrize("adverb", ["regularly", "also", "ever", "possibly", "please", "consistently",
+                                    "occasionally", "sometimes", "comfortably", "reliably"])
+def test_whitelisted_adverbs_still_answer(adverb):
+    p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
+    assert run(f"Can you {adverb} work from our Riverside HQ?", p, locations=["Shelbyville, OR"])[0] == "Yes"
+    assert run("Are you able to work onsite?", p)[0] == "Yes"
+
+
+def test_scope_word_company_name_is_never_stripped():
+    # control: a company literally named "Outside" must not strip its own name from "work Outside the US"
+    assert company_names("Will you require sponsorship to work Outside the United States?", "Outside Inc") == []
+    unresolved("Will you require sponsorship to work Outside the United States?", NO_SPONSOR, company="Outside Inc")
+    unresolved("Will you require sponsorship to work Outside?", NO_SPONSOR, company="outside")
+
+
 def test_office_question_slot_still_takes_plain_words():
     p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
     assert run("Could you regularly work from our Riverside HQ?", p, locations=["Shelbyville, OR"])[0] == "Yes"
