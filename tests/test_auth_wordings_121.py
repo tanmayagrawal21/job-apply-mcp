@@ -341,3 +341,45 @@ async def test_plan_client_task_has_reason_and_category():
     tasks = {t["key"]: t for t in out.client_tasks}
     assert tasks["q_auth"]["category"] == "unknown_fact" and "country" in tasks["q_auth"]["reason"]
     assert tasks["q_other"]["category"] == "unknown_fact" and tasks["q_other"]["reason"]
+
+
+# ---------------------------------------------------------------- closed positive preference templates (control)
+PREFS = {"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True}
+
+
+@pytest.mark.parametrize("label", [
+    "If you are not local and do not want to relocate, are you willing to relocate?",
+    "If you are not local to the area and would not move, are you willing to relocate?",
+    "If you are not based in Riverside but do not plan to move, are you open to relocating?",
+    "Are you averse to relocating?", "Are you unhappy to relocate?", "Are you uncomfortable working onsite?",
+    "Are you uneasy about a hybrid schedule?", "Do you dread working in office?", "Are you hostile to relocating?",
+    "Are you disinclined to relocate?", "Would you decline to work onsite?", "Would you rule out relocating?",
+    "Is relocating a deal-breaker for you?", "Are you willing to relocate, or not?",
+    "Are you willing to relocate if we do not pay for it?", "Are you willing to relocate to the moon eventually?",
+])
+def test_preference_wording_outside_the_templates_is_unresolved(label):
+    why = unresolved(label, view(prefs=PREFS))
+    assert why["category"] == "unknown_fact" and why["reason"]
+
+
+@pytest.mark.parametrize("label, want", [
+    ("Willing to relocate?", "Yes"), ("Willing to relocate? (Yes/No)", "Yes"), ("Are you able to relocate?", "Yes"),
+    ("Are you willing to relocate for this role?", "Yes"), ("Are you willing to relocate to New York?", "Yes"),
+    ("If you are not local to the area, are you willing to relocate?", "Yes"),
+    ("If you are not located in Chicago or NY, are you open to relocating?", "Yes"),
+    ("Are you currently based in the Riverside Area, or ready to relocate?", "Yes"),
+    ("Are you open to a hybrid schedule?", "Yes"), ("Would you be comfortable with a hybrid schedule?", "Yes"),
+    ("Are you open to working in a hybrid environment, 3 days a week in Chicago?", "Yes"),
+    ("Are you willing and able to commit to the hybrid policy if hired?", "Yes"),
+    ("Are you comfortable working onsite 3 days a week?", "Yes"),
+    ("Are you open to working out of our Torrance (LA) Office 5 Days a Week?", "Yes"),
+    ("Will you be able to work from our office in Union Square, NYC?", "Yes"),
+    ("Can you work from our Riverside HQ (4 days a week)?", "Yes"),
+])
+def test_common_positive_preference_wordings_still_answer(label, want):
+    assert run(label, view(prefs=PREFS), locations=["Shelbyville, OR"])[0] == want
+
+
+def test_based_or_ready_to_relocate_only_decides_yes():
+    label = "Are you currently based in the Riverside Area, or ready to relocate?"
+    assert run(label, view(prefs={"willing_to_relocate": False}))[0] is None   # may still be based there

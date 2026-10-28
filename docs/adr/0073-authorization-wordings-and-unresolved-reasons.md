@@ -46,6 +46,51 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   `open_to_onsite`. The slot before "work" is a closed list of neutral adverbs: regularly, also, ever,
   possibly, please, consistently, occasionally, sometimes, comfortably, reliably. Any other word ("mind", "hate",
   "not", "hesitate to") leaves the question unresolved.
+- **Closed positive templates (amends ADR-0055).** The ADR-0055 open-wording preference and office aliases
+  match words around a keyword. That turned negated or aversive questions into the plain preference value:
+  "Are you not able to work onsite?" and "Would you mind working from our office?" answered Yes. A word
+  blacklist kept leaking ("averse", "unhappy", "if you are not local and do not want to relocate"), so
+  `willing_to_relocate`, `open_to_hybrid` and `open_to_onsite`, including the office rule, are now answered only
+  when the WHOLE question matches one of the closed positive templates in `_PREF_TEMPLATES` (`pref_template()`):
+  - relocation: "(are you | would you be) willing / open / able / comfortable / ready / prepared to relocate
+    (to <place>) (for this role) (if hired)", "can you relocate ...", "would you consider relocating ...";
+  - hybrid: "... open to / comfortable with (working in) a hybrid schedule / environment / model / policy ...",
+    "... willing and able to commit to the hybrid policy ...", "can you work hybrid ...";
+  - on site: "... comfortable working onsite / in office / in person (N days a week) (in <place>)",
+    "... open to working out of / from our <place> office / HQ (N days a week)", "can you (<adverb>) work from
+    our <place> office / HQ (N days a week)" with the closed adverb list.
+
+  These are normalized first: punctuation and case, a trailing "(Yes/No)" hint, and a leading bare condition
+  ("If you are not local / located / based (in | near | to) <place>,"). Every word of a free place slot or a
+  condition must be a proper noun in the raw label, a number or a generic place word, so "and do not want to"
+  can never sit in one. "Are you based in <place>, or ready to relocate?" decides only Yes. Anything else is
+  unresolved (`unknown_fact`, "preference wording outside the closed positive templates"). `_OFFICE_NEG` (not,
+  never, mind, averse, unhappy, uncomfortable, dread, hostile, disinclined, decline, rule out, deal-breaker, ...)
+  is also checked as a backstop. One exception: an ADR-0055 residence-coupled field (its label is already checked
+  by `is_residence_coupled()`, and only the options that state no residence remain) still takes the preference
+  when `_OFFICE_NEG` finds nothing. Coverage: every preference wording the test suite answered on main before this
+  PR is still answered (15 wordings, probed by instrumenting the full suite). Anything outside the templates is
+  now the owner's.
+- **Company names in a question**: the posting company, its `dedupe.company_aliases`, and one label word that
+  begins or ends a one-word board token ("Quillon" for `getquillon`). That word needs at least 4 letters and at
+  least half the token's length, and it must be capitalized wherever it appears (a proper noun). It may not be an authorization word, a country, a US state (or a word of one,
+  e.g. "jersey"), a US hub city, a region, or a generic word such as office, remote, team, careers, jobs, global
+  or labs, or a scope word such as outside, abroad, overseas, foreign, other or within. Stripping one of those
+  would change the question ("work outside the United States"). A company name that contains a scope word
+  ("Outside Inc") is never stripped, so its questions stay unresolved.
+- **Either-country sponsorship** ("Do you require sponsorship to work in Canada or the United States?"), Yes/No
+  only. The answer is Yes when `requires_sponsorship` is true for at least one named country and No when it is
+  false for every one. A missing fact leaves the field unresolved, with an `authorization.<CC>.requires_sponsorship`
+  gap. The rule never applies to "and", to authorization ("authorized to work in A or B"), to now-only wording,
+  or to any extra word.
+- **Job country**: a location string that is a confirmed entry with its trailing comma parts dropped
+  ("Somerville, MA" beside "Somerville, MA, United States") counts as confirmed. At least two parts (city plus
+  region or country) must agree, so a bare city ("Paris" beside "Paris, Texas, United States") never confirms. Every other ADR-0040 rule stays.
+- **Office HQ**: "Can you work from our <city> HQ (4 days a week)?" goes to the ADR-0055 office rule. HQ and
+  headquarters count as offices, and fewer than five days a week reads `open_to_hybrid` instead of
+  `open_to_onsite`. The slot before "work" is a closed list of neutral adverbs: regularly, also, ever,
+  possibly, please, consistently, occasionally, sometimes, comfortably, reliably. Any other word ("mind", "hate",
+  "not", "hesitate to") leaves the question unresolved.
 - **Polarity (amends ADR-0055).** The ADR-0055 open-wording preference and office aliases match words around a
   keyword, so "Are you not able to work onsite?" or "Would you mind working from our office?" used to take the
   plain preference value, with the meaning reversed. Any preference or office question that contains a negation

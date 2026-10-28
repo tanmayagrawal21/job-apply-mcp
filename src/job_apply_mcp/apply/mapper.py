@@ -1662,25 +1662,96 @@ _HYBRID_DAYS = re.compile(r"\b(?:[1-4]|one|two|three|four) (?:days?|x) (?:a|per|
 _OFFICE_PICK = re.compile(r"\b(?:which|what|preferred|prefer|preference)\b.*\b(?:location|office)s?\b")
 
 
-# ADR-0073 (control): a negated or aversive preference question ("Are you not able to work onsite?", "Would you mind
-# working from our office?") is the owner's. Defence in depth for the ADR-0055 open-wording aliases, whose words
-# around the keyword are not a closed list; the ADR-0073 slot itself is a closed list (_SLOT_ADVERBS).
+# ADR-0073 (control): a leading residence condition ("If you are not local to the area, are you willing to
+# relocate?") is dropped only as one exact bare clause ending at the comma: "if you are not local / located / based
+# / living (in | near | to) <place>," where <place> is proper nouns plus a few place words. Anything else in the
+# clause (and, do, don't, want, ...) keeps it, and then no template matches.
+_IF_NOT_HERE = re.compile(r"^\s*if you(?: are|'re|’re| re) not (?:currently )?(?:local|located|based|living|residing)"
+                          r"(?P<rest>(?: (?:in|near|to|around))?(?: [^,?]{1,60})?),\s*", re.IGNORECASE)
+_PLACE_WORDS = frozenset(["the", "a", "an", "area", "areas", "bay", "city", "metro", "metropolitan", "greater",
+                          "region", "downtown", "office", "offices", "hq", "headquarters", "of", "or", "listed",
+                          "location", "locations", "posted", "this", "these", "one", "main", "campus", "s"])
 _OFFICE_NEG = re.compile(r"\b(?:not|no|never|unable|unwilling|cannot|refuse\w*|avoid\w*|rather|instead|except|mind|"
                          r"dislike\w*|hate\w*|resent\w*|object\w*|resist\w*|oppos\w*|hesitat\w*|struggl\w*|"
                          r"against|reluctant\w*|hardly|barely|only|nowhere|neither|nor|without|unless|"
-                         r"no longer|difficult\w*|problem\w*|concern\w*)\b|\bn t\b")
+                         r"no longer|difficult\w*|problem\w*|concern\w*|averse|aversion|unhappy|uncomfortable|"
+                         r"uneasy|dread\w*|hostile|disinclin\w*|declin\w*|rule out|ruled out|deal ?breaker\w*|"
+                         r"unlikely|unsure|doubt\w*)\b|\bn t\b")
+
+_ADJ = r"(?:willing|open|able|comfortable|ready|prepared|willing and able)"
+_BE = r"(?:(?:are you|would you be|will you be|are you currently) )"
+_FOR = (r"(?: for (?:this|the) (?:role|position|job|opportunity))?"
+        r"(?: if (?:hired|offered|selected)(?: (?:the|this|a) (?:role|position|job|offer))?)?")
+_DAYS = (r"(?: (?:at least )?(?:[1-5]|one|two|three|four|five)(?: (?:to|or) (?:[1-5]|two|three|four|five))? "
+         r"(?:days?|x) (?:a|per|each) week| full time)?")
 
 
-# ADR-0073: a leading residence condition ("If you are not local to the area, are you willing to relocate?") does
-# not negate the question that follows it
-_IF_NOT_HERE = re.compile(r"^if you (?:are|re) not (?:currently )?(?:local|located|based|living|residing)\b(?: \w+){0,6}? "
-                          r"(?=(?:are|would|will|can|could|do) you\b)")
+def _pl(name: str) -> str:
+    """A free place slot ("to New York", "in the Bay Area"); its words are checked after the match (_place_ok)."""
+    return rf"(?: (?:to|in|near|at) (?P<{name}>(?:\w+ ){{0,4}}\w+))?"
+
+
+_OFFICE_WORD = r"(?:offices?|hq|headquarters)"
+_PREF_TEMPLATES: list[tuple[str, re.Pattern[str], bool]] = [(k, re.compile(p + "$"), pos) for k, p, pos in (
+    # relocation
+    ("relocate", rf"{_BE}?{_ADJ} to relocat(?:e|ing|ion){_pl('a')}{_FOR}", False),
+    ("relocate", rf"(?:can|could|would|will) you relocate{_pl('a')}{_FOR}", False),
+    ("relocate", rf"would you consider relocating{_pl('a')}{_FOR}", False),
+    # "Are you currently based in the SF Bay Area, or ready to relocate?": only a Yes is decidable from the fact
+    ("relocate", rf"are you (?:currently )?(?:based|located|living) in (?P<b>(?:\w+ ){{0,4}}\w+) or "
+                 rf"(?:are you )?{_ADJ} to relocate{_pl('a')}", True),
+    # hybrid
+    ("hybrid", rf"{_BE}?{_ADJ} (?:to |with )?(?:work |working )?(?:in )?(?:a |the |our )?hybrid(?: work| working)?"
+               rf"(?: (?:schedule|arrangement|model|environment|policy|role|position|setup|basis|capacity))?{_DAYS}"
+               rf"{_pl('a')}{_FOR}", False),
+    ("hybrid", rf"{_BE}?{_ADJ} to commit to (?:the|our|a) hybrid (?:work )?(?:policy|schedule|model|arrangement){_FOR}",
+     False),
+    ("hybrid", rf"(?:can|could|will|would) you work (?:in )?(?:a )?hybrid(?: schedule)?{_DAYS}{_pl('a')}", False),
+    # on site / in office
+    ("onsite", rf"{_BE}?{_ADJ} (?:to |with )?(?:work|working|be|being) (?:on ?site|in (?:the |our )?office|in person)"
+               rf"{_DAYS}{_pl('a')}{_DAYS}{_FOR}", False),
+    ("onsite", rf"{_BE}?{_ADJ} to (?:work|working) (?:from|in|out of|at) (?:one of )?(?:our|the) "
+               rf"(?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}{_FOR}", False),
+    ("onsite", rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:from|in|out of|at) "
+               rf"(?:one of )?(?:our|the) (?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}", False),
+    ("onsite", rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:on ?site|in (?:the |our )?office|"
+               rf"in person){_DAYS}{_pl('a')}", False),
+)]
+_HINT_TAIL = re.compile(r"\s*\(?\s*(?:yes\s*/\s*no|y\s*/\s*n|yes or no)\s*\)?\s*[?.!:]*\s*$", re.IGNORECASE)
+
+
+def _place_ok(text: str, raw: str) -> bool:
+    """Every word of a free place slot is a proper noun in the raw label (capitalized wherever it appears), a code
+    such as NYC, a number, or a generic place word."""
+    lower = {t.lower() for t in re.findall(r"[A-Za-z]+", raw) if not t[0].isupper()}
+    return all(w in _PLACE_WORDS or w.isdigit() or w not in lower for w in text.split())
+
+
+def pref_template(label: str) -> tuple[str, bool] | None:
+    """ADR-0073 (control): (kind, positive_only) when the WHOLE preference question matches one closed positive
+    template (relocate / hybrid / onsite), else None. Any extra or unknown word, negation or aversion -> None."""
+    raw = label.strip()
+    m = _IF_NOT_HERE.match(raw)
+    if m:
+        rest = m.group("rest")
+        if not _place_ok(normalize(re.sub(r"^\s*(?:in|near|to|around)\b", "", rest)), raw):
+            return None
+        raw = raw[m.end():]
+    raw = _HINT_TAIL.sub("", raw)
+    n = normalize(raw)
+    if not n or _OFFICE_NEG.search(n):
+        return None
+    for kind, rx, pos in _PREF_TEMPLATES:
+        hit = rx.match(n)
+        if hit and all(_place_ok(v, raw) for k, v in hit.groupdict().items() if v):
+            return kind, pos
+    return None
 
 
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
                   job_country: str | None, gap: Any) -> Any | None:
     n = normalize(f.label)
-    if _OFFICE_NEG.search(n):            # ADR-0073 (reviewer): a negated office question is the owner's
+    if pref_template(f.label) is None:   # ADR-0073 (control): only a closed positive office template is answered
         return None
     key = ("open_to_hybrid" if _HYBRID_DAYS.search(n) and not _RES_ONSITE.search(n)
            else "open_to_onsite" if _RES_ONSITE.search(n) or ck == "open_to_onsite" else "open_to_hybrid")
@@ -1811,8 +1882,9 @@ _CITIZEN_Q_VOCAB = frozenset(["are", "you", "a", "an", "the", "of", "us", "u", "
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
               company_aliases: Sequence[str] = (), job_country: str | None = None,
               gaps: list[dict[str, Any]] | None = None,
-              reasons: dict[str, dict[str, str]] | None = None) -> tuple[bool, Any]:
-    """(handled, value). handled=False -> continue with the generic profile lookup."""
+              reasons: dict[str, dict[str, str]] | None = None, coupled: bool = False) -> tuple[bool, Any]:
+    """(handled, value). handled=False -> continue with the generic profile lookup. `coupled`: a residence-coupled
+    field (ADR-0055) whose residence options were removed."""
     n = normalize(f.label)
     if ck == "located_in_us":
         return True, _residence_answer(f, profile)
@@ -1838,12 +1910,24 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
             return True, None
-        if _OFFICE_NEG.search(_IF_NOT_HERE.sub("", n)) and ck != "relocation_support":   # ADR-0073: polarity
+        tpl = pref_template(f.label) if ck != "relocation_support" else ("support", False)
+        if tpl is None and coupled and ck != "willing_to_relocate" and not _OFFICE_NEG.search(n):
+            # ADR-0055 residence-coupled field: its label was already checked by is_residence_coupled() and only
+            # the options that state no residence remain; the polarity check still applies
+            tpl = ("coupled", False)
+        if tpl is None or (ck == "willing_to_relocate") != (tpl[0] == "relocate"):
+            # ADR-0073 (control): only a closed positive template is answered; anything else is the owner's
             if reasons is not None:
                 reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
-                    "negated or aversive preference wording: the owner answers it")})
+                    "preference wording outside the closed positive templates (it may be negated, conditional or "
+                    "compound): the owner answers it")})
             return True, None
         v = profile.lookup(ck)
+        if tpl[1] and _truth(v) is not True:         # "based in X, or ready to relocate?": only a Yes is decidable
+            if v is None and gaps is not None:
+                gaps.append({"country": None, "fact": "preferences.willing_to_relocate", "key": f.key,
+                             "profile_fact": True})
+            return True, None
         if v is None and gaps is not None:                    # ADR-0053: [preferences] fact missing
             gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(ck, ck), "key": f.key,
                          "profile_fact": True})
@@ -2638,7 +2722,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             continue
         if ck in _SEMANTIC_KEYS:
             handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases, job_country, gaps,
-                                    reasons)
+                                    reasons, coupled=f.key in originals)
             if handled:
                 if sv is None or sv == "":
                     res.unresolved.append(f)
