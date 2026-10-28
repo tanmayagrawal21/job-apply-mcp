@@ -142,6 +142,24 @@ def test_company_names_from_a_board_token():
     assert company_names("authorized to work in New Jersey?", "jerseyco") == ["jerseyco"]
 
 
+@pytest.mark.parametrize("label, board", [
+    ("Will you require sponsorship to work outside the United States?", "outsideinc"),
+    ("Will you require sponsorship to work outside?", "outsideinc"),
+    ("Will you require sponsorship to work abroad?", "goabroad"),
+    ("Will you require sponsorship to work overseas?", "overseasjobs"),
+    ("Will you require sponsorship to work Abroad or for abroad clients?", "goabroad"),   # one lower-case use
+])
+def test_scope_words_are_never_the_company_word(label, board):
+    # reviewer: stripping "outside" / "abroad" would answer a non-home question with the home-country fact
+    unresolved(label, NO_SPONSOR, company=board)
+    assert board == company_names(label, board)[0] and len(company_names(label, board)) == 1
+
+
+def test_company_word_must_be_capitalized():
+    assert company_names("authorized to work for quillon?", "getquillon") == ["getquillon"]
+    assert "quillon" in company_names("authorized to work for Quillon?", "getquillon")
+
+
 # ---------------------------------------------------------------- negation and now / future variants
 @pytest.mark.parametrize("label, sponsor, no_sponsor", [
     ("Are you authorized to work in the United States without sponsorship?", "No", "Yes"),
@@ -183,6 +201,13 @@ def test_specific_fact_certifications_are_not_answered(label):
     unresolved(label, SPONSOR, options=[], kind=FieldKind.text)
 
 
+@pytest.mark.parametrize("label", ["Are you not a US citizen?", "Are you a US citizen or not?",
+                                   "Are you a US citizen or a dual citizen?"])
+def test_citizen_fact_never_answers_a_negated_or_compound_question(label):
+    for c in (True, False):
+        assert run(label, view({"citizen": c}))[0] is None
+
+
 def test_unmatched_us_wording_is_a_tool_gap_with_a_reason():
     why = unresolved("Are you authorized to work in the United States on a cap-exempt basis at our lab?", SPONSOR)
     assert why["category"] == "tool_gap" and "not matched" in why["reason"]
@@ -200,6 +225,28 @@ def test_office_hq_days_question_from_preferences():
     assert run(HQ, view(prefs={"open_to_hybrid": False}), locations=["Shelbyville, OR"])[0] == "No"
     why = unresolved(HQ, view(), locations=["Shelbyville, OR"])
     assert "preferences.open_to_hybrid" in why["reason"]
+
+
+@pytest.mark.parametrize("label", [
+    "Can you not work from our office?",
+    "Can you not work from our Springfield HQ (4 days a week)?",
+    "Would you rather not work from our Riverside office?",
+    "Would you be unable to work from our Springfield HQ?",
+    "Would you never work from our office?",
+    "Would you prefer not to work from our office?",
+    "Are you not willing to work on site at our Riverside HQ?",
+    "Are you unable to work on site at our Riverside office 5 days a week?",
+])
+def test_office_question_with_a_negation_is_not_answered(label):
+    # reviewer: the free slot before "work" never absorbs a negation (wrong polarity)
+    p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
+    v, _ = run(label, p, locations=["Shelbyville, OR"])
+    assert v is None
+
+
+def test_office_question_slot_still_takes_plain_words():
+    p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
+    assert run("Could you regularly work from our Riverside HQ?", p, locations=["Shelbyville, OR"])[0] == "Yes"
 
 
 def test_based_or_ready_to_relocate_from_preferences():

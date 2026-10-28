@@ -133,7 +133,9 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
                         (r"\b(open|willing|able|comfortable)\b.*\bwork(?:ing)? (?:from|in|out of|at) (?:one of )?"
                          r"(?:our|the|an?) (?:\w+ ){0,4}offices?\b"),
                         # ADR-0073: "Can you work from our San Francisco HQ (4 days a week)?"
-                        (r"^(?:can|could|will|would) you (?:\w+ ){0,2}work(?:ing)? (?:from|in|out of|at) (?:one of )?"
+                        # (reviewer: the free slot never takes a negation: "Can you not work from our office?")
+                        (r"^(?:can|could|will|would) you (?:(?!(?:not|never|rather|unable|unwilling|refuse|avoid|"
+                         r"no|t|stop|decline|prefer not)\b)\w+ ){0,2}work(?:ing)? (?:from|in|out of|at) (?:one of )?"
                          r"our (?:\w+ ){0,4}(?:offices?|hq|headquarters)\b"))),
     ("located_in_us", ((r"(located|based|reside|live|residing)\b.*\b(in|within) the ((continental|contiguous) )?"
                         r"(us|u s|usa|united states)\b"),)),
@@ -917,17 +919,28 @@ _NOT_COMPANY_WORD = (frozenset(normalize(v) for v in US_STATES.values())
                      | frozenset(["office", "offices", "remote", "team", "teams", "careers", "career", "jobs", "hiring",
                                   "global", "labs", "group", "hybrid", "onsite", "america", "americas", "europe",
                                   "asia", "africa", "pacific", "north", "south", "east", "west", "central", "world",
-                                  "international", "national", "company", "headquarters"]))
+                                  "international", "national", "company", "headquarters",
+                                  # reviewer: scope / negation words - stripping one changes the question
+                                  # ("work outside the United States")
+                                  "outside", "abroad", "overseas", "elsewhere", "foreign", "beyond", "except", "other",
+                                  "another", "never", "rather", "instead", "inside", "within", "without", "across",
+                                  "temporary", "temporarily", "permanent", "permanently", "contract", "domestic",
+                                  "local", "locally", "nationwide", "worldwide", "anywhere", "everywhere"]))
 
 
 def company_names(label: str, company: str, aliases: Sequence[str] = ()) -> list[str]:
     """ADR-0073: the posting company's names as a question may write them: the company, its configured aliases, and
     one label word that is the start or end of a one-word board token ("Laminar" for the board "runlaminar"). That
-    word must be at least 4 letters, at least half the token and no authorization or place word."""
+    word must be capitalized wherever it appears, at least 4 letters, at least half the token, and no
+    authorization, place, scope or generic word."""
     names = [x for x in (company, *aliases) if x and normalize(x)]
     token = normalize(company)
+    # reviewer: a company word is a proper noun - every occurrence in the label is capitalized
+    lower = {t.lower() for t in re.findall(r"[A-Za-z]+", label) if not t[0].isupper()}
     if token and " " not in token:
         for w in dict.fromkeys(normalize(label).split()):
+            if w in lower:
+                continue
             if (len(w) >= 4 and w != token and 2 * len(w) >= len(token) and (token.startswith(w) or token.endswith(w))
                     and w not in _AUTH_VOCAB and not question_countries(w)[1] and w not in _HUB_REGION
                     and w not in _NOT_COMPANY_WORD):
@@ -1642,9 +1655,14 @@ _HYBRID_DAYS = re.compile(r"\b(?:[1-4]|one|two|three|four) (?:days?|x) (?:a|per|
 _OFFICE_PICK = re.compile(r"\b(?:which|what|preferred|prefer|preference)\b.*\b(?:location|office)s?\b")
 
 
+_OFFICE_NEG = re.compile(r"\b(?:not|never|unable|unwilling|cannot|refuse|avoid|rather|instead|except)\b|\bn t\b")
+
+
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
                   job_country: str | None, gap: Any) -> Any | None:
     n = normalize(f.label)
+    if _OFFICE_NEG.search(n):            # ADR-0073 (reviewer): a negated office question is the owner's
+        return None
     key = ("open_to_hybrid" if _HYBRID_DAYS.search(n) and not _RES_ONSITE.search(n)
            else "open_to_onsite" if _RES_ONSITE.search(n) or ck == "open_to_onsite" else "open_to_hybrid")
     pref = _truth(profile.lookup("structured:" + key))
@@ -1768,7 +1786,7 @@ def _country_rx(iso: str | None) -> re.Pattern[str] | None:
 # ADR-0073: every word of a citizen question the [authorization] citizen fact may answer
 _CITIZEN_Q_VOCAB = frozenset(["are", "you", "a", "an", "the", "of", "us", "u", "s", "usa", "united", "states", "america",
                               "american", "citizen", "currently", "do", "is", "your", "i", "am", "yes", "no", "please",
-                              "confirm", "indicate", "select", "whether", "or", "not"])
+                              "confirm", "indicate", "select", "whether"])      # no "or" / "not": polarity
 
 
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,

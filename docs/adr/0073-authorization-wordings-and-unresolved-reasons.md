@@ -28,9 +28,10 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   only directly before work / employment / immigration / visa / sponsorship / citizenship.
 - **Company names in a question**: the posting company, its `dedupe.company_aliases`, and one label word that
   begins or ends a one-word board token ("Quillon" for `getquillon`). That word needs at least 4 letters and at
-  least half the token's length. It may not be an authorization word, a country, a US state (or a word of one,
+  least half the token's length, and it must be capitalized wherever it appears (a proper noun). It may not be an authorization word, a country, a US state (or a word of one,
   e.g. "jersey"), a US hub city, a region, or a generic word such as office, remote, team, careers, jobs, global
-  or labs.
+  or labs, or a scope word such as outside, abroad, overseas, foreign, other or within. Stripping one of those
+  would change the question ("work outside the United States").
 - **Either-country sponsorship** ("Do you require sponsorship to work in Canada or the United States?"), Yes/No
   only. The answer is Yes when `requires_sponsorship` is true for at least one named country and No when it is
   false for every one. A missing fact leaves the field unresolved, with an `authorization.<CC>.requires_sponsorship`
@@ -41,8 +42,10 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   region or country) must agree, so a bare city ("Paris" beside "Paris, Texas, United States") never confirms. Every other ADR-0040 rule stays.
 - **Office HQ**: "Can you work from our <city> HQ (4 days a week)?" goes to the ADR-0055 office rule. HQ and
   headquarters count as offices, and fewer than five days a week reads `open_to_hybrid` instead of
-  `open_to_onsite`.
-- **Citizen fact**: answers only a plain "Are you a US citizen?" (every word is citizen-question wording). A
+  `open_to_onsite`. The free words before "work" never include a negation ("Can you not work from our
+  office?"). Any negated office question (not, never, unable, unwilling, rather, instead) stays with the owner.
+- **Citizen fact**: answers only a plain "Are you a US citizen?" (every word is citizen-question wording, and
+  there is no "not" or "or"). A
   certification ("I certify that I am a US citizen and will provide proof"), an export-control note or any
   other clause stays with the owner.
 - **Reasons**: `MapResult.reasons` maps a field key to `{category, reason}` for every unresolved legal-status,
