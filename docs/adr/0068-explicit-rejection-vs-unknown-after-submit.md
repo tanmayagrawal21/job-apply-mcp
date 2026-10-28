@@ -63,3 +63,11 @@ counts as "maybe sent"), the same guard as the `not_sent` toast. Otherwise only 
 (`_ashby_net`, then `explicit_rejection`); with no verdict the outcome stays `roadblock` (engine `unknown`).
 The reviewer suggested `not subs` alone. `not requested` is added as well because a request that never got a
 response leaves `subs` empty. Tests: `test_ashby_dom` and the three `test_corrections_banner_*` browser fixtures.
+
+**Greenhouse field rejections (same review).** `_greenhouse_net` returned `validation_error` for the
+`invalid-attributes` / `invalid-attachment` code on ANY status, which is looser than `explicit_rejection`. It now
+needs the same narrow shape: one of those codes AND status 400 or 422. With the same code on any other status
+(5xx, 403, 408, 200, unknown), `_greenhouse_net` returns None and the outcome goes on to `explicit_rejection`. That
+also says no, so a sent request stays `roadblock` (engine `unknown`). If nothing was sent (client-side validation,
+inline field errors), the result is still the re-enterable `needs_human`. The captcha and security-code codes did
+not change. Tests: `test_greenhouse_network` and the `test_greenhouse_*` fixtures added with this amendment.

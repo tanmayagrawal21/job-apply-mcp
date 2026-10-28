@@ -53,7 +53,11 @@ def _greenhouse_net(rec: dict[str, Any]) -> tuple[str, str] | None:
     if code in ("invalid-security-code", "expired-security-code", "security-code-error"):
         return "code_requested", f"Greenhouse did not accept the security code ({code})"
     if code in ("invalid-attributes", "invalid-attachment"):
-        return "validation_error", f"Greenhouse rejected fields ({code})"
+        # ADR-0068: a verdict only in Greenhouse's own error shape AND a 400/422 (same as explicit_rejection). On any
+        # other status (5xx, 403 WAF, 408, ...) the request may have been processed: undecided -> unknown.
+        if status in (400, 422):
+            return "validation_error", f"Greenhouse rejected fields ({code})"
+        return None
     if code:
         return None                                    # unrecognised code: DOM / URL decide
     if 200 <= status < 300:
