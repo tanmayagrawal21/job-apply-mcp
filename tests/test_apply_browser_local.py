@@ -187,6 +187,7 @@ async def test_dry_run_reads_back_and_saves_evidence(drv, resume):
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=True)
     assert res.status == "dry_run", res.detail
     assert list(_evidence(drv).glob("dry-run-*.png")) and srv.posts == 0
+    assert res.captcha_mode == "none" and res.captcha == []      # ADR-0071: no widget on the local form
 
 
 async def test_boolean_not_registering_click_fails_readback(drv, resume):

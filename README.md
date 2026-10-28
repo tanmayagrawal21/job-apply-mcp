@@ -82,7 +82,7 @@ Every posting in a `run_applications` / `run_report` result has exactly one stat
 |---|---|
 | `submitted` | Live submit sent; a confirmation may follow |
 | `confirmed` | Reconciliation confirmed the submission |
-| `dry_run_ok` | Dry run complete: a live run would submit it (see `live_preview` for quotas) |
+| `dry_run_ok` | Dry run complete: a live run would submit it (see `live_preview` for quotas; the row's `captcha` mode says whether a captcha would stop it: [docs/tools.md](docs/tools.md#captcha-in-dry-runs)) |
 | `needs_human` | You must act; `why` says what (unresolved fields, review gate, awaiting approval, verification code) |
 | `quota_blocked` | A daily, per-platform or per-run quota refused the live submit; nothing was sent |
 | `skipped` | Not attempted; `why` says why (policy, duplicate, prose not approved yet, `max_applications` reached) |

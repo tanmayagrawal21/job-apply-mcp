@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from .. import consent
 from ..config import Settings
 from ..core import registry
+from ..core.captcha_report import summarize as summarize_captcha
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
 from ..core.secrets import redact
 from .closed import CHALLENGE_REASON, challenge_label, closed_text
@@ -196,6 +197,11 @@ _CAPTCHA_JS = r"""() => {
     for (const f of tsF) if (shown(f)) v.add('turnstile');
   }
   return {widgets: Array.from(w), visible: Array.from(v), unsafe: Array.from(u)}; }"""
+
+# ADR-0071 (report only): reCAPTCHA loader/frame src attributes on the host document, to tell Enterprise apart
+_RECAPTCHA_SRC_JS = r"""() => Array.from(document.querySelectorAll('script[src], iframe[src]'))
+  .map(e => e.getAttribute('src') || '').filter(s => /recaptcha/i.test(s)).slice(0, 10)"""
+_RC_ENTERPRISE = re.compile(r"recaptcha/enterprise|enterprise\.js", re.IGNORECASE)
 
 # Frames whose URL looks like a captcha/bot-check vendor are NEVER evaluated (no challenge-frame interaction).
 _CAPTCHA_FRAME_URL = re.compile(r"recaptcha|hcaptcha|turnstile|challenges\.cloudflare|arkose|funcaptcha|geetest|datadome|"
@@ -1119,7 +1125,10 @@ class PlaywrightDriver(VerificationMixin):
                                                f"Submit (captcha-protected){ev}")
         if dry_run:
             ev = await self._save_evidence(page, ref, "dry-run", extra={"exempt_optin": self._exempt.get(id(page), [])})
-            return SubmitResult(ref=ref, status="dry_run", via="browser",
+            # ADR-0071: report (read-only) what the classifier sees, so a client knows what a live submit would meet
+            items, mode = summarize_captcha(await self._captcha_state(page), ats=ats.name,
+                                            enterprise=await self._recaptcha_enterprise(page))
+            return SubmitResult(ref=ref, status="dry_run", via="browser", captcha=items, captcha_mode=mode,
                                 detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
         return await self._submit(page, ats, ref, attempt=attempt)
 
@@ -1361,6 +1370,17 @@ class PlaywrightDriver(VerificationMixin):
                     await sess.detach()
                 except Exception:
                     pass
+
+    async def _recaptcha_enterprise(self, page) -> bool | None:
+        """Report-only (ADR-0071): does the host page load reCAPTCHA Enterprise? Reads script/iframe src attributes of
+        the host document; vendor frames are never evaluated. None = no reCAPTCHA loader seen or unreadable."""
+        try:
+            srcs = list(await page.evaluate(_RECAPTCHA_SRC_JS))
+        except Exception:
+            return None
+        if not srcs:
+            return None
+        return any(_RC_ENTERPRISE.search(s) for s in srcs)
 
     async def _captcha_widgets(self, page) -> list[str]:
         """Invisible-captcha / bot-check widgets present on the page (explains silent rejections)."""
