@@ -1,5 +1,7 @@
 """Pure rules for DOM-only fields the Playwright driver fills itself (ADR-0063). Offline-testable; no browser.
 
+  * greenhouse_frame_target / app_form_missing: a company page embedding the form in an iframe is replaced by the
+    frame (ADR-0069); a page holding none of the posting's field keys is never filled.
   * greenhouse_offsite_embed: a job-boards.greenhouse.io URL that REDIRECTED to a company careers site is reopened as
     the Greenhouse embed, so the driver never fills a company page (job-alert boxes, iframes it cannot reach).
   * dom_demographic_key / demographic_pick: voluntary self-ID selects in the DOM (EEOC block, custom demographic
@@ -11,7 +13,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from .mapper import demographic_label_ok, normalize
 
@@ -34,6 +36,27 @@ def greenhouse_offsite_embed(requested: str, landed: str, ref: str) -> str | Non
     if not _gh_host(req) or not got or _gh_host(got):
         return None
     return f"https://job-boards.greenhouse.io/embed/job_app?for={parts[1]}&token={parts[2]}"
+
+
+def greenhouse_frame_target(page_url: str, src: str) -> str | None:
+    """The URL to open for a Greenhouse application iframe found on a company page (ADR-0069), or None. The frame's
+    src is resolved against the page; only http(s) on greenhouse.io or on the page's own origin is accepted, so a
+    company page can never steer the driver to a third-party host."""
+    if not src or not page_url:
+        return None
+    target = urljoin(page_url, src.strip())
+    t, p = urlparse(target), urlparse(page_url)
+    if t.scheme not in ("http", "https") or not t.hostname:
+        return None
+    if _gh_host(t.hostname.lower()) or (t.scheme, t.netloc) == (p.scheme, p.netloc):
+        return None if target.split("#")[0] == page_url.split("#")[0] else target
+    return None
+
+
+def app_form_missing(api_keys: list[str], found: int) -> bool:
+    """ADR-0069: the page holds none of the posting's own field ids/names, so the form in view is not the application
+    form (a job-alert box, a newsletter, an unreached iframe). Needs at least two keys to judge; never fill then."""
+    return len(api_keys) >= 2 and found == 0
 
 
 # ---------------------------------------------------------------- voluntary self-identification

@@ -32,8 +32,10 @@ from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
 from ..core.secrets import redact
 from .closed import CHALLENGE_REASON, challenge_label, closed_text
 from .dom_rules import (
+    app_form_missing,
     demographic_pick,
     dom_demographic_key,
+    greenhouse_frame_target,
     greenhouse_offsite_embed,
     is_decline_value,
     is_demographic_consent,
@@ -807,6 +809,15 @@ _APPFORM_JS = """(keys) => { const K = new Set(keys || []);
     if (s > bs) { best = f; bs = s; tie = false; } else if (s === bs && s > 0) tie = true; }
   if (!best || tie) return false;
   best.setAttribute('data-jam-appform', '1'); return true; }"""
+# ADR-0069: a company page embedding the Greenhouse application form (gh_jid pages: embed.js puts an iframe into
+# #grnhse_app). The host page may also hold a job-alert/newsletter form; the application form is the iframe.
+_GH_FRAME_SEL = ('#grnhse_app iframe, iframe#grnhse_iframe, iframe[src*="greenhouse.io/embed/job_app"], '
+                 'iframe[src*="job-boards.greenhouse.io/"]')
+_GH_EMBED_WAIT_S = 10.0                  # bounded wait for a lazily inserted embed iframe
+_GH_EMBED_HINT_JS = """() => !!document.querySelector('#grnhse_app, script[src*="greenhouse.io/embed"]')"""
+# ADR-0069: how many of the posting's own field ids/names the application root (marked form, else the document) holds.
+_APPKEYS_JS = """(keys) => { const root = document.querySelector('[data-jam-appform]') || document;
+  return (keys || []).filter(k => root.querySelector('[id="' + CSS.escape(k) + '"], [name="' + CSS.escape(k) + '"]')).length; }"""
 _IN_APPFORM_JS = """e => { const a = document.querySelector('[data-jam-appform]'); if (!a) return true;
   const f = e.form || e.closest('form'); return !f || f === a; }"""
 # ADR-0063: a lone, unticked, visible checkbox in the application form with its OWN label (never container text);
@@ -1027,6 +1038,9 @@ class PlaywrightDriver(VerificationMixin):
         if ats.name == "greenhouse" and (emb := greenhouse_offsite_embed(url, page.url, ref)):
             url = emb                                    # ADR-0063: board redirected to a company site
             await page.goto(url, wait_until="domcontentloaded")
+        if ats.name == "greenhouse" and (emb := await self._greenhouse_frame(page)):
+            url = emb                                    # ADR-0069: company page embeds the form in an iframe
+            await page.goto(url, wait_until="domcontentloaded")
         try:
             await page.wait_for_selector("form input, form textarea, form select, input[type=file]", state="attached",
                                          timeout=self.b.timeout_s * 1000)
@@ -1068,6 +1082,11 @@ class PlaywrightDriver(VerificationMixin):
         if (hit := stop_phrase_hit(scope, self.s.policy.stop_phrases)):
             return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"attestation: '{hit}'")
 
+        if ats.name == "greenhouse" and await self._app_form_missing(page, form):   # ADR-0069: never fill another form
+            ev = await self._save_evidence(page, ref, "no-app-form")
+            return SubmitResult(ref=ref, status="needs_human", via="browser",
+                                detail="application form not found: the page holds none of the posting's fields "
+                                       f"(another form or an unreached embed); nothing filled{ev}")
         self._api_keys[id(page)] = {"req": [f.key for f in form.fields if f.required and f.kind != FieldKind.file],
                                     "opt": [f.key for f in form.fields if not f.required],
                                     "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases),
@@ -1486,6 +1505,43 @@ class PlaywrightDriver(VerificationMixin):
                                            ff.model_copy(update={"key": ""}))
             except Exception:
                 pass
+
+    async def _greenhouse_frame(self, page) -> str | None:
+        """ADR-0069: the Greenhouse application iframe's URL on a company page, else None. Waits (bounded) only when
+        the page shows an embed is coming (gh_jid, #grnhse_app or the embed script) but has not inserted it yet."""
+        cur = str(page.url or "")
+        host = (urlparse(cur).hostname or "").lower()
+        if host == "greenhouse.io" or host.endswith(".greenhouse.io"):
+            return None
+        try:
+            loc = page.locator(_GH_FRAME_SEL)
+            if not await loc.count():
+                if not ("gh_jid=" in cur or await page.evaluate(_GH_EMBED_HINT_JS)):
+                    return None
+                try:
+                    await page.wait_for_selector(_GH_FRAME_SEL, state="attached",
+                                                 timeout=min(float(self.b.timeout_s), _GH_EMBED_WAIT_S) * 1000)
+                except Exception:
+                    return None
+            for i in range(min(await loc.count(), 4)):
+                el = loc.nth(i)
+                src = await el.get_attribute("src") or ""
+                if not greenhouse_frame_target(cur, src):
+                    fr = await (await el.element_handle()).content_frame()
+                    src = fr.url if fr else ""
+                if t := greenhouse_frame_target(cur, src):
+                    return t
+        except Exception:
+            log.debug("greenhouse embed probe failed", exc_info=True)
+        return None
+
+    async def _app_form_missing(self, page, form: ApplicationForm) -> bool:
+        keys = [f.key for f in form.fields if f.key]
+        try:
+            found = int(await page.evaluate(_APPKEYS_JS, keys))
+        except Exception:
+            return False
+        return app_form_missing(keys, found)
 
     async def _mark_app_form(self, page, form: ApplicationForm) -> bool:
         try:
