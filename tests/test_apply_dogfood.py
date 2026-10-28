@@ -24,9 +24,9 @@ def test_pronouns_never_cross_to_opposite_option():
     assert ans == {} and unres == ["p"]
     f2 = F("p", "Pronouns", FieldKind.select, options=["She/Her", "He/Him/His", "They/Them"])
     assert got([f2], pronouns="He/him")[0] == {"p": "He/Him/His"}
-    ans, _, _ = got([F("p", "Pronouns", FieldKind.select, options=["she/her", "Prefer not to say"])],
-                    pronouns="He/him/his")
-    assert ans == {"p": "Prefer not to say"}  # decline option, not a guess
+    ans, unres, _ = got([F("p", "Pronouns", FieldKind.select, options=["she/her", "Prefer not to say"])],
+                        pronouns="He/him/his")
+    assert ans == {} and unres == ["p"]  # #119: no guess, and never a decline for an answered topic
 
 
 def test_demographics_only_from_profile_demographics():

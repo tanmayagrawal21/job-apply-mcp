@@ -126,11 +126,27 @@ _INSTRUCTION = re.compile(r"\(\s*(?:please\s+)?(?:mark|select|check|choose|tick)
                           r"(?:\s+that\s+apply)?\s*\)", re.IGNORECASE)
 
 
+# ADR-0070 amendment (#119): closed rewrites of standard self-ID wording that names the SAME question in more words.
+# "race / ethnic group" is the race question; "a veteran or active member of the United States Armed Forces" is the
+# plain veteran question (its options then decide; is_veteran answers only the closed table below). Nothing else.
+_LABEL_REWRITES: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {
+    "race": ((re.compile(r"\b(ethnic|racial|race) groups?\b"), r"\1"),),
+    "veteran": ((re.compile(r"\bveteran or (?:an )?active(?: duty)? (?:service )?member(?: of the (?:united states|u s|us)"
+                            r" (?:armed forces|military))?\b"), "veteran"),),
+}
+
+
 def self_id_label_ok(label: str, key: str) -> bool:
     """The owner's self-ID value may answer this label: mapper.demographic_label_ok (every word generic self-ID wording
     or the topic's own words), after removing only an answer-instruction parenthetical such as "(please mark all that
-    apply)". A label that mentions the topic inside another question (accommodation, language skills) fails."""
-    return demographic_label_ok(label, key) or demographic_label_ok(_INSTRUCTION.sub(" ", label), key)
+    apply)" and applying the closed _LABEL_REWRITES of the same key. A label that mentions the topic inside another
+    question (accommodation, language skills) fails."""
+    if demographic_label_ok(label, key):
+        return True
+    t = normalize(_INSTRUCTION.sub(" ", label))
+    for rx, rep in _LABEL_REWRITES.get(key, ()):
+        t = rx.sub(rep, t)
+    return demographic_label_ok(t, key)
 
 
 def is_decline_value(v: object) -> bool:
@@ -167,16 +183,53 @@ def _canon(text: str) -> str:
 
 # ADR-0070: an option whose parenthetical asserts a Hispanic/Latino answer ("Asian (Not Hispanic or Latino)") is a
 # second fact; it is taken only when the owner's own hispanic answer agrees.
-_NOT_HISPANIC = re.compile(r"\bnot hispanic\b|\bnon hispanic\b")
+_NOT_HISPANIC = re.compile(r"\bnot (?:of )?hispanic\b|\bnon hispanic\b")     # "(Not of Hispanic Origin)" too (#119)
 
 # ADR-0070: `[demographics].is_veteran` ("Yes"/"No": ever served, protected or not) answers the plain veteran wording.
 # Never derived from veteran_status: "not a PROTECTED veteran" does not mean "not a veteran". Not being a veteran does
 # imply not being a protected veteran, so "No" also answers the protected-veteran "not" option.
 _VETERAN_ANY = {
     "no": frozenset({"no i am not a veteran", "i am not a veteran", "not a veteran", "no not a veteran",
-                     "i am not a protected veteran", "no i am not a protected veteran", "not a protected veteran"}),
-    "yes": frozenset({"yes i am a veteran", "i am a veteran", "yes a veteran"}),
+                     "i am not a protected veteran", "no i am not a protected veteran", "not a protected veteran",
+                     # #119: never served -> neither a veteran nor an active member
+                     "no i am not a veteran or active member", "i am not a veteran or active member",
+                     "no i am not a veteran or an active member", "i am not a veteran or an active member"}),
+    "yes": frozenset({"yes i am a veteran", "i am a veteran", "yes a veteran",
+                      # #119: served (protected or not) -> "a veteran or active member" is true; never protected
+                      "yes i am a veteran or active member", "i am a veteran or active member",
+                      "yes i am a veteran or an active member", "i am a veteran or an active member"}),
 }
+
+# ADR-0070 amendment (#120): the standard disability self-ID answers (OFCCP form CC-305 and its older revision), as
+# closed patterns over the contraction-folded text. "yes" = has (or had) a disability, "no" = does not. The CC-305
+# revisions word the same answer differently ("No, I don't have a disability" vs "No, I do not have a disability and
+# have not had one in the past"), so a value and an option of the same class are the same answer. A bare "Yes"/"No"
+# value counts only on the status question itself (_YESNO_STATUS). Decline options stay the decline table's business.
+_DISABILITY_CLASS = {
+    "yes": re.compile(r"^(?:yes )?i have a disability(?: or (?:i )?(?:have had one in the past|previously had a "
+                      r"disability|had a disability in the past|have a history(?: or record)? of (?:having )?a "
+                      r"disability))?$"),
+    "no": re.compile(r"^(?:no )?i do not have a disability(?: and (?:i )?have not had one in the past| or a history"
+                     r"(?: or record)? of (?:having )?(?:one|a disability))?$"),
+}
+
+
+def disability_class(text: str, *, bare: bool = False) -> str | None:
+    """"yes" / "no" for a standard disability self-ID answer, else None. `bare`: a lone "Yes"/"No" counts too."""
+    n = _canon(text)
+    if bare and n in ("yes", "no"):
+        return n
+    return next((c for c, rx in _DISABILITY_CLASS.items() if rx.match(n)), None)
+
+
+_PLACEHOLDER = re.compile(r"^(?:please )?(?:select|choose)\b(?: an? (?:option|answer))?$")
+
+
+def protected_only(options: list[str]) -> bool:
+    """Every answer option (decline and placeholder options aside) names PROTECTED veteran status, i.e. the select has
+    no plain "veteran" answer for `is_veteran` (ADR-0070 amendment)."""
+    real = [o for o in options if not is_decline_value(o) and not _PLACEHOLDER.match(normalize(o))]
+    return bool(real) and all(re.search(r"\bprotected\b", normalize(o)) for o in real)
 
 
 def _paren_ok(option: str, hispanic: str) -> bool:
@@ -218,6 +271,12 @@ def demographic_pick(key: str | None, values: list[str], options: list[str], lab
         if key in _YESNO_STATUS and _YESNO_STATUS[key].match(normalize(label)):
             m = re.match(r"^(yes|no) \S", nv)
             hits = [o for o in opts if m and normalize(o) == m.group(1)]
+            if len(hits) == 1:
+                return hits[0]
+        if key == "disability":          # #120: the CC-305 answer family, same class on both sides
+            status = bool(_YESNO_STATUS["disability"].match(normalize(label)))
+            want = disability_class(str(v), bare=status)
+            hits = [o for o in opts if want and disability_class(o) == want]
             if len(hits) == 1:
                 return hits[0]
     served = normalize(is_veteran).split()[:1]

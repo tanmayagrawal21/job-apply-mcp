@@ -41,6 +41,7 @@ from .dom_rules import (
     is_decline_value,
     is_demographic_consent,
     is_pronoun_label,
+    protected_only,
     self_id_label_ok,
 )
 from .geo import location_queries, pick_location
@@ -759,9 +760,21 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
 # reportValidity, never submit. Native constraints are required markup, so nothing here is ever exempt.
 _VALIDITY_JS = """(a) => { a = a || {}; const keys = new Set(a.keys || []);
   const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
-  const labelOf = e => { let t = ''; if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
-    if (!t) { const l = e.closest('label'); if (l) t = l.textContent; }
-    return clean(t || e.getAttribute('aria-label') || e.name || e.id || ''); };
+  const forId = id => { const l = id && document.querySelector('label[for="' + CSS.escape(id) + '"]'); return l ? l.textContent : ''; };
+  const byIds = v => (v || '').split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
+  // #120: an unlabelled control (a react-select's hidden required input) is named by its field: the one combobox or
+  // the one <label> of the nearest wrapper holding it, never a label shared with another question
+  const near = e => { for (let n = e.parentElement, d = 0; n && n.tagName !== 'FORM' && d < 5; n = n.parentElement, d++) {
+      const cb = [...n.querySelectorAll('[role=combobox], input[id], select[id], textarea[id]')].filter(x => x !== e);
+      const ls = n.querySelectorAll('label');
+      if (cb.length === 1) { const t = forId(cb[0].id) || byIds(cb[0].getAttribute('aria-labelledby')) || cb[0].getAttribute('aria-label') || ''; if (clean(t)) return t; }
+      if (ls.length === 1) return ls[0].textContent;
+      if (ls.length > 1 || cb.length > 1) return ''; }
+    return ''; };
+  const labelOf = e => { let t = forId(e.id) || byIds(e.getAttribute('aria-labelledby'));
+    if (!clean(t)) { const l = e.closest('label'); if (l) t = l.textContent; }
+    t = clean(t || e.getAttribute('aria-label') || '') || clean(near(e)) || clean(e.name || e.id || '');
+    return t || ('unlabelled ' + e.tagName.toLowerCase() + (e.type ? ' type=' + e.type : '')); };
   const bad = [], exempt = [];
   for (const f of document.querySelectorAll('form')) {
     const els = [...f.elements];
@@ -2033,19 +2046,28 @@ class PlaywrightDriver(VerificationMixin):
         # wording or the topic's own words); "accommodation for a disability", "Spanish to Latino customers" etc.
         # get no profile value (decline table when required, blank when optional), exactly as before this ADR.
         keys = ["race_detail", "race"] if ck == "race" else [ck] if ck in DEMOGRAPHIC_KEYS else []
-        if keys and not self_id_label_ok(lab, ck):
-            keys = []
-        values = [str(answers.get(f"demographic:{k}") or "").strip() for k in keys]
-        values = [v for v in values if v]
-        served = str(answers.get("demographic:is_veteran") or "").strip() if ck == "veteran" and keys else ""
-        if is_decline_value(served):
-            served = ""
-        if not values and not served and not row["required"]:
-            return [], 0, None                                 # optional, nothing in the profile: stay blank
-        declined = not served and all(is_decline_value(v) or normalize(v) in _DECLINE_SYNONYMS for v in values)
-        # ADR-0070: the profile meant to answer this select; a placeholder left afterwards is a reported gap
         field = {"gender": "gender", "race": "race_ethnicity / race_detail", "hispanic": "hispanic_latino",
                  "veteran": "veteran_status / is_veteran", "disability": "disability_status"}.get(str(ck), str(ck))
+
+        def _own(ks: list[str]) -> tuple[list[str], str]:
+            vs = [v for v in (str(answers.get(f"demographic:{k}") or "").strip() for k in ks) if v]
+            sv = str(answers.get("demographic:is_veteran") or "").strip() if ck == "veteran" and ks else ""
+            return vs, "" if is_decline_value(sv) else sv
+
+        def _answers(vs: list[str], sv: str) -> bool:     # the profile holds a real (non-decline) answer
+            return bool(sv) or any(not (is_decline_value(v) or normalize(v) in _DECLINE_SYNONYMS) for v in vs)
+        # #119 invariant: a select whose topic the profile ANSWERS is never declined. A wording that is not the plain
+        # self-ID question gets no profile value, but also no decline: it stays blank and is reported (tool_gap).
+        if keys and not self_id_label_ok(lab, ck):
+            if _answers(*_own(keys)):
+                return [], 0, (f"{lab} (tool_gap: wording not recognised as the [demographics].{field} question; "
+                               f"left blank, never declined)")
+            keys = []
+        values, served = _own(keys)
+        if not values and not served and not row["required"]:
+            return [], 0, None                                 # optional, nothing in the profile: stay blank
+        declined = not _answers(values, served)
+        # ADR-0070: the profile meant to answer this select; a placeholder left afterwards is a reported gap
         no_match = None if declined else f"{lab} (unknown_fact: no option equals [demographics].{field})"
         not_set = None if declined else f"{lab} (tool_gap: the chosen self-ID option did not commit)"
         hisp = str(answers.get("demographic:hispanic") or "")
@@ -2057,10 +2079,17 @@ class PlaywrightDriver(VerificationMixin):
             pick = demographic_pick(ck, values, texts, lab, hispanic=hisp, is_veteran=served)
             # ADR-0070 amendment: is_veteran="Yes" says nothing about PROTECTED status, so a protected-only select
             # has no option for it. The owner's veteran_status decline (or, on a required select, the decline
-            # table as before is_veteran existed) then applies; never a protected classification.
-            if (pick is None and served and (values or row["required"])
+            # table as before is_veteran existed) then applies; never a protected classification. #119: only on a
+            # select whose every answer is a protected classification; a plain-veteran wording the table misses is
+            # an unmatched profile answer (blank + reported), never a decline.
+            if (pick is None and served and (values or row["required"]) and protected_only(texts)
                     and all(is_decline_value(v) or normalize(v) in _DECLINE_SYNONYMS for v in values)):
                 pick = exact_decline(texts)
+            # #119 defence in depth: never a decline while the profile answers this question (is_veteran does not
+            # answer a protected-only select; the owner's veteran_status does)
+            if (pick is not None and (is_decline_value(pick) or normalize(pick) in _DECLINE_SYNONYMS)
+                    and _answers(values, "" if protected_only(texts) else served)):
+                return None
             return pick
         loc = page.locator(f'[id="{el_id}"]' if el_id else f'select[name="{row["name"]}"]').first
         try:
