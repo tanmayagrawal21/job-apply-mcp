@@ -318,7 +318,7 @@ class ProfileView:
             return next((v for k, v in self.p.answers.items() if k.strip().lower() == want), None)
         v = self._lookup(key)
         if (self.persona is not None and (v is None or v == "") and " " not in key
-                and not key.startswith(("work:", "contact:", "edu:")) and key not in ("work_history", "us_person")):
+                and not key.startswith(("work:", "contact:", "edu:")) and key not in ("work_history", "us_person", "is_veteran")):
             s = self.persona.stored(key)     # stored answers fill gaps and defaults; they never override the profile
             if s is not None:
                 return s
@@ -347,6 +347,7 @@ class ProfileView:
             "lat": c.lat, "lon": c.lon, "sexual_orientation": d.sexual_orientation,
             "gender": d.gender, "gender_if_required": d.gender_if_required, "hispanic": d.hispanic_latino,
             "race": d.race_ethnicity, "race_detail": d.race_detail,
+            "is_veteran": d.is_veteran,
             "veteran": d.veteran_status, "disability": d.disability_status, "pronouns": d.pronouns,
             "salary_expectation": (str(self.p.salary.expected) if self.p.salary.expected
                                    else self.p.salary.text),

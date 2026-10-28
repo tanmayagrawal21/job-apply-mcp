@@ -7,6 +7,8 @@
   * is_demographic_consent: the narrowly-worded "I consent to <company> processing my responses to the demographic
     survey above" box. Not a privacy notice (ADR-0034/0038); its own rule, see ADR-0063.
   * is_pronoun_label: a pronouns choice group (optional; filled only from the profile).
+  ADR-0070 adds contraction folding ("don't" == "do not"), the "(Not Hispanic or Latino)" guard and the closed
+  `[demographics].is_veteran` table to demographic_pick.
 """
 from __future__ import annotations
 
@@ -91,7 +93,42 @@ _YESNO_STATUS = {
 }
 
 
-def demographic_pick(key: str | None, values: list[str], options: list[str], label: str = "") -> str | None:
+# ADR-0070: contractions are the same words ("I don't have a disability" == "I do not have a disability").
+_CONTRACTIONS = ((re.compile(r"\bdon t\b"), "do not"), (re.compile(r"\bdoesn t\b"), "does not"),
+                 (re.compile(r"\bhaven t\b"), "have not"), (re.compile(r"\bi m\b"), "i am"),
+                 (re.compile(r"\bisn t\b"), "is not"), (re.compile(r"\baren t\b"), "are not"))
+
+
+def _canon(text: str) -> str:
+    n = normalize(text)
+    for rx, rep in _CONTRACTIONS:
+        n = rx.sub(rep, n)
+    return n
+
+
+# ADR-0070: an option whose parenthetical asserts a Hispanic/Latino answer ("Asian (Not Hispanic or Latino)") is a
+# second fact; it is taken only when the owner's own hispanic answer agrees.
+_NOT_HISPANIC = re.compile(r"\bnot hispanic\b|\bnon hispanic\b")
+
+# ADR-0070: `[demographics].is_veteran` ("Yes"/"No": ever served, protected or not) answers the plain veteran wording.
+# Never derived from veteran_status: "not a PROTECTED veteran" does not mean "not a veteran". Not being a veteran does
+# imply not being a protected veteran, so "No" also answers the protected-veteran "not" option.
+_VETERAN_ANY = {
+    "no": frozenset({"no i am not a veteran", "i am not a veteran", "not a veteran", "no not a veteran",
+                     "i am not a protected veteran", "no i am not a protected veteran", "not a protected veteran"}),
+    "yes": frozenset({"yes i am a veteran", "i am a veteran", "yes a veteran"}),
+}
+
+
+def _paren_ok(option: str, hispanic: str) -> bool:
+    tail = _PAREN_TAIL.search(option)
+    if not tail or not _NOT_HISPANIC.search(normalize(tail.group(0))):
+        return True
+    return normalize(hispanic).split()[:1] == ["no"]
+
+
+def demographic_pick(key: str | None, values: list[str], options: list[str], label: str = "", *,
+                     hispanic: str = "", is_veteran: str = "") -> str | None:
     """The single option equal to one of the owner's `values` (tried in order, e.g. race_detail before race), or None.
     Equal means normalised equality, plus ONLY these closed equivalences:
       - gender: Male == Man, Female == Woman (one hit only);
@@ -99,13 +136,16 @@ def demographic_pick(key: str | None, values: list[str], options: list[str], lab
         "South Asian" (never a prefix or substring: "Asian" never equals "South Asian (...)");
       - disability / hispanic: a profile sentence that starts with "Yes," / "No," equals a bare "Yes" / "No" option,
         ONLY when `label` is the status question itself (_YESNO_STATUS), never a question that mentions the topic.
+    ADR-0070 adds: contractions fold ("don't" == "do not"); an option whose parenthetical says "Not Hispanic or
+    Latino" is taken only when `hispanic` (the owner's answer) starts with "No"; and for veteran, after the
+    veteran_status values, `is_veteran` ("Yes"/"No") answers the plain wording in _VETERAN_ANY.
     Decline values are the caller's business (decline table)."""
-    opts = [o for o in options if o and normalize(o) not in ("", "select")]
+    opts = [o for o in options if o and normalize(o) not in ("", "select", "select ...")]
     for v in values:
-        nv = normalize(str(v or ""))
+        nv = _canon(str(v or ""))
         if not nv or is_decline_value(v):
             continue
-        hits = [o for o in opts if normalize(o) == nv]
+        hits = [o for o in opts if _canon(o) == nv]
         if len(hits) == 1:
             return hits[0]
         if key == "gender":
@@ -113,14 +153,19 @@ def demographic_pick(key: str | None, values: list[str], options: list[str], lab
             hits = [o for o in opts if syn and normalize(o) in syn]
             if len(hits) == 1:
                 return hits[0]
-        hits = [o for o in opts if _PAREN_TAIL.search(o) and normalize(_PAREN_TAIL.sub("", o)) == nv]
+        hits = [o for o in opts if _PAREN_TAIL.search(o) and _canon(_PAREN_TAIL.sub("", o)) == nv]
         if len(hits) == 1:
-            return hits[0]
+            return hits[0] if _paren_ok(hits[0], hispanic) else None
         if key in _YESNO_STATUS and _YESNO_STATUS[key].match(normalize(label)):
             m = re.match(r"^(yes|no) \S", nv)
             hits = [o for o in opts if m and normalize(o) == m.group(1)]
             if len(hits) == 1:
                 return hits[0]
+    served = normalize(is_veteran).split()[:1]
+    if key == "veteran" and served and served[0] in _VETERAN_ANY:
+        hits = [o for o in opts if _canon(o) in _VETERAN_ANY[served[0]]]
+        if len(hits) == 1:
+            return hits[0]
     return None
 
 
@@ -136,7 +181,10 @@ _DEMO_CONSENT = re.compile(
     r"(?:demographic|self identification|eeo|diversity)(?: data)? (?:surveys?|questions?|questionnaires?|section)"
     r"(?: above| below)?$")
 _WHO_BAD = re.compile(r"\b(share|sharing|shared|third|parties|party|partners?|affiliates?|vendors?|sell|sale|"
-                      r"transfer\w*|marketing|advertis\w*|research|public\w*|government|any|other|others|and|its|their)\b")
+                      r"transfer\w*|marketing|advertis\w*|research|public\w*|government|any|other|others|and|its|their|"
+                      # ADR-0070: the name slot never holds a purpose, a method or a processing verb
+                      r"ai|artificial|automat\w*|algorithm\w*|machine|to|for|with|via|by|us(?:e|es|ing)|collect\w*|"
+                      r"process\w*|stor\w*|retain\w*|record\w*)\b")
 
 
 def is_demographic_consent(label: str) -> bool:
