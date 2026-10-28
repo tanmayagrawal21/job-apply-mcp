@@ -29,6 +29,7 @@ from .. import consent
 from ..config import Settings
 from ..core import registry
 from ..core.captcha_report import summarize as summarize_captcha
+from ..core.handoff import NOT_COMMITTED
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
 from ..core.secrets import redact
 from .closed import CHALLENGE_REASON, challenge_label, closed_text
@@ -640,8 +641,14 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
   // ASHBY (ADR-0056): the [data-field-path] entry is the container and its .ashby-application-form-question-title
   // (or legend) the title; a required title carries a hashed `_required_<hash>` class (caught by REQ_CLS).
+  // TOGGLE STATE (#126): Ashby draws a Yes/No question as two aria-pressed buttons in front of ONE hidden checkbox
+  // that is checked only for "Yes" (unchecked for "No" and for "not answered"). The answer is the pressed button in
+  // the checkbox's own container (a container holding no other question's choice inputs).
+  const pressed = members => members.some(m => { const c = m.parentElement;
+    if (!c || [...c.querySelectorAll(CH)].some(x => !members.includes(x))) return false;
+    return !!c.querySelector('button[aria-pressed=true], [role=button][aria-pressed=true]'); });
   const emit = (members, container, text, idCands, consent, headEl) => {
-    if (members.some(m => m.checked)) return;
+    if (members.some(m => m.checked) || pressed(members)) return;
     const names = members.flatMap(m => [m.name, m.id]);
     if (apiOptional(idCands.concat(names))) return;
     if (ashbyOptional(members, idCands, names)) return;
@@ -1173,6 +1180,12 @@ class PlaywrightDriver(VerificationMixin):
                 if f.key in ids:
                     await self._fill(page, ats, f, v)
             empty = await self._empty_required(page)
+        # #126: plan and submit agree. A required field the plan ANSWERED but the page still shows empty is the tool's
+        # gap (marked, never an "ask the user"); one the plan never saw (DOM-only) is listed in `unresolved`.
+        planned = {f.key for f, v in steps if v is not None and v != ""}
+        unplanned = [e["id"] or e["label"] for e in empty if not (e.get("id") and e["id"] in planned)]
+        empty = [{**e, "label": f"{e['label']} ({NOT_COMMITTED})"} if e.get("id") and e["id"] in planned else e
+                 for e in empty]
         empty += [{"id": "", "label": f"{lab} (self-ID read-back mismatch)"} for lab in demo_bad]
         known = {e["label"] for e in empty}
         empty += [{"id": "", "label": f"{lab} (native validation)"} for lab in await self._native_invalid(page)
@@ -1180,7 +1193,7 @@ class PlaywrightDriver(VerificationMixin):
         if empty:                                   # never submit (or call a dry run complete) with required gaps
             labels = [e["label"] for e in empty]
             ev = await self._save_evidence(page, ref, "incomplete", extra={"required_empty": labels})
-            return SubmitResult(ref=ref, status="incomplete", via="browser",
+            return SubmitResult(ref=ref, status="incomplete", via="browser", unresolved=unplanned[:20],
                                 detail=f"required fields still empty: {labels[:10]}{ev}")
         if self.b.presubmit_validation:
             errs = await self._validation_errors(page)
@@ -2358,22 +2371,48 @@ class PlaywrightDriver(VerificationMixin):
                     return await loc.is_checked() == want
             except Exception:
                 pass
+        group = await self._bool_group(page, f)
+        pat = re.compile(r"^\s*yes\s*$" if want else r"^\s*no\s*$", re.IGNORECASE)
+        for role in ("radio", "button"):
+            btn = group.get_by_role(role, name=pat)
+            if await btn.count():
+                # #126: never click a toggle that is already in the wanted state (a second click can clear it), and
+                # wait for React to commit the pressed state before judging a click (a stale read caused a re-click)
+                if await self._btn_state(btn.first):
+                    return True
+                for _ in range(2):                 # bounded: at most two real clicks per field
+                    await btn.first.click()
+                    st = await self._await_pressed(btn.first)
+                    if st is None or st:
+                        return True
+                return False
+        return False
+
+    async def _bool_group(self, page, f: FormField):
+        """The container of one Yes/No question: the field's own [data-field-path] entry (Ashby) when present, so a
+        sibling toggle with similar wording can never be read or clicked; else the labelled group / question."""
+        try:
+            own = page.locator(f'[data-field-path="{f.key}"]') if f.key and '"' not in f.key else None
+            if own is not None and await own.count() == 1:
+                return own
+        except Exception:
+            pass
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
         group = page.get_by_role("group", name=re.compile(re.escape(label), re.IGNORECASE))
         if not await group.count():
             group = page.locator("fieldset, [role=group], div[class*=question], div[class*=field]").filter(
                 has_text=label).last
-        pat = re.compile(r"^\s*yes\s*$" if want else r"^\s*no\s*$", re.IGNORECASE)
-        for role in ("radio", "button"):
-            btn = group.get_by_role(role, name=pat)
-            if await btn.count():
-                for _ in range(2):                 # real click, then confirm the pressed/checked state
-                    await btn.first.click()
-                    st = await self._btn_state(btn.first)
-                    if st is None or st:
-                        return True
-                return False
-        return False
+        return group
+
+    async def _await_pressed(self, btn, timeout_s: float = 1.5) -> bool | None:
+        """Pressed/checked state of `btn`, polled until it reads true or `timeout_s` passes (React commits the
+        aria-pressed change after the click event). None = the control exposes no state."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            st = await self._btn_state(btn)
+            if st is None or st or time.monotonic() >= deadline:
+                return st
+            await asyncio.sleep(0.1)
 
     @staticmethod
     async def _btn_state(btn) -> bool | None:
@@ -2399,21 +2438,30 @@ class PlaywrightDriver(VerificationMixin):
                 return {"yes": True, "no": False}.get(normalize(v))
             except Exception:
                 return None
+        # #126: only a VISIBLE checkbox is the answer. Ashby's hidden checkbox behind its Yes/No buttons stays
+        # unchecked for "No" AND for "not answered", so it can neither prove nor refute a No; the buttons decide.
+        hidden_box = False
         try:
             if loc is not None and (await loc.get_attribute("type")) == "checkbox":
-                return await loc.is_checked()
+                if await loc.is_visible():
+                    return await loc.is_checked()
+                hidden_box = True
         except Exception:
             pass
-        label = re.sub(r"\s*\*\s*$", "", f.label).strip()
-        group = page.get_by_role("group", name=re.compile(re.escape(label), re.IGNORECASE))
-        if not await group.count():
-            group = page.locator("fieldset, [role=group], div[class*=question], div[class*=field]").filter(
-                has_text=label).last
+        toggles = False
+        group = await self._bool_group(page, f)
         for role in ("radio", "button"):
             for want, pat in ((True, r"^\s*yes\s*$"), (False, r"^\s*no\s*$")):
                 btn = group.get_by_role(role, name=re.compile(pat, re.IGNORECASE))
-                if await btn.count() and await self._btn_state(btn.first):
-                    return want
+                if await btn.count():
+                    toggles = True
+                    if await self._btn_state(btn.first):
+                        return want
+        if not toggles and hidden_box:             # a lone custom-drawn checkbox (no Yes/No options): its own state
+            try:
+                return await loc.is_checked()
+            except Exception:
+                return None
         return None
 
     async def _upload(self, page, f: FormField, path: str) -> bool:

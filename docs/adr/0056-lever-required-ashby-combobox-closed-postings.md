@@ -87,3 +87,43 @@ A QA round on PR #81 found three driver and adapter faults:
 - Lambda dry run: 110 s and `incomplete`/`fill-failed` before; about 15 s and `dry_run` now.
 - Dry-run time: the Lever scan no longer runs a false refill pass or a second scan. Most of the remaining time is
   page load, resume parsing and the geocoded location. This ADR leaves those unchanged.
+
+## Amendment (2026-10-28, issue #126): Ashby Yes/No toggles read from the pressed button
+
+### Context
+A required Ashby Yes/No question answered "No" was reported as a required field still empty, so the dry run ended
+`incomplete` while the screenshot showed No selected. A dry run showed the markup: each `[data-field-path]` entry
+holds two `button[aria-pressed][data-option]` options and one `display:none` checkbox. The checkbox is checked only
+for "Yes". It stays unchecked for "No" and for "not answered". The required-field scan treated the unchecked
+checkbox as "nothing selected", and the boolean read-back used the same checkbox, so an unanswered toggle could
+pass a "No" read-back. Clicking the active option again clears it, so a stale read followed by a second click
+could also remove an answer. A sibling "Yes" toggle passed because its checkbox was checked.
+
+### Decision
+- The required-field scan counts a choice set as answered when a checkbox member is checked OR its own container
+  (the checkbox's parent, holding no other question's choice inputs) has a `button[aria-pressed=true]`.
+- The boolean read-back uses a checkbox only when it is visible. Otherwise the pressed button decides, and on
+  Ashby an unknown state still fails verification.
+- The Yes/No question is scoped to its own `[data-field-path="<key>"]` entry when one exists, so a sibling
+  question with similar wording is never read or clicked. The label lookup remains the fallback.
+- Bounded clicks: no click when the wanted option is already pressed, which covers the late refill pass. After a
+  click the state is polled for up to 1.5 s for React to commit, and there are at most two clicks per field.
+  Nothing is clicked at submit time.
+- Plan and submit agree. In an `incomplete` result, a required field that the plan answered but the page shows
+  empty is labelled "planned answer not committed on the page". Empty required fields that the plan never saw
+  (DOM-only) are listed in `SubmitResult.unresolved`. When every empty field was planned and none is unresolved,
+  the row is a `tool_gap` (ADR-0067) with `next_action: request_feature`, never "ask the user".
+
+### Verify
+1. `uv run pytest -q tests/test_ashby_toggle_126.py`. A fictional Ashby-shaped fixture with delayed commits and
+   click-to-clear covers these cases: committed No is not empty, unanswered still blocks and never verifies as No,
+   the refill does not re-click, a similar sibling is not touched, and the tool_gap or unknown_fact split. Then
+   run the full `uv run pytest -q`.
+2. Dry run, never live: `submit_application(dry_run=True)` on an Ashby posting with a required Yes/No question
+   answered No. Expect `dry_run`, not `incomplete`.
+
+### Revert
+Revert the squash commit of this change. No data migration is needed and nothing new is stored. Each part can be
+reverted alone: the `pressed()` check in `_EMPTY_REQUIRED_JS`, the visible-only checkbox in `_bool_state`,
+`_bool_group` / `_await_pressed` in `_set_boolean`, and `NOT_COMMITTED` in `core/handoff.py` / `core/next_steps.py`
+together with the labelling in the `incomplete` result.
