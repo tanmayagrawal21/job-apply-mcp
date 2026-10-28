@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.handoff import TOOL_GAP, UNKNOWN_FACT
 from ..core.models import Answer, FieldKind, FormField
 from .derive import pick_languages, whole_years, years_option
 from .geo import US_STATES
@@ -40,6 +41,11 @@ _OPTIONAL = re.compile(r"\((optional|required)\)|\b(optional|required)\b$")
 # ADR-0053: misspellings of "sponsor" ("sponorship", "sponsership", "sponser") read as "sponsor", so such a question is
 # RECOGNISED as a sponsorship question (and never takes a flat [answers] value). The answer source is unchanged.
 _SPONSOR_TYPO = re.compile(r"\bspon(?!sor)[a-z]{0,3}(?:or|er)(s|ed|ing|ship|ships)?\b")
+
+
+# ADR-0073 (control): the only words allowed in the free slot of the office question ("Can you regularly work from
+# our HQ?"). A closed list: any other word ("mind", "hate", "not", "hesitate to") leaves the question unresolved.
+_SLOT_ADVERBS = "regularly|also|ever|possibly|please|consistently|occasionally|sometimes|comfortably|reliably"
 
 
 def normalize(label: str) -> str:
@@ -130,7 +136,11 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",
                         # ADR-0055: "able to work from our office in X", "open to working out of our X Office"
                         (r"\b(open|willing|able|comfortable)\b.*\bwork(?:ing)? (?:from|in|out of|at) (?:one of )?"
-                         r"(?:our|the|an?) (?:\w+ ){0,4}offices?\b"))),
+                         r"(?:our|the|an?) (?:\w+ ){0,4}offices?\b"),
+                        # ADR-0073: "Can you work from our San Francisco HQ (4 days a week)?". Control: the slot
+                        # before "work" is a closed list of neutral adverbs (never "mind", "not", "hate", ...)
+                        (rf"^(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:from|in|out of|at) "
+                         r"(?:one of )?our (?:\w+ ){0,4}(?:offices?|hq|headquarters)\b"))),
     ("located_in_us", ((r"(located|based|reside|live|residing)\b.*\b(in|within) the ((continental|contiguous) )?"
                         r"(us|u s|usa|united states)\b"),)),
     # ADR-0053: "Do you live within 50 miles of Austin, TX?" / "Are you located in Canada?" (from [contact] only)
@@ -673,6 +683,8 @@ _EXAMPLE_GENERIC = frozenset(["other", "employment", "based", "immigration", "ca
 _AUTH_REWRITES = [
     (re.compile(r"\bcommence\s*\(?\s*[\"“'‘]?\s*sponsor\s*[\"”'’]?\s*\)?\s*an immigration case\b", re.IGNORECASE), "sponsor"),
     (re.compile(r"\bin order to employ you\b", re.IGNORECASE), " "),
+    # ADR-0073: "an employment visa or sponsorship of any kind" asks the same sponsorship question
+    (re.compile(r"\bof any (?:kind|type|sort)\b", re.IGNORECASE), " "),
 ]
 
 
@@ -736,6 +748,17 @@ def names_us_in_full(text: str) -> bool:
     return bool(_US_FULL_PLACE.search(_drop_examples(text or "", None)))
 
 
+# ADR-0073: the US named only as the adjective of a permit / visa ("for a US work permit", "U.S. work authorization").
+# ADR-0053/0062: that does not name the place of work, so it still needs a confirmed US job; it only names the reason.
+_US_ADJ = re.compile(r"(?:\b(?:U\.S\.A?\.?|USA|US)|\b[Uu]nited [Ss]tates(?: of [Aa]merica)?)(?![A-Za-z])"
+                     r"(?= (?:work|employment|immigration|visa|visas|sponsorship|citizenship)\b)")
+
+
+def names_us_adj(text: str) -> bool:
+    """The text names the United States as the adjective of a permit, visa or sponsorship ("a US work permit")."""
+    return bool(_US_ADJ.search(_drop_examples(text or "", None)))
+
+
 def names_us(text: str) -> bool:
     """The text names the United States as a place ("... to work in the US?"), after example clauses are dropped."""
     t = _drop_examples(text or "", None)
@@ -783,6 +806,8 @@ def job_country(location: str, countries: Sequence[str] = (), locations: Sequenc
     code = cs[0]
     texts = [str(t) for t in (location, *locations) if str(t or "").strip()]
     strict = [_entry_in(t, code) or _list_in(t, code) for t in texts]
+    # ADR-0073: "Somerville, MA" beside the confirmed "Somerville, MA, United States" is the same place, shortened
+    strict = [ok or any(o and _shortened(t, u) for o, u in zip(strict, texts, strict=True)) for ok, t in zip(strict, texts, strict=True)]
     if all(strict):                       # no location text at all: the structured country alone (ADR-0040)
         return code
     # ADR-0055: a company office entry that names no place we can parse ("San Jose Office (HQ)") defers to the single
@@ -791,6 +816,14 @@ def job_country(location: str, countries: Sequence[str] = (), locations: Sequenc
                                   and not question_countries(t)[1]) for ok, t in zip(strict, texts, strict=True)):
         return code
     return None
+
+
+def _shortened(short: str, full: str) -> bool:
+    """`short` is `full` with trailing comma parts dropped ("Somerville, MA" of "Somerville, MA, United States").
+    At least two parts (city + region or country) must agree."""
+    a = [normalize(x) for x in short.split(",") if normalize(x)]
+    b = [normalize(x) for x in full.split(",") if normalize(x)]
+    return len(a) >= 2 and len(a) < len(b) and b[:len(a)] == a     # a bare city ("Paris") never confirms
 
 
 def _entry_in(t: str, code: str) -> bool:
@@ -883,69 +916,186 @@ def _home_job_core(label: str, country: str, company: str) -> str | None:
     return auth_core(strip_co(q) + (mark + " " + strip_co(note) if mark else ""), country)
 
 
+# reviewer/control: scope / negation words. Stripping one changes the question ("work outside the United States"),
+# so a company name containing one ("Outside Inc") is never stripped either: the question stays unresolved.
+_SCOPE_WORDS = frozenset([
+    "not", "no", "never", "none", "neither", "nor", "nowhere", "only", "except", "outside", "abroad", "overseas",
+    "elsewhere", "foreign", "beyond", "other", "another", "rather", "instead", "inside", "within", "without",
+    "across", "temporary", "temporarily", "permanent", "permanently", "contract", "domestic", "local", "locally",
+    "nationwide", "worldwide", "anywhere", "everywhere"])
+# ADR-0073 (control): place and generic words are never the company word taken from a board token
+_NOT_COMPANY_WORD = (frozenset(normalize(v) for v in US_STATES.values())
+                     | frozenset(w for v in US_STATES.values() for w in normalize(v).split() if len(w) >= 4)
+                     | frozenset(normalize(c) for c in _COUNTRY_PATTERNS)
+                     | frozenset(["office", "offices", "remote", "team", "teams", "careers", "career", "jobs", "hiring",
+                                  "global", "labs", "group", "hybrid", "onsite", "america", "americas", "europe",
+                                  "asia", "africa", "pacific", "north", "south", "east", "west", "central", "world",
+                                  "international", "national", "company", "headquarters"])
+                     | _SCOPE_WORDS)
+
+
+def company_names(label: str, company: str, aliases: Sequence[str] = ()) -> list[str]:
+    """ADR-0073: the posting company's names as a question may write them: the company, its configured aliases, and
+    one label word that is the start or end of a one-word board token ("Laminar" for the board "runlaminar"). That
+    word must be capitalized wherever it appears, at least 4 letters, at least half the token, and no
+    authorization, place, scope or generic word."""
+    names = [x for x in (company, *aliases) if x and normalize(x)]
+    token = normalize(company)
+    # reviewer: a company word is a proper noun - every occurrence in the label is capitalized
+    lower = {t.lower() for t in re.findall(r"[A-Za-z]+", label) if not t[0].isupper()}
+    if token and " " not in token:
+        for w in dict.fromkeys(normalize(label).split()):
+            if w in lower:
+                continue
+            if (len(w) >= 4 and w != token and 2 * len(w) >= len(token) and (token.startswith(w) or token.endswith(w))
+                    and w not in _AUTH_VOCAB and not question_countries(w)[1] and w not in _HUB_REGION
+                    and w not in _NOT_COMPANY_WORD):
+                names.append(w)
+    # control: a name that contains a scope word ("Outside Inc") is never stripped from the question
+    return [x for x in dict.fromkeys(names) if not set(normalize(x).split()) & _SCOPE_WORDS]
+
+
+# ADR-0073: "Do you require sponsorship to work in Canada or the United States?" - one sponsorship question about
+# either of the named countries. Yes when the profile requires sponsorship in at least one of them, No only when it
+# requires sponsorship in none; any missing fact leaves it with the owner. Never for authorization ("authorized to
+# work in A or B" could mean either or both) and never for "and".
+_EITHER_PLACE = re.compile(rf"\b{_PLACE} or (?:the )?{_PLACE}\b")
+
+
+def _either_country_sponsorship(f: FormField, named: list[str | None], profile: ProfileLike,
+                                fail: Any) -> tuple[bool, Any] | None:
+    if len(named) != 2 or None in named or (f.options and not _yes_no_options(f.options)):
+        return None
+    codes = [c for c in named if c]
+    text = _drop_examples(f.label, None)
+    q, _, note = text.partition("?")
+    if note.strip():
+        return None
+    n = normalize(q)
+    for c in codes:
+        rx = _country_name_rx(c)
+        if rx is None:
+            return None
+        n = rx.sub(_PLACE, n)
+    vocab = _AUTH_VOCAB_GENERIC | frozenset().union(*(VISA_LEXICON.get(c, frozenset()) for c in codes))
+    if (not _EITHER_PLACE.search(n) or n.count(_PLACE) != 2 or not all(t in vocab for t in n.split())
+            or _AUTH_WORDS.search(n) or not re.search(r"sponsor", n) or _SPONS_NEG.search(n)
+            or (_NOW_ONLY.search(n) and not _FUTURE.search(n))):
+        return None
+    facts = {c: country_fact(profile, c, "requires_sponsorship") for c in codes}
+    if any(v is True for v in facts.values()):
+        return True, "Yes"
+    if all(v is False for v in facts.values()):
+        return True, "No"
+    miss = [c for c, v in facts.items() if v is None]
+    return fail(UNKNOWN_FACT, "the profile has no requires_sponsorship fact for "
+                + " / ".join(f"[authorization.{c}]" for c in miss), country=miss[0], fact="requires_sponsorship")
+
+
 def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str | None = None,
-                 gaps: list[dict[str, Any]] | None = None, company: str = "") -> tuple[bool, Any]:
+                 gaps: list[dict[str, Any]] | None = None, company: str = "",
+                 aliases: Sequence[str] = (), reasons: dict[str, dict[str, str]] | None = None) -> tuple[bool, Any]:
+    """(handled, value) for a work-authorization / sponsorship question, from the structured per-country facts only.
+    Every unanswered path records a reason (ADR-0073) in `reasons` (field key -> {category, reason})."""
+    home = str(profile.lookup("home_country") or "").upper() or None
+
+    def fail(cat: str, why: str, *, country: str | None = None, fact: str | None = None,
+             gap: bool = False) -> tuple[bool, Any]:
+        if gaps is not None and (gap or country is not None):
+            gaps.append({"country": country, "fact": fact, "key": f.key})
+        if reasons is not None:
+            reasons.setdefault(f.key, {"category": cat, "reason": why})
+        return True, None
+
     status_opts = auth_legal_blocked(f)
     if status_opts and (_AUTH_LEGAL_BLOCK.search(normalize(f.label)) or not f.options or _yes_no_options(f.options)):
-        return True, None
+        return fail(UNKNOWN_FACT, "export-control / citizenship / permanent-residence wording: only the owner "
+                    "answers it (never from work-authorization facts)")
     # ADR-0062: a plain sponsorship question whose OPTIONS list legal statuses ("Citizen", "Permanent Resident",
     # "Visa Holder", "Require Sponsorship") may take only the sponsorship option, and only when sponsorship is required
     named = named_countries(f.label)
     job_place = bool(_JOB_PLACE.search(f.label))
+    if len(named) > 1 and not status_opts:
+        got = _either_country_sponsorship(f, named, profile, fail)
+        if got is not None:
+            return got
     if len(named) > 1 or (named and named[0] is None) or (named and job_place and named[0] != job_country):
-        if gaps is not None:                                 # several places, a region, or a contradiction
-            gaps.append({"country": None, "fact": None, "key": f.key})
-        return True, None
+        return fail(UNKNOWN_FACT, "the question names several countries, a region, or a country other than the "
+                    "job's: the owner answers it", gap=True)     # no reusable gap key for this context
     country = named[0] if named else job_country
     if country is None:                                      # place-less and the job's country is not confirmed
-        if gaps is not None:                                 # ADR-0040: no reusable gap key for this context
-            gaps.append({"country": None, "fact": None, "key": f.key})
-        return True, None
+        if names_us_adj(f.label):
+            return fail(UNKNOWN_FACT, "the question names the US only as the permit's / visa's country and the "
+                        "posting's country is not confirmed by its structured location data", gap=True)
+        return fail(UNKNOWN_FACT, ("the question asks about the job's country" if job_place else
+                                   "the question names no country")
+                    + " and the posting's country is not confirmed by its structured location data; [authorization] "
+                    "facts are scoped to a country", gap=True)
     core = auth_core(f.label, country, job_place=job_place and country == job_country)
-    home = str(profile.lookup("home_country") or "").upper() or None
-    if core is None and not named and country == job_country == home and company:
-        core = _home_job_core(f.label, country, company)
-    elif core is None and named == [home] and company and (
-            job_country == home or (job_country is None and home == "US" and names_us_in_full(f.label))):
-        # ADR-0062 (#54 explicit-country rule): "authorized to work lawfully in the United States for <company>" names
-        # the place itself, so an unconfirmed job country does not matter; a confirmed OTHER country still does
-        # ADR-0053: on a confirmed home-country job, a question that also names that country ("Will <company> need to
-        # sponsor you to work in the US?"): the company's name is not a place word
-        core = _home_job_core(f.label, country, company)
+    names = company_names(f.label, company, aliases) if company else []
+    explicit = named == [home] and (job_country == home or (job_country is None and home == "US"
+                                                            and names_us_in_full(f.label)))
+    if core is None and names and ((not named and country == job_country == home) or explicit):
+        # ADR-0053: on a confirmed home-country job the company's name is not a place word. ADR-0062 (#54): a
+        # question naming the home country in full ("authorized to work lawfully in the United States for
+        # <company>") names the place itself, so an unconfirmed job country does not matter; a confirmed OTHER
+        # country still does
+        for name in names:
+            if (core := _home_job_core(f.label, country, name)) is not None:
+                break
     if core is None:
         name = _ISO_NAME.get(country)
         if name and named:                                   # only the user's own [answers] pattern naming that country
-            return True, profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
-        return True, None
+            v = profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
+            if v is not None:
+                return True, v
+        if named == [home] and job_country not in (None, home):
+            return fail(UNKNOWN_FACT, f"the question names {home} but the posting is confirmed in {job_country}: "
+                        "the owner answers it")
+        return fail(TOOL_GAP, f"authorization/sponsorship wording not matched by the deterministic rule for "
+                    f"{country}; the profile's [authorization] facts were not applied")
     n = normalize(core)
     auth, req = country_fact(profile, country, "work_authorized"), country_fact(profile, country, "requires_sponsorship")
     cit = country_fact(profile, country, "citizen")
+    section = "[authorization]" if country == home else f"[authorization.{country}]"
 
     def missing(fact: str) -> tuple[bool, Any]:
-        if gaps is not None:
-            gaps.append({"country": country, "fact": fact, "key": f.key})
         if country != home and (name := _ISO_NAME.get(country)) and named:
-            return True, profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
-        return True, None                    # ADR-0050: never a fall-through to flat [answers]
+            v = profile.lookup(f"country_answer:{name}:{normalize(f.label)}")
+            if v is not None:
+                if gaps is not None:
+                    gaps.append({"country": country, "fact": fact, "key": f.key})
+                return True, v
+        return fail(UNKNOWN_FACT, f"the profile has no {section} {fact}", country=country, fact=fact)
     ma, ms = _AUTH_WORDS.search(n), re.search(r"sponsor|\bvisa\b", n)
     has_auth, has_sp = bool(ma), bool(ms)
     if ma and ms and ms.start() < ma.start():    # "require sponsorship ... for work authorization": a sponsorship question
         has_auth = False
     if status_opts and not (has_sp and not has_auth and req is True):
-        return True, None
+        return fail(UNKNOWN_FACT, "the options name a legal status (citizen / permanent resident / visa holder): "
+                    "only the owner picks one")
     if f.options and not _yes_no_options(f.options):
         if has_auth:
-            return True, pick_auth_option(f.options, auth, req, cit)
+            v = pick_auth_option(f.options, auth, req, cit)
+            return (True, v) if v is not None else fail(
+                UNKNOWN_FACT, f"no single option is consistent with the {section} facts")
         if has_sp and req is True:           # ADR-0062: ["Citizen", "Permanent Resident", "Visa Holder", "Require Sponsorship"]
             hit = [o for o in f.options if re.search(r"sponsor", o, re.IGNORECASE) and not _NO_SPONSOR.search(o.lower())]
-            return True, (hit[0] if len(hit) == 1 else None)
-        return (True, None) if has_sp else (False, None)
+            if len(hit) == 1:
+                return True, hit[0]
+            return fail(UNKNOWN_FACT, "several sponsorship options (e.g. which visa): the profile does not say which")
+        if has_sp:
+            return fail(UNKNOWN_FACT, f"no single option is consistent with the {section} facts")
+        return False, None
     if has_auth and has_sp:                  # compound: only the explicit "authorized ... without sponsorship" form
         if _SPONS_NEG.search(n) and auth is not None and req is not None:
             return True, _yn(auth and not req)
         if auth is None or req is None:
-            missing("work_authorized" if auth is None else "requires_sponsorship")
-        return True, None
+            fact = "work_authorized" if auth is None else "requires_sponsorship"
+            missing(fact)
+            return fail(UNKNOWN_FACT, f"the profile has no {section} {fact}")
+        return fail(TOOL_GAP, "compound authorization + sponsorship wording without an explicit \"without "
+                    "sponsorship\": not answered from two facts")
     if ck == "requires_sponsorship" or (has_sp and not has_auth):
         if _NOW_ONLY.search(n) and not _FUTURE.search(n) and req is not False:
             now = country_fact(profile, country, "requires_sponsorship_now")
@@ -964,7 +1114,9 @@ def _auth_answer(f: FormField, ck: str, profile: ProfileLike, job_country: str |
             return True, "Yes"
         if req is None:
             return missing("requires_sponsorship")
-        return True, ("No" if req is False else None)
+        return (True, "No") if req is False else fail(
+            UNKNOWN_FACT, "authorized now but requires sponsorship later: \"require work authorization\" is the "
+            "owner's call")
     if auth is None:
         return missing("work_authorized")
     return True, _yn(not auth if _AUTH_NEG.search(n) else auth)
@@ -1504,14 +1656,171 @@ def based_or_relocate_value(place: str, profile: ProfileLike, locations: Sequenc
 # Office 5 Days a Week?" (options Yes / No / "Yes, but require relocation"). Yes needs the [preferences] fact AND
 # either a confirmed residence match or willing_to_relocate; a relocation-qualified Yes is chosen on a confirmed
 # mismatch, a plain Yes only on a match.
-_OFFICE_Q = re.compile(r"\b(?:our|one of our|the company s)\b(?: \w+){0,4} offices?\b")
+_OFFICE_Q = re.compile(r"\b(?:our|one of our|the company s)\b(?: \w+){0,4} (?:offices?|hq|headquarters)\b")
+# ADR-0073: fewer than five office days a week is a hybrid schedule ("our HQ (4 days a week)")
+_HYBRID_DAYS = re.compile(r"\b(?:[1-4]|one|two|three|four) (?:days?|x) (?:a|per|each) week\b")
 _OFFICE_PICK = re.compile(r"\b(?:which|what|preferred|prefer|preference)\b.*\b(?:location|office)s?\b")
+
+
+# ADR-0073 (control): a leading residence condition ("If you are not local to the area, are you willing to
+# relocate?") is dropped only as one exact bare clause ending at the comma: "if you are not local / located / based
+# / living (in | near | to) <place>," where <place> is proper nouns plus a few place words. Anything else in the
+# clause (and, do, don't, want, ...) keeps it, and then no template matches.
+_IF_NOT_HERE = re.compile(r"^\s*if you(?: are|'re|’re| re) not (?:currently )?(?:local|located|based|living|residing)"
+                          r"(?P<rest>(?: (?:in|near|to|around))?(?: [^,?]{1,60})?),\s*", re.IGNORECASE)
+_OFFICE_NEG = re.compile(r"\b(?:not|no|never|unable|unwilling|cannot|refuse\w*|avoid\w*|rather|instead|except|mind|"
+                         r"dislike\w*|hate\w*|resent\w*|object\w*|resist\w*|oppos\w*|hesitat\w*|struggl\w*|"
+                         r"against|reluctant\w*|hardly|barely|only|nowhere|neither|nor|without|unless|"
+                         r"no longer|difficult\w*|problem\w*|concern\w*|averse|aversion|unhappy|uncomfortable|"
+                         r"uneasy|dread\w*|hostile|disinclin\w*|declin\w*|rule out|ruled out|deal ?breaker\w*|"
+                         r"unlikely|unsure|doubt\w*|quit\w*|show ?stopper\w*|walk away|deal ?killer\w*|"
+                         r"turn\w* down|prefer\w*|tolerat\w*|over)\b|\bn t\b")
+
+_ADJ = r"(?:willing|open|able|comfortable|ready|prepared|willing and able)"
+_BE = r"(?:(?:are you|would you be|will you be|are you currently) )"
+_FOR = (r"(?: for (?:this|the) (?:role|position|job|opportunity))?"
+        r"(?: if (?:hired|offered|selected)(?: (?:the|this|a) (?:role|position|job|offer))?)?")
+_DAYS = (r"(?: (?:at least )?(?:[1-5]|one|two|three|four|five)(?: (?:to|or) (?:[1-5]|two|three|four|five))? "
+         r"(?:days?|x) (?:a|per|each) week| full time)?")
+
+
+def _pl(name: str) -> str:
+    """A free place slot ("to New York", "in the Bay Area"); its words are checked after the match (_place_ok)."""
+    return rf"(?: (?:to|in|near|at) (?P<{name}>(?:\w+ ){{0,4}}\w+))?"
+
+
+_OFFICE_WORD = r"(?:offices?|hq|headquarters)"
+_PREF_TEMPLATES: list[tuple[str, re.Pattern[str], bool]] = [(k, re.compile(p + "$"), pos) for k, p, pos in (
+    # relocation
+    ("relocate", rf"{_BE}?{_ADJ} to relocat(?:e|ing|ion){_pl('a')}{_FOR}", False),
+    ("relocate", rf"(?:can|could|would|will) you relocate{_pl('a')}{_FOR}", False),
+    ("relocate", rf"would you consider relocating{_pl('a')}{_FOR}", False),
+    # "Are you currently based in the SF Bay Area, or ready to relocate?": only a Yes is decidable from the fact
+    ("relocate", (rf"are you (?:currently )?(?:based|located|living) in (?P<b>(?:\w+ ){{0,4}}\w+) or "
+                 rf"(?:are you )?{_ADJ} to relocate{_pl('a')}"),
+     True),
+    # hybrid
+    ("hybrid", (rf"{_BE}?{_ADJ} (?:to |with )?(?:work |working )?(?:in )?(?:a |the |our )?hybrid(?: work| working)?"
+               rf"(?: (?:schedule|arrangement|model|environment|policy|role|position|setup|basis|capacity))?{_DAYS}"
+               rf"{_pl('a')}{_FOR}"),
+     False),
+    ("hybrid", rf"{_BE}?{_ADJ} to commit to (?:the|our|a) hybrid (?:work )?(?:policy|schedule|model|arrangement){_FOR}",
+     False),
+    ("hybrid", rf"(?:can|could|will|would) you work (?:in )?(?:a )?hybrid(?: schedule)?{_DAYS}{_pl('a')}", False),
+    # on site / in office
+    ("onsite", (rf"{_BE}?{_ADJ} (?:to |with )?(?:work|working|be|being) (?:on ?site|in (?:the |our )?office|in person)"
+               rf"{_DAYS}{_pl('a')}{_DAYS}{_FOR}"),
+     False),
+    ("onsite", (rf"{_BE}?{_ADJ} to (?:work|working) (?:from|in|out of|at) (?:one of )?(?:our|the) "
+               rf"(?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}{_FOR}"),
+     False),
+    ("onsite", (rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:from|in|out of|at) "
+               rf"(?:one of )?(?:our|the) (?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}"),
+     False),
+    ("onsite", (rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:on ?site|in (?:the |our )?office|"
+               rf"in person){_DAYS}{_pl('a')}"),
+     False),
+)]
+_HINT_TAIL = re.compile(r"\s*\(?\s*(?:yes\s*/\s*no|y\s*/\s*n|yes or no)\s*\)?\s*[?.!:]*\s*$", re.IGNORECASE)
+
+
+# ADR-0073 (control): a place slot must resolve to a KNOWN place: the posting's own location / office strings, the
+# profile's city / region / country, or this small gazetteer (US states, countries, major metros). Generic words
+# ("the", "greater", "area", "office", "HQ", "campus") may surround it; "or" may join two places.
+_METROS = frozenset([
+    "bay area", "sf bay area", "san francisco bay area", "silicon valley", "sf", "la", "nyc", "dc", "washington dc",
+    "washington", "san jose", "oakland", "berkeley", "palo alto", "menlo park", "mountain view", "sunnyvale",
+    "santa clara", "cupertino", "redwood city", "san mateo", "south san francisco", "san francisco", "los angeles",
+    "santa monica", "torrance", "irvine", "san diego", "sacramento", "portland", "seattle", "bellevue", "redmond",
+    "new york", "new york city", "manhattan", "brooklyn", "jersey city", "hoboken", "boston", "cambridge",
+    "somerville", "chicago", "austin", "dallas", "houston", "san antonio", "denver", "boulder", "atlanta",
+    "philadelphia", "pittsburgh", "phoenix", "salt lake city", "miami", "tampa", "orlando",
+    "minneapolis", "detroit", "ann arbor", "nashville", "raleigh", "durham", "research triangle", "charlotte",
+    "baltimore", "columbus", "cleveland", "cincinnati", "indianapolis", "st louis", "saint louis", "kansas city",
+    "milwaukee", "madison", "las vegas", "albuquerque", "omaha", "new orleans", "richmond", "arlington",
+    "reston", "honolulu", "toronto", "vancouver", "montreal", "ottawa", "waterloo", "london", "dublin", "paris",
+    "berlin", "munich", "amsterdam", "zurich", "stockholm", "barcelona", "madrid", "lisbon", "tel aviv",
+    "bangalore", "bengaluru", "hyderabad", "pune", "singapore", "tokyo", "sydney", "melbourne", "mexico city",
+    "sao paulo"])
+_US_PLACE_NAMES = frozenset(["us", "usa", "united states", "america", "the us", "the united states"])
+_PLACE_FILLER = frozenset(["the", "greater", "area", "metro", "metropolitan", "office", "offices", "hq",
+                           "headquarters", "campus", "region", "downtown", "or"])
+# the posting's own place, named by reference ("If you are not local to the area, ...")
+_PLACE_REFS = frozenset(["the area", "this area", "the listed location", "this location", "the location"])
+
+
+def known_places(profile: ProfileLike | None, locations: Sequence[str] = ()) -> frozenset[str]:
+    """Normalized place phrases a slot may name: the gazetteer, the posting's location parts and the profile's
+    city / region / country."""
+    out = set(_METROS) | _US_PLACE_NAMES | {normalize(v) for v in US_STATES.values()} | set(_COUNTRY_PATTERNS)
+    for loc in locations:
+        for part in re.split(r"[,;|()]|\s[-–]\s", str(loc or "")):
+            if (p := normalize(_LOC_NOISE.sub(" ", normalize(part)))) and p not in _PLACE_FILLER:
+                out.add(re.sub(r"\s+", " ", p).strip())
+    if profile is not None:
+        for k in ("contact:city", "contact:region", "country"):
+            if (v := normalize(str(profile.lookup(k) or ""))):
+                out.add(v)
+    return frozenset(out)
+
+
+def _place_ok(text: str, raw: str, places: frozenset[str]) -> bool:
+    """Every word of the slot belongs to a known place phrase or is a generic place word, and at least one place is
+    named (or the slot is a reference to the posting's place). A two-letter state code counts only in capitals."""
+    t = re.sub(r"\s+", " ", text).strip()
+    if not t or t in _PLACE_REFS:
+        return bool(t)
+    codes = {c.lower() for c in re.findall(r"\b[A-Z]{2}\b", raw) if c in US_STATES}
+    toks = t.split()
+    best: list[int | None] = [0] + [None] * len(toks)          # places named in the best segmentation of toks[:i]
+    for i in range(len(toks)):
+        if best[i] is None:
+            continue
+        if toks[i] in _PLACE_FILLER:
+            best[i + 1] = max(best[i + 1] or 0, best[i])
+        for j in range(i + 1, min(len(toks), i + 5) + 1):
+            ph = " ".join(toks[i:j])
+            if ph in places or (j == i + 1 and ph in codes):
+                best[j] = max(best[j] or 0, best[i] + 1)
+    return bool(best[-1])
+
+
+_IF_NOT_PREFIX = re.compile(r"^if you (?:are|re) not ")
+
+
+def pref_template(label: str, places: frozenset[str] | None = None) -> tuple[str, bool] | None:
+    """ADR-0073 (control): (kind, positive_only) when the WHOLE preference question matches one closed positive
+    template (relocate / hybrid / onsite), else None. Any extra or unknown word, negation or aversion anywhere in
+    the label (the condition clause included), or a place slot that is not a known place -> None."""
+    places = places if places is not None else known_places(None)
+    raw = _HINT_TAIL.sub("", label.strip())          # a trailing "(Yes/No)" answer hint is not a negation
+    # control: the negation / aversion backstop runs on the whole label first; only the "not" of a leading
+    # "If you are not ..." condition is exempt
+    if _OFFICE_NEG.search(_IF_NOT_PREFIX.sub("", normalize(raw))):
+        return None
+    m = _IF_NOT_HERE.match(raw)
+    if m:
+        rest = normalize(re.sub(r"^\s*(?:in|near|to|around)\b", "", m.group("rest")))
+        if not _place_ok(rest, raw, places):
+            return None
+        raw = raw[m.end():]
+    n = normalize(raw)
+    if not n:
+        return None
+    for kind, rx, pos in _PREF_TEMPLATES:
+        hit = rx.match(n)
+        if hit and all(_place_ok(v, raw, places) for v in hit.groupdict().values() if v and v.strip()):
+            return kind, pos
+    return None
 
 
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
                   job_country: str | None, gap: Any) -> Any | None:
     n = normalize(f.label)
-    key = "open_to_onsite" if _RES_ONSITE.search(n) or ck == "open_to_onsite" else "open_to_hybrid"
+    if pref_template(f.label, known_places(profile, locations)) is None:   # ADR-0073 (control): closed templates only
+        return None
+    key = ("open_to_hybrid" if _HYBRID_DAYS.search(n) and not _RES_ONSITE.search(n)
+           else "open_to_onsite" if _RES_ONSITE.search(n) or ck == "open_to_onsite" else "open_to_hybrid")
     pref = _truth(profile.lookup("structured:" + key))
     if pref is None:
         gap("preferences." + key)
@@ -1630,17 +1939,32 @@ def _country_rx(iso: str | None) -> re.Pattern[str] | None:
     return re.compile(rf"\b(?:{pat})\b") if pat else None
 
 
+# ADR-0073: every word of a citizen question the [authorization] citizen fact may answer
+_CITIZEN_Q_VOCAB = frozenset(["are", "you", "a", "an", "the", "of", "us", "u", "s", "usa", "united", "states", "america",
+                              "american", "citizen", "currently", "do", "is", "your", "i", "am", "yes", "no", "please",
+                              "confirm", "indicate", "select", "whether"])      # no "or" / "not": polarity
+
+
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
               company_aliases: Sequence[str] = (), job_country: str | None = None,
-              gaps: list[dict[str, Any]] | None = None) -> tuple[bool, Any]:
+              gaps: list[dict[str, Any]] | None = None,
+              reasons: dict[str, dict[str, str]] | None = None,
+              job_locations: Sequence[str] = ()) -> tuple[bool, Any]:
     """(handled, value). handled=False -> continue with the generic profile lookup."""
     n = normalize(f.label)
     if ck == "located_in_us":
         return True, _residence_answer(f, profile)
     if ck == "us_citizen":
         if _AUTH_WORDS.search(n):
-            return _auth_answer(f, "work_authorized", profile, job_country, gaps, company)
+            return _auth_answer(f, "work_authorized", profile, job_country, gaps, company, company_aliases, reasons)
         if re.search(r"permanent resident|green card|national\b", n):
+            return True, None
+        if not all(t in _CITIZEN_Q_VOCAB for t in n.split()):
+            # ADR-0073: the citizen fact answers only a plain "Are you a US citizen?"; a certification ("I certify
+            # ... and will provide proof"), an export-control note or any other clause stays with the owner
+            if reasons is not None:
+                reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
+                    "citizenship certification / export-control wording: only the owner answers it")})
             return True, None
         v = profile.lookup("us_citizen")
         return (False, None) if v is None else (True, v)
@@ -1648,11 +1972,25 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
         home = str(profile.lookup("home_country") or "").upper() or None
         if n in ("visa", "visa status") and (job_country is None or job_country != home):
             return True, None                # ADR-0062: a bare "Visa" only on a confirmed home-country job
-        return _auth_answer(f, ck, profile, job_country, gaps, company)
+        return _auth_answer(f, ck, profile, job_country, gaps, company, company_aliases, reasons)
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
             return True, None
+        tpl = (pref_template(f.label, known_places(profile, job_locations)) if ck != "relocation_support"
+               else ("support", False))
+        if tpl is None or (ck == "willing_to_relocate") != (tpl[0] == "relocate"):
+            # ADR-0073 (control): only a closed positive template is answered; anything else is the owner's
+            if reasons is not None:
+                reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
+                    "preference wording outside the closed positive templates (it may be negated, conditional or "
+                    "compound): the owner answers it")})
+            return True, None
         v = profile.lookup(ck)
+        if tpl[1] and _truth(v) is not True:         # "based in X, or ready to relocate?": only a Yes is decidable
+            if v is None and gaps is not None:
+                gaps.append({"country": None, "fact": "preferences.willing_to_relocate", "key": f.key,
+                             "profile_fact": True})
+            return True, None
         if v is None and gaps is not None:                    # ADR-0053: [preferences] fact missing
             gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(ck, ck), "key": f.key,
                          "profile_fact": True})
@@ -1806,6 +2144,9 @@ class MapResult:
     # ADR-0040: per-country authorization facts a question needed but the profile lacks ({country, fact, key})
     profile_gaps: list[dict[str, Any]] = field(default_factory=list)
     no_gap_keys: set[str] = field(default_factory=set)     # ADR-0040: unconfirmed-country auth fields, never collected
+    # ADR-0073: why an unresolved legal-status / place / profile-fact field was not answered:
+    # field key -> {"category": "unknown_fact" | "tool_gap", "reason": "..."}
+    reasons: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 # ---- voluntary self-identification (ADR-0040) -----------------------------------------------------------
@@ -2333,6 +2674,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
     res = MapResult()
     eeo_keys: set[str] = set()
     gaps: list[dict[str, Any]] = []
+    reasons: dict[str, dict[str, str]] = {}
     originals: dict[str, FormField] = {}          # ADR-0055: fields mapped with residence options removed
 
     def ok(f: FormField, v: Any, src: str) -> None:
@@ -2442,7 +2784,8 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             ok(f, c, f"rule:{ck}")
             continue
         if ck in _SEMANTIC_KEYS:
-            handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases, job_country, gaps)
+            handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases, job_country, gaps,
+                                    reasons, job_locations)
             if handled:
                 if sv is None or sv == "":
                     res.unresolved.append(f)
@@ -2466,6 +2809,11 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             res.unresolved.append(f)
             if not flat_auth_allowed(f, profile, job_country):
                 gaps.append({"country": None, "fact": None, "key": f.key})
+                reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
+                    "authorization/sponsorship question whose country is not the confirmed home country: the owner "
+                    "answers it")})
+            reasons.setdefault(f.key, {"category": TOOL_GAP, "reason": (
+                "authorization/sponsorship wording not matched by a deterministic [authorization] rule")})
             continue
         if _names_channel(f):            # ADR-0050: a choice field naming a contact channel never takes a flat,
             res.unresolved.append(f)     # persona or alias-phrase answer (only optin:<channel>, via the rule above)
@@ -2505,9 +2853,31 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
     # authorization/sponsorship fields whose country is not confirmed: never a gap under any reusable key
     res.no_gap_keys = {g["key"] for g in gaps if not g["country"] and not g.get("profile_fact")
                        and g["key"] not in answered}
+    res.reasons = _unresolved_reasons(res.unresolved, reasons, gaps, eeo_keys)
     res.skipped_voluntary = [f for f in res.unresolved if not f.required
                              and (f.key in eeo_keys or _DEMOGRAPHIC_LABEL.search(f.label) or _VOLUNTARY_LABEL.search(f.label))]
     return res
+
+
+def _unresolved_reasons(unresolved: list[FormField], reasons: dict[str, dict[str, str]], gaps: list[dict[str, Any]],
+                        eeo_keys: set[str]) -> dict[str, dict[str, str]]:
+    """ADR-0073: a category and a non-empty reason for every unresolved legal-status, place or profile-fact field
+    (the rule's own reason first, then the profile fact it needed, then a generic owner-only reason)."""
+    out: dict[str, dict[str, str]] = {}
+    need = {g["key"]: g for g in gaps if g.get("fact")}
+    for f in unresolved:
+        if f.key in reasons:
+            out[f.key] = reasons[f.key]
+        elif (g := need.get(f.key)) is not None:
+            where = f"[authorization.{g['country']}] " if g.get("country") else ""
+            out[f.key] = {"category": UNKNOWN_FACT, "reason": f"the profile has no {where}{g['fact']}"}
+        elif f.key in eeo_keys:
+            continue
+        elif never_llm_legal_place(f) or fact_rule_field(f):
+            out[f.key] = {"category": UNKNOWN_FACT, "reason": (
+                "legal-status / place / profile-fact question: answered only by a deterministic profile rule or the "
+                "owner, and no rule matched this wording")}
+    return out
 
 
 # ---------------------------------------------------------------- education block (ADR-0029)

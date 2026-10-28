@@ -25,3 +25,13 @@ refs were fine.
 Pasted company URLs resolve to the real board. A resolution costs one page GET plus up to 6 small API
 GETs (cached by the HTTP layer). Refs and greenhouse.io URLs never fetch a page. The browser driver,
 frame resolution and fill/submit logic are unchanged.
+
+## Verify
+1. `uv run pytest -q tests/test_greenhouse_board_from_page_116.py`, then the full `uv run pytest -q`.
+2. Dry run, never live: `applywise run --dry-run --source links --link <company careers URL with ?gh_jid=>`. The
+   plan should name the real board in the ref and must not end in "job not found".
+
+## Revert
+Revert the squash commit of this change (#117). No data migration is needed. The per-host board cache is
+in-process only, and the HTTP cache entries it created are ordinary GET responses that expire on their own. After a
+revert, pasted `?gh_jid=` URLs go back to the host-label guess.

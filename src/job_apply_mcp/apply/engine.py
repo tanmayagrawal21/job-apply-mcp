@@ -513,7 +513,7 @@ class ApplyEngine:
             audit.setdefault("assumed", {}).update({x.field.key: {"rule": x.answer.source, "why": x.answer.rationale or ""}
                                                     for x in drafted})
         out = self._finalize(ref, ctx, gate, answers, long_, tasks, audit, hints=mapped.hints, voluntary=voluntary,
-                             profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys)
+                             profile_gaps=mapped.profile_gaps, no_gap_keys=mapped.no_gap_keys, reasons=mapped.reasons)
         if assumptions or drafted:
             out.profile_gaps += self._track_assumed(ref, ctx, assumptions + drafted)
         return out
@@ -700,7 +700,8 @@ class ApplyEngine:
     def _finalize(self, ref: str, ctx: _Ctx, gate: GateResult, answers: list[Answer], long_: list[FormField],
                   tasks: list[dict[str, Any]], audit: dict[str, Any], *, hints: dict[str, dict[str, Any]] | None = None,
                   voluntary: dict[str, str] | None = None,
-                  profile_gaps: list[dict[str, Any]] | None = None, no_gap_keys: set[str] | None = None) -> PlanOut:
+                  profile_gaps: list[dict[str, Any]] | None = None, no_gap_keys: set[str] | None = None,
+                  reasons: dict[str, dict[str, str]] | None = None) -> PlanOut:
         """Cache the plan, issue the server-held approval, and list unresolved fields as client_tasks.
         Only `answers` are ever approved/submitted; drafts inside client_tasks never are (ADR-0041)."""
         hints = hints or {}
@@ -713,7 +714,12 @@ class ApplyEngine:
                     and "conflict" not in hints.get(f.key, {})):     # ADR-0064: a conflict is always shown
                 continue
             unresolved_keys.append(f.key)
-            tasks.append(self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None))
+            t = self._task(f, ctx, {"known": hints[f.key]} if f.key in hints else None)
+            if not t.get("reason"):          # ADR-0073: every unresolved field says why, with a category
+                why = (reasons or {}).get(f.key) or {"category": "unknown_fact", "reason": (
+                    "no profile fact or deterministic rule answers this field")}
+                t["reason"], t["category"] = why["reason"], why["category"]
+            tasks.append(t)
         unresolved_keys = list(dict.fromkeys(unresolved_keys + [t["key"] for t in tasks]))
         # ADR-0040 x ADR-0047: a per-country authorization gap is recorded with its country
         # ("authorization.CA.requires_sponsorship"), never as the unscoped home-country key
