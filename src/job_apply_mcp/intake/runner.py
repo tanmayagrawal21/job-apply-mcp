@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .. import consent as _consent
 from ..config import state_path
 from ..core.concurrency import bounded_gather
 from ..core.models import Decision
@@ -496,7 +497,9 @@ class IntakeRunner:
         manual = not dry and not self.s.apply.auto_approve_active
 
         async def one(c: Cand) -> None:
-            if manual:   # same rule as apply_batch: a live submit needs its approval first (ADR-0021)
+            # same rule as apply_batch: a live submit needs its approval first (ADR-0021), unless an owner-minted
+            # consent window covers approve_submissions (ADR-0048). Read-only here; engine.submit meters each use.
+            if manual and _consent.active(self.s, "approve_submissions") is None:
                 c.status = "needs_human"
                 c.why = f"awaiting_approval: run `job-apply-mcp approve {c.approval_id}`, then submit"
                 return
@@ -561,7 +564,7 @@ class IntakeRunner:
         notes: list[str] = []
         if self.s.dry_run:
             notes.append("global dry_run is on: a live run is refused until dry_run=false in the user config")
-        if not self.s.apply.auto_approve_active:
+        if not self.s.apply.auto_approve_active and _consent.active(self.s, "approve_submissions") is None:
             notes.append("approval_mode needs a human: a live run hands each one off for approval "
                          "(needs_human, awaiting_approval)")
         st: dict[str, Any] = {}

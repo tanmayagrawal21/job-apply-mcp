@@ -113,6 +113,22 @@ unattended action covered right now?"
 - Before the phrase prompt, the TTY confirmation prints `Scopes granted (N): ...`, each granted scope with what it
   unlocks, and the scopes not granted. The default stays one consent for every scope; `--scopes` narrows it.
 
+## Amendment (2026-10-28): batch runs honour the window
+- Bug: `run_applications` / `applywise run` (`IntakeRunner._submit_all`) and `apply_batch` short-circuited every
+  live item to `awaiting_approval` whenever `auto_approve_active` was false, so `engine.submit` (which honours the
+  window via `consent.use`) was never reached and a consent window was ignored. The dry-run `live_preview`
+  warned "approval_mode needs a human" even with a window open.
+- Fix: before short-circuiting, both call the read-only `consent.active(settings, "approve_submissions")` (no use
+  consumed, no audit line). With a covering window the item goes to `engine.submit`, which still meters one use
+  per submission (`--max`); once the window is exhausted, expired or revoked, the read-only check returns `None`
+  and the remaining items get `awaiting_approval` exactly as before (and `engine.submit` refuses on its own if
+  the window closes between the check and the use). The `live_preview` warning is dropped only while a window is
+  open. No window: behaviour unchanged. Dry runs never consult the window.
+- Verify: `uv run pytest tests/test_consent_honoured_by_runs.py` (active window -> submit called; no window ->
+  awaiting_approval; exhausted window -> rest awaiting_approval; dry run unchanged; same for `apply_batch`;
+  preview warning tracks the window).
+- Revert: revert the PR; batch runs again ignore the window (single `submit_application` is unaffected).
+
 ## Consequences
 - An unattended run needs one terminal command per period; review happens afterwards (`list_applications`, the
   approvals audit `consent:<id>` actor, `consent_audit.jsonl`).
