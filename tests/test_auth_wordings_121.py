@@ -275,6 +275,12 @@ def test_whitelisted_adverbs_still_answer(adverb):
     assert run("Are you able to work onsite?", p)[0] == "Yes"
 
 
+def test_leading_residence_condition_is_not_a_negation():
+    p = view(prefs={"willing_to_relocate": True})
+    assert run("If you are not local to the area, are you willing to relocate?", p)[0] == "Yes"
+    unresolved("If you are not local to the area, are you not willing to relocate?", p)
+
+
 def test_scope_word_company_name_is_never_stripped():
     # control: a company literally named "Outside" must not strip its own name from "work Outside the US"
     assert company_names("Will you require sponsorship to work Outside the United States?", "Outside Inc") == []

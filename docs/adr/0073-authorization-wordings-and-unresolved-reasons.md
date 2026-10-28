@@ -52,7 +52,8 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   or an aversion word now stays with the owner. The words are: not, no, never, unable, unwilling, cannot,
   refuse, avoid, rather, instead, except, mind, dislike, hate, resent, object, resist, oppose, hesitate,
   struggle, against, reluctant, hardly, barely, only, nowhere, neither, nor, without, unless, no longer,
-  difficult, problem, concern, and "n't". This is defence in depth for wording that is not a closed list.
+  difficult, problem, concern, and "n't". This is defence in depth for wording that is not a closed list. A leading residence condition ("If you are not
+  local to the area, are you willing to relocate?") is not counted as a negation.
 - **Citizen fact**: answers only a plain "Are you a US citizen?" (every word is citizen-question wording, and
   there is no "not" or "or"). A
   certification ("I certify that I am a US citizen and will provide proof"), an export-control note or any

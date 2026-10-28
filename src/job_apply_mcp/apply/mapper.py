@@ -1671,6 +1671,12 @@ _OFFICE_NEG = re.compile(r"\b(?:not|no|never|unable|unwilling|cannot|refuse\w*|a
                          r"no longer|difficult\w*|problem\w*|concern\w*)\b|\bn t\b")
 
 
+# ADR-0073: a leading residence condition ("If you are not local to the area, are you willing to relocate?") does
+# not negate the question that follows it
+_IF_NOT_HERE = re.compile(r"^if you (?:are|re) not (?:currently )?(?:local|located|based|living|residing)\b(?: \w+){0,6}? "
+                          r"(?=(?:are|would|will|can|could|do) you\b)")
+
+
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
                   job_country: str | None, gap: Any) -> Any | None:
     n = normalize(f.label)
@@ -1832,7 +1838,7 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
             return True, None
-        if _OFFICE_NEG.search(n) and ck != "relocation_support":   # ADR-0073 (control): polarity
+        if _OFFICE_NEG.search(_IF_NOT_HERE.sub("", n)) and ck != "relocation_support":   # ADR-0073: polarity
             if reasons is not None:
                 reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
                     "negated or aversive preference wording: the owner answers it")})
