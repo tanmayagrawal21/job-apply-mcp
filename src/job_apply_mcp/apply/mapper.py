@@ -1844,24 +1844,38 @@ def ack_template(label: str, places: frozenset[str] | None = None) -> tuple[str,
     if not m:
         return None
     slot = _ack_slot(m.group("p"))
-    if slot in _PLACE_REFS or not _place_ok(slot, raw, places):
-        return None
+    if any(re.search(rf"\b{re.escape(r)}\b", slot) for r in _PLACE_REFS) or not _place_ok(slot, raw, places):
+        return None     # a reference ("the area") anywhere in the list stays unresolved
     named = _place_phrases(slot, raw, places)
     if not named:
         return None
     return ("hybrid" if m.group("mode") == "hybrid" else "onsite"), named
 
 
+def _state_names(v: str) -> set[str]:
+    """A US state as its normalized code and name ("IL" / "Illinois" -> {"il", "illinois"}); empty when not a state."""
+    n = normalize(v)
+    for code, name in US_STATES.items():
+        if n in (code.lower(), normalize(name)):
+            return {code.lower(), normalize(name)}
+    return set()
+
+
 def _ack_place_fit(profile: ProfileLike, named: Sequence[str]) -> bool:
-    """The profile's [contact] city or region is one of the acknowledged places (a state code also by its name)."""
-    mine: set[str] = set()
-    for k in ("contact:city", "contact:region"):
-        v = str(profile.lookup(k) or "").strip()
-        if v:
-            mine.add(normalize(v))
-            if len(v) == 2 and v.upper() in US_STATES:
-                mine.add(normalize(US_STATES[v.upper()]))
-    return bool(mine & set(named))
+    """The profile's [contact] city is one of the acknowledged places. A region / state match alone is not commuting
+    distance ("Chicago, IL" for a Springfield, IL profile; "New York" for an upstate NY profile), so it never counts.
+    When the label qualifies the city with a state ("Springfield, MO"), that state must be the profile's region."""
+    city = normalize(str(profile.lookup("contact:city") or "").strip())
+    if not city:
+        return False
+    mine = _state_names(str(profile.lookup("contact:region") or ""))
+    for i, ph in enumerate(named):
+        if ph != city:
+            continue
+        nxt = _state_names(named[i + 1]) if i + 1 < len(named) else set()
+        if not nxt or nxt & mine:
+            return True
+    return False
 
 
 def pref_template(label: str, places: frozenset[str] | None = None) -> tuple[str, bool] | None:

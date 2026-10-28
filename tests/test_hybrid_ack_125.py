@@ -39,8 +39,26 @@ def test_chime_like_wording_answers_yes():
 def test_profile_city_among_the_places_needs_no_relocation():
     label = "Do you acknowledge that this is a hybrid role based in Springfield or Chicago?"
     assert run(label, view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
-    # region (state code IL) by its name
-    assert run("Do you acknowledge that this is a hybrid role based in Illinois?", view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
+    # city plus the profile's state, when the label gives both
+    assert run("Do you acknowledge that this is a hybrid role based in Springfield, IL?",
+               view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
+    assert run("Do you acknowledge that this is a hybrid role based in Springfield, Illinois?",
+               view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
+
+
+@pytest.mark.parametrize("label", [
+    # a region / state match alone is not commuting distance
+    "Do you acknowledge that this is a hybrid role based in Illinois?",
+    "Do you acknowledge that this is a hybrid role based in Chicago, IL?",
+    "Do you acknowledge that this is a hybrid role based in Chicago, Illinois?",
+    # same city name in another state
+    "Do you acknowledge that this is a hybrid role based in Springfield, MO?",
+    "Do you acknowledge that this is a hybrid role based in Springfield, Missouri or Chicago, IL?",
+])
+def test_region_match_alone_is_not_local(label):
+    why = unresolved(label, view(prefs=HYBRID_NO_MOVE), locations=LOCS)
+    assert "willing_to_relocate" in why["reason"]
+    assert run(label, view(prefs=ALL_YES), locations=LOCS)[0] == "Yes"     # relocation still answers Yes
 
 
 @pytest.mark.parametrize("prefs", MIXED)
@@ -97,6 +115,8 @@ def test_range_to_five_days_stays_with_the_owner():
     "Do you acknowledge that this is a hybrid role based in Gotham?",
     "Do you acknowledge that this is a hybrid role based in Chicago or Gotham?",
     "Do you acknowledge that this is a hybrid role based in the area?",
+    "Do you acknowledge that this is a hybrid role based in Chicago or the area?",
+    "Do you acknowledge that this is a hybrid role based in this location or Chicago?",
     "Do you acknowledge that this is a hybrid role based anywhere?",
 ])
 def test_negated_compound_and_unknown_place_stay_unresolved(label, prefs):

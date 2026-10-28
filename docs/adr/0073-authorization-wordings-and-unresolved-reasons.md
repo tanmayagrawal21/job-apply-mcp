@@ -126,11 +126,14 @@ located) (in | at | out of) <places>". After that comes nothing, or one of two o
 office N days a week", or "(with | requiring) N days a week (in office | onsite | in person)".
 - `_OFFICE_NEG` runs on the whole label first, and no condition clause is accepted. `<places>` is a list joined by
   "and", "or" or "and/or". Every word must pass `_place_ok()` against `known_places()`. A reference ("the area")
-  or any other word leaves the question unresolved, so a compound tail ("and agree to a background check") fails.
+  anywhere in the list ("Chicago or the area"), or any other word, leaves the question unresolved, so a compound
+  tail ("and agree to a background check") fails.
 - The fact comes from `schedule_fact()`: hybrid reads `open_to_hybrid`, five days reads `open_to_onsite`, a range
   that reaches five days is the owner's, and onsite / in office / in person reads `open_to_onsite`.
-- The answer is Yes only when that fact is true AND either the profile's [contact] city or region (a state code
-  also by its name) is one of the named places, or `willing_to_relocate` is true. Anything else is unresolved
+- The answer is Yes only when that fact is true AND either the profile's [contact] city is one of the named places,
+  or `willing_to_relocate` is true. A region or state match alone is not commuting distance ("Chicago, IL" for
+  another Illinois city), so it never counts. When the label qualifies the city with a state ("Springfield, MO"),
+  that state must be the profile's region. Anything else is unresolved
   (`unknown_fact`, with a reason that names the facts), and a missing fact is a profile gap. The rule never
   answers No, because a mixed profile cannot be split (the same as the conditional office rule of the #122
   follow-up, #124).
