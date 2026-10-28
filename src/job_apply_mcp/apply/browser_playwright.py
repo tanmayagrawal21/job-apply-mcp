@@ -670,9 +670,17 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   // TOGGLE STATE (#126): Ashby draws a Yes/No question as two aria-pressed buttons in front of ONE hidden checkbox
   // that is checked only for "Yes" (unchecked for "No" and for "not answered"). The answer is the pressed button in
   // the checkbox's own container (a container holding no other question's choice inputs).
-  const pressed = members => members.some(m => { const c = m.parentElement;
-    if (!c || [...c.querySelectorAll(CH)].some(x => !members.includes(x))) return false;
-    return !!c.querySelector('button[aria-pressed=true], [role=button][aria-pressed=true]'); });
+  // Follow-up to #129: the rule applies ONLY to a lone HIDDEN backing checkbox whose own container holds a genuine
+  // Yes/No pair: exactly two buttons, both with yes/no text or both carrying aria-pressed, one of them pressed. Any
+  // visible required checkbox (a consent box included) is judged by its own checked state, never by a nearby button.
+  const YESNO = /^\\s*(?:yes|no)\\s*$/i;
+  const pressed = members => { if (members.length !== 1) return false;
+    const m = members[0], c = m.parentElement;
+    if (m.type !== 'checkbox' || vis(m) || !c || [...c.querySelectorAll(CH)].some(x => x !== m)) return false;
+    const btns = [...c.querySelectorAll('button, [role=button]')];
+    if (btns.length !== 2) return false;
+    if (!btns.every(b => YESNO.test(b.textContent || '')) && !btns.every(b => b.hasAttribute('aria-pressed'))) return false;
+    return btns.some(b => b.getAttribute('aria-pressed') === 'true'); };
   const emit = (members, container, text, idCands, consent, headEl) => {
     if (members.some(m => m.checked) || pressed(members)) return;
     const names = members.flatMap(m => [m.name, m.id]);

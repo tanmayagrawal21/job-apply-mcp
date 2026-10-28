@@ -44,3 +44,56 @@ async def test_committed_toggle_verifies_outside_ashby(drv, ats, want):  # noqa:
     assert await drv._fill(pg, ATS[ats], Q, want)
     assert await drv._verify(pg, [(Q, want)], ATS[ats]) == []
     assert await drv._verify(pg, [(Q, not want)], ATS[ats]) == ["q-office"]
+
+
+# 2. _EMPTY_REQUIRED_JS: "answered by a pressed button" applies only to a genuine Yes/No pair next to a hidden backing
+#    checkbox. A required checkbox is judged by its own checked state, whatever buttons sit beside it.
+
+def _box(inner: str) -> str:
+    return f'<html><body><form><div class="form-field">{inner}</div></form></body></html>'
+
+
+CONSENT = ('<input type="checkbox" id="c-privacy" name="c-privacy" required>'
+           '<label for="c-privacy">I have read the Northwind Robotics privacy notice *</label>')
+
+
+@pytest.mark.parametrize("ats", ["lever", "greenhouse", "ashby"])
+async def test_consent_box_next_to_unrelated_pressed_button_is_empty(drv, ats):  # noqa: F811
+    pg = await _page(drv, _box(CONSENT + '<button type="button" aria-pressed="true">Remember me</button>'), ats=ats)
+    assert [r["id"] for r in await drv._empty_required(pg)] == ["c-privacy"]
+
+
+async def test_visible_box_next_to_pressed_yes_no_pair_is_still_judged_by_itself(drv):  # noqa: F811
+    pair = '<button aria-pressed="true">Yes</button><button aria-pressed="false">No</button>'
+    pg = await _page(drv, _box(CONSENT + pair), ats="ashby")
+    assert [r["id"] for r in await drv._empty_required(pg)] == ["c-privacy"]
+
+
+HIDDEN = '<label>Do you hold a forklift licence? *</label><input type="checkbox" name="q-lic" style="display:none">'
+
+
+@pytest.mark.parametrize("buttons", [
+    '<button aria-pressed="true">Show more</button>',                                   # one unrelated button
+    ('<button aria-pressed="true">Yes</button><button aria-pressed="false">No</button>'
+     '<button aria-pressed="false">Maybe</button>'),                                    # not a pair
+    '<button aria-pressed="true">Expand</button><button>Collapse</button>',             # neither yes/no nor aria pair
+])
+async def test_hidden_box_without_a_genuine_pair_is_empty(drv, buttons):  # noqa: F811
+    pg = await _page(drv, _box(HIDDEN + buttons), ats="ashby")
+    assert [r["id"] for r in await drv._empty_required(pg)] == ["q-lic"]
+
+
+@pytest.mark.parametrize("buttons", [
+    '<button aria-pressed="false">Yes</button><button aria-pressed="true">No</button>',
+    ('<button data-option="yes" aria-pressed="true"> yes </button>'
+     '<button data-option="no" aria-pressed="false">no</button>'),
+])
+async def test_hidden_box_with_a_pressed_yes_no_pair_is_answered(drv, buttons):  # noqa: F811
+    pg = await _page(drv, _box(HIDDEN + buttons), ats="ashby")
+    assert await drv._empty_required(pg) == []
+
+
+async def test_hidden_box_with_an_unpressed_yes_no_pair_is_empty(drv):  # noqa: F811
+    pair = '<button aria-pressed="false">Yes</button><button aria-pressed="false">No</button>'
+    pg = await _page(drv, _box(HIDDEN + pair), ats="ashby")
+    assert [r["id"] for r in await drv._empty_required(pg)] == ["q-lic"]
