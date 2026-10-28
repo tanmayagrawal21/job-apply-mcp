@@ -88,6 +88,9 @@ def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | Non
     g = guide(st)
     if st in NO_RETRY or state in NO_RETRY:
         window = False
+    if st == "incomplete" and cat == "tool_gap" and not window:   # #126: planned answers that did not commit
+        g = {"next_action": "request_feature",
+             "hint": "Planned answers did not commit on the page (tool_gap). Do not ask the user; file request_feature."}
     if cat == "tool_gap" and window and g.get("next_action") in HUMAN_ACTIONS:
         a, h = _GAP_IN_WINDOW.get(st, _GAP_IN_WINDOW[""])
         g = {"next_action": a, "hint": h}
