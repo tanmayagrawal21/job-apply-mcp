@@ -36,6 +36,9 @@ _UNKNOWN = re.compile(
     r"\bunresolved\b|no explicit profile answer|profile (?:gap|question|answer)|needs_input|"
     r"not approved yet|prose (?:left )?open|essay|client_tasks|ask the user|"
     r"(?:stayed|still|left) empty|required fields?|conflict|disagree|candidate journal", re.IGNORECASE)
+# #126 (ADR-0056 amendment): an `incomplete` row whose empty fields the plan had ANSWERED (marked with this phrase in the label)
+# and no `unresolved` field is the tool's gap: there is nothing for the user to supply
+NOT_COMMITTED = "planned answer not committed on the page"
 # statuses whose reason is, by construction, an answer the tool does not have (ADR-0067 control review)
 _UNKNOWN_STATUSES = frozenset({"needs_input", "needs_review", "incomplete"})
 # steps an active consent scope automates: (pattern, scope)
@@ -85,6 +88,8 @@ def categorize(status: str | None, detail: Any, settings: Any = None, *, unresol
         return c
     first = detail[0] if isinstance(detail, (list, tuple)) and detail else detail
     if str(first or "").startswith("tool_gap:"):   # ADR-0074: a reason the tool itself tagged as its own gap
+        return TOOL_GAP
+    if st == "incomplete" and NOT_COMMITTED in text:      # every empty field was planned: nothing to ask
         return TOOL_GAP
     if st in _UNKNOWN_STATUSES:
         return UNKNOWN_FACT

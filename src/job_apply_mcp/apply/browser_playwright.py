@@ -29,6 +29,7 @@ from .. import consent
 from ..config import Settings
 from ..core import registry
 from ..core.captcha_report import summarize as summarize_captcha
+from ..core.handoff import NOT_COMMITTED
 from ..core.models import ApplicationForm, FieldKind, FormField, SubmitResult
 from ..core.secrets import redact
 from .closed import CHALLENGE_REASON, challenge_label, closed_text
@@ -519,6 +520,32 @@ _MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
     if (own.length) rows = own; }
   if (!CONS.test(fl)) rows = rows.filter(r => !CONS.test(r.text) && !CONS.test(r.name) && !CONS.test(r.value));
   return rows; }"""
+def incomplete_rows(empty: list[dict[str, Any]], planned: set[str], demo_bad: list[str],
+                    native: list[str]) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """#126: plan and submit agree on an `incomplete` result. Returns (labels for the detail, unresolved, tasks).
+    A required field the plan ANSWERED but the page still shows empty is the tool's gap: marked NOT_COMMITTED and
+    never listed as unresolved. Every other row (a DOM-only field the plan never saw, a self-ID read-back mismatch,
+    a native-validation error; with or without an id) is listed in `unresolved` and as a task with its category, so
+    a mix classifies as unknown_fact (ADR-0067 ordering: structure before the NOT_COMMITTED wording)."""
+    labels: list[str] = []
+    open_: list[tuple[str, str, str]] = []
+    for e in empty:
+        if e.get("id") and e["id"] in planned:
+            labels.append(f"{e['label']} ({NOT_COMMITTED})")
+        else:
+            labels.append(e["label"])
+            open_.append((e.get("id") or e["label"], e["label"], "required field the plan did not see"))
+    for lab in demo_bad:
+        labels.append(f"{lab} (self-ID read-back mismatch)")
+        open_.append((labels[-1], labels[-1], "self-ID answer did not read back"))
+    for lab in native:
+        labels.append(f"{lab} (native validation)")
+        open_.append((labels[-1], labels[-1], "the form's own validation rejects it"))
+    open_ = open_[:20]
+    tasks = [{"key": k, "label": lab[:80], "category": "unknown_fact", "reason": why} for k, lab, why in open_]
+    return labels, [k for k, _, _ in open_], tasks
+
+
 # Every visible required control that is still empty (ADR-0039). Text inputs / react-selects: required markup or the
 # API marks them required. Radio/checkbox groups and sets (wrapped or not; unnamed boxes grouped by field container)
 # and native selects follow the INVERTED rule: nothing selected -> gap, unless the API form marks that exact field
@@ -640,8 +667,14 @@ _EMPTY_REQUIRED_JS = """(a) => { a = a || {}; const OPTK = [...new Set(a.opt || 
   // that exact field required:false (matched by name/id). Unknown or unmatched -> required.
   // ASHBY (ADR-0056): the [data-field-path] entry is the container and its .ashby-application-form-question-title
   // (or legend) the title; a required title carries a hashed `_required_<hash>` class (caught by REQ_CLS).
+  // TOGGLE STATE (#126): Ashby draws a Yes/No question as two aria-pressed buttons in front of ONE hidden checkbox
+  // that is checked only for "Yes" (unchecked for "No" and for "not answered"). The answer is the pressed button in
+  // the checkbox's own container (a container holding no other question's choice inputs).
+  const pressed = members => members.some(m => { const c = m.parentElement;
+    if (!c || [...c.querySelectorAll(CH)].some(x => !members.includes(x))) return false;
+    return !!c.querySelector('button[aria-pressed=true], [role=button][aria-pressed=true]'); });
   const emit = (members, container, text, idCands, consent, headEl) => {
-    if (members.some(m => m.checked)) return;
+    if (members.some(m => m.checked) || pressed(members)) return;
     const names = members.flatMap(m => [m.name, m.id]);
     if (apiOptional(idCands.concat(names))) return;
     if (ashbyOptional(members, idCands, names)) return;
@@ -1173,15 +1206,14 @@ class PlaywrightDriver(VerificationMixin):
                 if f.key in ids:
                     await self._fill(page, ats, f, v)
             empty = await self._empty_required(page)
-        empty += [{"id": "", "label": f"{lab} (self-ID read-back mismatch)"} for lab in demo_bad]
         known = {e["label"] for e in empty}
-        empty += [{"id": "", "label": f"{lab} (native validation)"} for lab in await self._native_invalid(page)
-                  if lab not in known]
-        if empty:                                   # never submit (or call a dry run complete) with required gaps
-            labels = [e["label"] for e in empty]
+        native = [lab for lab in await self._native_invalid(page) if lab not in known]
+        if empty or demo_bad or native:             # never submit (or call a dry run complete) with required gaps
+            planned = {f.key for f, v in steps if v is not None and v != ""}
+            labels, unresolved, tasks = incomplete_rows(empty, planned, demo_bad, native)
             ev = await self._save_evidence(page, ref, "incomplete", extra={"required_empty": labels})
-            return SubmitResult(ref=ref, status="incomplete", via="browser",
-                                detail=f"required fields still empty: {labels[:10]}{ev}")
+            return SubmitResult(ref=ref, status="incomplete", via="browser", unresolved=unresolved,
+                                client_tasks=tasks, detail=f"required fields still empty: {labels[:10]}{ev}")
         if self.b.presubmit_validation:
             errs = await self._validation_errors(page)
             if errs:
@@ -2358,22 +2390,52 @@ class PlaywrightDriver(VerificationMixin):
                     return await loc.is_checked() == want
             except Exception:
                 pass
+        group = await self._bool_group(page, f)
+        pat = re.compile(r"^\s*yes\s*$" if want else r"^\s*no\s*$", re.IGNORECASE)
+        for role in ("radio", "button"):
+            btn = group.get_by_role(role, name=pat)
+            if await btn.count():
+                # #126: never click a toggle that is already in the wanted state (a second click can clear it), and
+                # wait for React to commit the pressed state before judging a click (a stale read caused a re-click)
+                if await self._btn_state(btn.first):
+                    return True
+                for attempt in range(2):           # bounded: at most two real clicks per field
+                    # control review on #129: a commit that lands after the wait would be toggled OFF by a blind
+                    # second click, so the state is re-read (a second full wait) right before it
+                    if attempt and await self._await_pressed(btn.first):
+                        return True
+                    await btn.first.click()
+                    st = await self._await_pressed(btn.first)
+                    if st is None or st:
+                        return True
+                return False
+        return False
+
+    async def _bool_group(self, page, f: FormField):
+        """The container of one Yes/No question: the field's own [data-field-path] entry (Ashby) when present, so a
+        sibling toggle with similar wording can never be read or clicked; else the labelled group / question."""
+        try:
+            own = page.locator(f'[data-field-path="{f.key}"]') if f.key and '"' not in f.key else None
+            if own is not None and await own.count() == 1:
+                return own
+        except Exception:
+            pass
         label = re.sub(r"\s*\*\s*$", "", f.label).strip()
         group = page.get_by_role("group", name=re.compile(re.escape(label), re.IGNORECASE))
         if not await group.count():
             group = page.locator("fieldset, [role=group], div[class*=question], div[class*=field]").filter(
                 has_text=label).last
-        pat = re.compile(r"^\s*yes\s*$" if want else r"^\s*no\s*$", re.IGNORECASE)
-        for role in ("radio", "button"):
-            btn = group.get_by_role(role, name=pat)
-            if await btn.count():
-                for _ in range(2):                 # real click, then confirm the pressed/checked state
-                    await btn.first.click()
-                    st = await self._btn_state(btn.first)
-                    if st is None or st:
-                        return True
-                return False
-        return False
+        return group
+
+    async def _await_pressed(self, btn, timeout_s: float = 1.5) -> bool | None:
+        """Pressed/checked state of `btn`, polled until it reads true or `timeout_s` passes (React commits the
+        aria-pressed change after the click event). None = the control exposes no state."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            st = await self._btn_state(btn)
+            if st is None or st or time.monotonic() >= deadline:
+                return st
+            await asyncio.sleep(0.1)
 
     @staticmethod
     async def _btn_state(btn) -> bool | None:
@@ -2399,21 +2461,30 @@ class PlaywrightDriver(VerificationMixin):
                 return {"yes": True, "no": False}.get(normalize(v))
             except Exception:
                 return None
+        # #126: only a VISIBLE checkbox is the answer. Ashby's hidden checkbox behind its Yes/No buttons stays
+        # unchecked for "No" AND for "not answered", so it can neither prove nor refute a No; the buttons decide.
+        hidden_box = False
         try:
             if loc is not None and (await loc.get_attribute("type")) == "checkbox":
-                return await loc.is_checked()
+                if await loc.is_visible():
+                    return await loc.is_checked()
+                hidden_box = True
         except Exception:
             pass
-        label = re.sub(r"\s*\*\s*$", "", f.label).strip()
-        group = page.get_by_role("group", name=re.compile(re.escape(label), re.IGNORECASE))
-        if not await group.count():
-            group = page.locator("fieldset, [role=group], div[class*=question], div[class*=field]").filter(
-                has_text=label).last
+        toggles = False
+        group = await self._bool_group(page, f)
         for role in ("radio", "button"):
             for want, pat in ((True, r"^\s*yes\s*$"), (False, r"^\s*no\s*$")):
                 btn = group.get_by_role(role, name=re.compile(pat, re.IGNORECASE))
-                if await btn.count() and await self._btn_state(btn.first):
-                    return want
+                if await btn.count():
+                    toggles = True
+                    if await self._btn_state(btn.first):
+                        return want
+        if not toggles and hidden_box:             # a lone custom-drawn checkbox (no Yes/No options): its own state
+            try:
+                return await loc.is_checked()
+            except Exception:
+                return None
         return None
 
     async def _upload(self, page, f: FormField, path: str) -> bool:
