@@ -135,6 +135,11 @@ def test_company_names_from_a_board_token():
     assert company_names("authorized to work in Denver for us?", "acmedenver") == ["acmedenver"]   # a place word
     assert company_names("authorized to work for Quill?", "getquillon") == ["getquillon"]          # under half
     assert company_names("for Brightpath", "Brightpath Labs", ["BPL"]) == ["Brightpath Labs", "BPL"]
+    # control: state, country, region and generic words are never taken from a board token
+    assert company_names("Are you authorized to work in Texas?", "gettexas") == ["gettexas"]
+    assert company_names("Can you work in our office?", "acmeoffice") == ["acmeoffice"]
+    assert company_names("authorized to work in Canada?", "joincanada") == ["joincanada"]
+    assert company_names("authorized to work in New Jersey?", "jerseyco") == ["jerseyco"]
 
 
 # ---------------------------------------------------------------- negation and now / future variants
@@ -208,7 +213,10 @@ def test_shortened_location_beside_its_full_entry_confirms_the_country():
     assert job_country("Springfield, MA", ["US"], ["Springfield, MA, United States"]) == "US"
     assert job_country("Springfield, MA", ["US"], []) is None                    # alone, "MA" stays ambiguous
     assert job_country("Springfield, MA", ["US"], ["Shelbyville, MA, United States"]) is None
-    assert job_country("Springfield", ["US"], ["Springfield, MA, United States"]) == "US"
+    # control: a one-part location never confirms through a longer entry
+    assert job_country("Springfield", ["US"], ["Springfield, IL, United States"]) is None
+    assert job_country("Paris", ["US"], ["Paris, Texas, United States"]) is None
+    assert job_country("Paris, Texas", ["US"], ["Paris, Texas, United States"]) == "US"
 
 
 # ---------------------------------------------------------------- determinism (the "resolves on another posting" note)

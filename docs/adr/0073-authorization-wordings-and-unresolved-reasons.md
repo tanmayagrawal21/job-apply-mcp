@@ -28,14 +28,17 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   only directly before work / employment / immigration / visa / sponsorship / citizenship.
 - **Company names in a question**: the posting company, its `dedupe.company_aliases`, and one label word that
   begins or ends a one-word board token ("Quillon" for `getquillon`). That word needs at least 4 letters and at
-  least half the token's length, and it may not be an authorization word, a country or a US hub city.
+  least half the token's length. It may not be an authorization word, a country, a US state (or a word of one,
+  e.g. "jersey"), a US hub city, a region, or a generic word such as office, remote, team, careers, jobs, global
+  or labs.
 - **Either-country sponsorship** ("Do you require sponsorship to work in Canada or the United States?"), Yes/No
   only. The answer is Yes when `requires_sponsorship` is true for at least one named country and No when it is
   false for every one. A missing fact leaves the field unresolved, with an `authorization.<CC>.requires_sponsorship`
   gap. The rule never applies to "and", to authorization ("authorized to work in A or B"), to now-only wording,
   or to any extra word.
 - **Job country**: a location string that is a confirmed entry with its trailing comma parts dropped
-  ("Somerville, MA" beside "Somerville, MA, United States") counts as confirmed. Every other ADR-0040 rule stays.
+  ("Somerville, MA" beside "Somerville, MA, United States") counts as confirmed. At least two parts (city plus
+  region or country) must agree, so a bare city ("Paris" beside "Paris, Texas, United States") never confirms. Every other ADR-0040 rule stays.
 - **Office HQ**: "Can you work from our <city> HQ (4 days a week)?" goes to the ADR-0055 office rule. HQ and
   headquarters count as offices, and fewer than five days a week reads `open_to_hybrid` instead of
   `open_to_onsite`.
@@ -60,3 +63,18 @@ with no country. On those, place-less, job-place and US-permit questions still n
 says why. Negation ("without sponsorship", "do you not
 require"), now-only and now-or-future handling is unchanged. Legal-status options and export-control wording
 still block every authorization rule.
+
+## Verify
+1. `uv run pytest -q tests/test_auth_wordings_121.py` covers every wording from the issue, the negatives,
+   determinism and the plan-level reason. Then run the full `uv run pytest -q`, including
+   `tests/test_live_blockers_2.py::test_explicit_country_question_on_an_unconfirmed_job`, which pins the
+   ADR-0053/0062 US-permit rule.
+2. Dry run, never live: `applywise run --dry-run --source links --link <posting URL>` on postings with these
+   wordings. Then use `applywise report` to check that the authorization questions are no longer listed as
+   unresolved. Every remaining client task in `plan_application` must have a non-empty `reason` and a `category`.
+
+## Revert
+Revert the squash commit of this change. No data migration is needed. Nothing new is stored: `reasons` and the
+task `reason` / `category` fields are computed per plan, and profile gaps keep their existing keys. Each rule is
+isolated (the rewrite, the either-country rule, company names, the shortened location, office HQ, the citizen
+vocabulary, the reasons), so a single rule can also be reverted on its own.

@@ -813,10 +813,11 @@ def job_country(location: str, countries: Sequence[str] = (), locations: Sequenc
 
 
 def _shortened(short: str, full: str) -> bool:
-    """`short` is `full` with trailing comma parts dropped ("Somerville, MA" of "Somerville, MA, United States")."""
+    """`short` is `full` with trailing comma parts dropped ("Somerville, MA" of "Somerville, MA, United States").
+    At least two parts (city + region or country) must agree."""
     a = [normalize(x) for x in short.split(",") if normalize(x)]
     b = [normalize(x) for x in full.split(",") if normalize(x)]
-    return bool(a) and len(a) < len(b) and b[:len(a)] == a
+    return len(a) >= 2 and len(a) < len(b) and b[:len(a)] == a     # a bare city ("Paris") never confirms
 
 
 def _entry_in(t: str, code: str) -> bool:
@@ -909,6 +910,16 @@ def _home_job_core(label: str, country: str, company: str) -> str | None:
     return auth_core(strip_co(q) + (mark + " " + strip_co(note) if mark else ""), country)
 
 
+# ADR-0073 (control): place and generic words are never the company word taken from a board token
+_NOT_COMPANY_WORD = (frozenset(normalize(v) for v in US_STATES.values())
+                     | frozenset(w for v in US_STATES.values() for w in normalize(v).split() if len(w) >= 4)
+                     | frozenset(normalize(c) for c in _COUNTRY_PATTERNS)
+                     | frozenset(["office", "offices", "remote", "team", "teams", "careers", "career", "jobs", "hiring",
+                                  "global", "labs", "group", "hybrid", "onsite", "america", "americas", "europe",
+                                  "asia", "africa", "pacific", "north", "south", "east", "west", "central", "world",
+                                  "international", "national", "company", "headquarters"]))
+
+
 def company_names(label: str, company: str, aliases: Sequence[str] = ()) -> list[str]:
     """ADR-0073: the posting company's names as a question may write them: the company, its configured aliases, and
     one label word that is the start or end of a one-word board token ("Laminar" for the board "runlaminar"). That
@@ -918,7 +929,8 @@ def company_names(label: str, company: str, aliases: Sequence[str] = ()) -> list
     if token and " " not in token:
         for w in dict.fromkeys(normalize(label).split()):
             if (len(w) >= 4 and w != token and 2 * len(w) >= len(token) and (token.startswith(w) or token.endswith(w))
-                    and w not in _AUTH_VOCAB and not question_countries(w)[1] and w not in _HUB_REGION):
+                    and w not in _AUTH_VOCAB and not question_countries(w)[1] and w not in _HUB_REGION
+                    and w not in _NOT_COMPANY_WORD):
                 names.append(w)
     return list(dict.fromkeys(names))
 
