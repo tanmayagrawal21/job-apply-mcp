@@ -188,8 +188,8 @@ def demographic_pick(key: str | None, values: list[str], options: list[str], lab
     """The single option equal to one of the owner's `values` (tried in order, e.g. race_detail before race), or None.
     Equal means normalised equality, plus ONLY these closed equivalences:
       - gender: Male == Man, Female == Woman (one hit only);
-      - an option that is the value followed by an explanatory parenthetical: "South Asian (inclusive of ...)" equals
-        "South Asian" (never a prefix or substring: "Asian" never equals "South Asian (...)");
+      - an option that is the value followed by an explanatory parenthetical: "East Asian (inclusive of ...)" equals
+        "East Asian" (never a prefix or substring: "Asian" never equals "East Asian (...)");
       - disability / hispanic: a profile sentence that starts with "Yes," / "No," equals a bare "Yes" / "No" option,
         ONLY when `label` is the status question itself (_YESNO_STATUS), never a question that mentions the topic.
     ADR-0070 adds: contractions fold ("don't" == "do not"); an option whose parenthetical says "Not Hispanic or
