@@ -67,6 +67,14 @@ from .ports import ComponentMissing, ControlLike, GatesLike, ProfileLike, Router
 from .salary import compute_ask, format_ask, is_salary_field
 from .writing import WriteProgress, load_exemplar, review_rubric, review_text, summarize_posting, write_text
 
+
+def _privacy_opt_in(profile: ProfileLike) -> bool:
+    """ADR-0070: [preferences].acknowledge_privacy_notices only (the structured fact, never [answers] or a stored
+    answer). The profile adapter renders a structured True as "Yes", so `is True` alone never opted in."""
+    v = profile.lookup("structured:acknowledge_privacy_notices")
+    return v is True or v == "Yes"
+
+
 # Fields the local LLM must never guess: a wrong answer is a false legal/biographical statement.
 _SENSITIVE_KEYS = SEMANTIC_SENSITIVE | {"work_authorized", "requires_sponsorship", "gender", "hispanic", "race", "veteran",
                    "disability", "over_18", "privacy_ack", "salary_expectation", "start_date", "graduation",
@@ -1690,11 +1698,13 @@ class ApplyEngine:
                 demo["demographic:gender"] = g
             if d := self.profile.lookup("race_detail"):          # ADR-0063: finer race option for DOM-only selects
                 demo["demographic:race_detail"] = d
+            if v := self.profile.lookup("is_veteran"):           # ADR-0070: plain "I am (not) a veteran" wording
+                demo["demographic:is_veteran"] = v
             rows = getattr(getattr(self.profile, "p", None), "education_rows", list)()
             edu = {f"education:{i}": r for i, r in enumerate(rows[:1])}
             # DOM-only context for the driver (ADR-0039): phone-widget country, opt-in privacy-notice acknowledgement.
             dom = {"contact:country": self.profile.lookup("country") or "",
-                   "pref:acknowledge_privacy_notices": self.profile.lookup("acknowledge_privacy_notices") is True}
+                   "pref:acknowledge_privacy_notices": _privacy_opt_in(self.profile)}
             async with self._browser_sem:
                 ctx.meta["dispatched"] = True
                 last = await drv.fill_and_submit(url, ctx.form, {**values, **demo, **edu, **dom}, files, dry_run=dry)
