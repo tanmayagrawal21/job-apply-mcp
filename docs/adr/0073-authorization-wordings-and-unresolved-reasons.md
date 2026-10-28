@@ -100,6 +100,21 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   The plan's client task carries `reason` and `category`. Any other unresolved field gets a generic
   `unknown_fact` reason, so no task has an empty reason.
 
+## Amendment (review follow-up to #122): the schedule decides the fact; conditional office questions
+Two reviewer notes on #122 (both also on main before it). The closed positive templates are unchanged; only the
+fact a matched hybrid / on-site template reads changes (`schedule_fact()`), and a conditional office question
+gets a stricter rule.
+- **Five office days a week is on site.** "Are you open to a hybrid schedule 5 days a week?" read
+  `open_to_hybrid`. It now reads `open_to_onsite`. On-site templates keep `open_to_onsite` whatever the day
+  count. For a hybrid template, a range that reaches five days ("4 or 5 days a week", "3 to 5 days a week") and
+  "hybrid ... full time" (full-time employment, or full time in the office?) are ambiguous: they stay unresolved (`unknown_fact`, with a reason). The ADR-0055 office rule
+  (`_office_value`) already read five days as on site and is unchanged.
+- **"If you are not local to <place>, are you comfortable working onsite?"** dropped the condition and answered
+  from `open_to_onsite` alone. A hybrid or on-site template behind that condition is now answered Yes only when
+  both the schedule fact and `willing_to_relocate` are true. Anything else is unresolved (`unknown_fact`, with a
+  reason that names both facts), and a missing fact is recorded as a profile gap. "If you are not local ..., are
+  you willing to relocate?" still reads `willing_to_relocate` alone.
+
 ## Consequences
 On a dry run of the issue's postings, the wordings above resolve from the structured facts. Some postings have no
 confirmed country: "Remote - USA" with a coded office, "Seattle, WA" with the office "US-PERM", or a Lever posting
@@ -109,6 +124,9 @@ require"), now-only and now-or-future handling is unchanged. Legal-status option
 still block every authorization rule.
 
 ## Verify
+0. Amendment (#122 follow-up): `uv run pytest -q tests/test_pref_schedule_followup_122.py` checks each wording
+   with Yes, No and mixed fictional profiles (hybrid five days answers from `open_to_onsite`; ranges and
+   "full time" stay unresolved; a conditional office question answers Yes only with `willing_to_relocate`).
 1. `uv run pytest -q tests/test_auth_wordings_121.py` covers every wording from the issue, the negatives,
    determinism and the plan-level reason. Then run the full `uv run pytest -q`, including
    `tests/test_live_blockers_2.py::test_explicit_country_question_on_an_unconfirmed_job`, which pins the
@@ -121,4 +139,6 @@ still block every authorization rule.
 Revert the squash commit of this change. No data migration is needed. Nothing new is stored: `reasons` and the
 task `reason` / `category` fields are computed per plan, and profile gaps keep their existing keys. Each rule is
 isolated (the rewrite, the either-country rule, company names, the shortened location, office HQ, the citizen
-vocabulary, the reasons), so a single rule can also be reverted on its own.
+vocabulary, the reasons), so a single rule can also be reverted on its own. To revert only the #122 follow-up
+amendment, revert its commit: hybrid templates then read `open_to_hybrid` whatever the day count, and a
+conditional office question reads the schedule fact alone. No stored data changes.
