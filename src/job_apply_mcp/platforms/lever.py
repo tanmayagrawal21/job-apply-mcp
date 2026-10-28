@@ -6,9 +6,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+
 from ..core.models import ApplicationForm, FieldKind, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
+from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import MAX_TEXT_BYTES, HttpError
 from .lever_cards import parse_cards
 from .textflags import html_to_text
@@ -33,12 +35,12 @@ class LeverAdapter(BaseAdapter):
         host = urlparse(url).netloc
         m = _URL.search(url)
         if not m or not host.startswith(("jobs.", "api.")):
-            raise AdapterError(f"not a Lever URL: {url}")
+            raise InvalidRef(f"not a Lever URL: {url}")
         board = m.group(1)
         if board in ("v0", "postings"):  # api.lever.co/v0/postings/<co>/<id>
             m2 = re.search(r"/postings/([^/?#]+)(?:/([0-9a-f-]{36}))?", url)
             if not m2:
-                raise AdapterError(f"not a Lever URL: {url}")
+                raise InvalidRef(f"not a Lever URL: {url}")
             return m2.group(1), m2.group(2)
         return board, m.group(2)
 
@@ -104,7 +106,9 @@ class LeverAdapter(BaseAdapter):
         except HttpError as e:
             if e.status == 404:
                 raise PostingClosed("posting not found (closed or moved)") from e
-            raise AdapterError(str(e)) from e
+            raise AdapterError(f"tool_gap: could not read the Lever postings API ({e})") from e
+        except httpx.HTTPError as e:   # timeout / transport error after the client's retries (ADR-0074): fail closed
+            raise AdapterError(f"tool_gap: could not read the Lever postings API ({type(e).__name__})") from e
 
     async def get_form(self, url_or_ref: str) -> ApplicationForm:
         """Lever exposes no public schema; this is the standard apply payload. Custom questions are only

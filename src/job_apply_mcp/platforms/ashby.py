@@ -10,7 +10,7 @@ import httpx
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
+from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import HttpError
 
 BOARD_API = "https://api.ashbyhq.com/posting-api/job-board"
@@ -36,7 +36,7 @@ class AshbyAdapter(BaseAdapter):
         if not m or m.group(1) in ("posting-api", "api"):
             m = re.search(r"job-board/([^/?#]+)", url)
             if not m:
-                raise AdapterError(f"not an Ashby URL: {url}")
+                raise InvalidRef(f"not an Ashby URL: {url}")
             return m.group(1), None
         return m.group(1), m.group(2)
 
@@ -83,6 +83,8 @@ class AshbyAdapter(BaseAdapter):
             d = await self.http.get_json(f"{BOARD_API}/{board}", params=_BOARD_PARAMS)
         except HttpError as e:
             raise AdapterError("board not found" if e.status == 404 else str(e)) from e
+        except httpx.HTTPError as e:   # timeout / transport error after the client's retries (ADR-0074)
+            raise AdapterError(f"tool_gap: could not read the Ashby board ({type(e).__name__})") from e
         return self._listed(d)
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",

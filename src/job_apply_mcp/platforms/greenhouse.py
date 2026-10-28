@@ -13,7 +13,7 @@ import httpx
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
+from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import HttpError
 from .textflags import html_to_text
 
@@ -155,7 +155,7 @@ class GreenhouseAdapter(BaseAdapter):
         if "gh_jid" in q:  # company career page embedding Greenhouse: best-effort board guess from the host
             labels = p.netloc.split(".")
             return (labels[-2] if len(labels) >= 2 else labels[0]), q["gh_jid"][0]
-        raise AdapterError(f"not a Greenhouse URL: {url}")
+        raise InvalidRef(f"not a Greenhouse URL: {url}")
 
     # ------------------------------------------------------------------ discovery
     def _to_posting(self, board: str, j: dict, *, with_description: bool) -> Posting:

@@ -428,7 +428,7 @@ class IntakeRunner:
             c.prose = None
             c.status = "skipped" if g.decision == Decision.skip else "needs_human"
             c.why = "; ".join(g.reasons) or g.decision.value
-            if c.status == "needs_human":
+            if c.status == "needs_human" and not getattr(out, "gap", None):   # ADR-0074: a tool_gap takes no slot
                 eligible.append(c)
             return ""
         if out.plan.unresolved:

@@ -23,6 +23,11 @@ class NotSupported(AdapterError):
     pass
 
 
+class InvalidRef(AdapterError):
+    """The ref or URL itself is malformed or names no posting: an input error for the caller, never a tool_gap
+    (ADR-0074)."""
+
+
 class PostingClosed(AdapterError):
     """The platform API says the posting is gone or closed (404 / unlisted / no posting). Reported as `skipped`
     (closed), never as an owner action (ADR-0056)."""
@@ -65,7 +70,7 @@ class BaseAdapter:
             parts = url_or_ref.split(":", 2)
             if len(parts) == 3 and parts[1]:
                 return parts[1], parts[2] or None
-            raise AdapterError(f"malformed ref '{url_or_ref}' (expected {self.name}:<board>:<id>)")
+            raise InvalidRef(f"malformed ref '{url_or_ref}' (expected {self.name}:<board>:<id>)")
         return self._parse_url(url_or_ref)
 
     def _parse_url(self, url: str) -> tuple[str, str | None]:  # pragma: no cover - overridden
@@ -74,7 +79,7 @@ class BaseAdapter:
     def _need_job(self, url_or_ref: str) -> tuple[str, str]:
         board, job = self.parse(url_or_ref)
         if not job:
-            raise AdapterError(f"'{url_or_ref}' names a board, not a posting")
+            raise InvalidRef(f"'{url_or_ref}' names a board, not a posting")
         return board, job
 
     # ---------------------------------------------------------------- credentials

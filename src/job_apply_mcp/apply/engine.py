@@ -39,7 +39,7 @@ from ..core.models import (
 from ..core.output import full_label
 from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
-from ..platforms.base import AdapterError, NotSupported, PostingClosed
+from ..platforms.base import AdapterError, InvalidRef, NotSupported, PostingClosed
 from ..writing import checks
 from . import attest, autonomy, essays
 from .approvals import ApprovalBook, evidence_path
@@ -295,6 +295,8 @@ def _batch_error(ref: str, e: BaseException) -> dict[str, Any]:
     """One failed ref of a batch. A missing optional component is needs_human with its reason (ADR-0059)."""
     if isinstance(e, ComponentMissing):
         return {"ref": ref, "status": "needs_human", "detail": f"component missing: {e}"[:200]}
+    if isinstance(e, InvalidRef):                  # ADR-0074: an input error, never a tool_gap
+        return {"ref": ref, "status": "error", "error": "invalid_ref", "detail": f"invalid ref: {e}"[:200]}
     if isinstance(e, FetchGap):                    # ADR-0074 (plan normally returns it as a result)
         return {"ref": ref, "status": "needs_human", "detail": e.reason, "reason": e.reason, "category": "tool_gap"}
     return {"ref": ref, "status": "error", "detail": str(e)[:160]}
@@ -386,7 +388,7 @@ class ApplyEngine:
             try:
                 posting, form = await asyncio.gather(adapter.get_posting(ref, with_description=True),
                                                      adapter.get_form(ref))
-            except (PostingClosed, NotSupported):
+            except (PostingClosed, NotSupported, InvalidRef):   # closed / unsupported / bad input: not a tool_gap
                 raise
             except AdapterError as e:   # ADR-0074: fail closed, categorised by the callers (never a partial form)
                 raise FetchGap(tool_gap_reason(e)) from e
@@ -1545,6 +1547,8 @@ class ApplyEngine:
             raise
         except PostingClosed as e:                      # ADR-0056: closed per the platform API
             return SubmitResult(ref=ref, status="skipped", detail=f"closed: {e}"[:200])
+        except InvalidRef as e:                         # ADR-0074: a bad ref/URL is an input error, never a tool_gap
+            return SubmitResult(ref=ref, status="error", detail=f"invalid ref: {e}"[:200])
         except Exception as e:  # noqa: BLE001
             return SubmitResult(ref=ref, status="error", detail=f"{type(e).__name__}: {e}"[:200])
 

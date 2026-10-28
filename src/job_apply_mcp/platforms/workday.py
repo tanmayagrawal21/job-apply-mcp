@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from ..core.models import ApplicationForm, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, not_before
+from .base import AdapterError, BaseAdapter, InvalidRef, not_before
 from .http import HttpError
 from .textflags import html_to_text
 
@@ -52,14 +52,14 @@ class WorkdayAdapter(BaseAdapter):
         p = urlparse(url)
         labels = p.netloc.split(".")
         if len(labels) < 4 or "myworkdayjobs" not in labels:
-            raise AdapterError(f"not a Workday URL: {url}")
+            raise InvalidRef(f"not a Workday URL: {url}")
         parts = [x for x in p.path.split("/") if x]
         if parts and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
             parts = parts[1:]
         if parts and parts[0] == "wday":  # .../wday/cxs/<tenant>/<site>/job/...
             parts = parts[3:]
         if not parts:
-            raise AdapterError(f"no Workday site in URL: {url}")
+            raise InvalidRef(f"no Workday site in URL: {url}")
         board = f"{labels[0]}.{labels[1]}/{parts[0]}"
         if "job" in parts:
             tail = [x for x in parts[parts.index("job") + 1:] if x != "apply"]

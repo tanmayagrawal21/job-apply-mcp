@@ -39,6 +39,21 @@ reason or category. Batch callers then recorded it as a bare error.
   or an unknown fact. A handoff that is a tool_gap is never handed to the person inside a consent window
   (ADR-0067).
 
+## Amendment (review of #130)
+- **Run cap.** In `run_applications` a fetch tool_gap is recorded as `needs_human` but takes no `max_applications`
+  slot (`_classify` skips the eligible append when the plan has a `gap`). Before this change such a posting was
+  `failed`, and failed postings never took a slot (ADR-0049). The tool's own retryable gap must not crowd out ready
+  postings or real hand-offs.
+- **Posting APIs.** The Lever postings API (`get_posting`) and the Ashby board read (`get_posting`) also turn a
+  timeout or transport error into a `tool_gap:` AdapterError, so a failure on either fetch in `_context` is a
+  categorised tool_gap. Before, these escaped as raw `httpx` exceptions.
+- **Input errors are not tool_gaps.** A malformed ref, a URL that is not a posting URL for the platform ("not a
+  Lever URL") or a board-only URL raises `InvalidRef` (a subclass of `AdapterError`). `_context` lets it through.
+  - `plan_application`, `draft_answers` and `get_form` return `{status: "error", error: "invalid_ref", reason,
+    next_action: "fix_input"}`. It has no category, because it is not a handoff.
+  - `submit` returns `status: "error"` with detail `invalid ref: ...`.
+  - `apply_batch` rows are `error` with `error: "invalid_ref"`, and `run_applications` records `failed`.
+
 ## Consequences
 A transient outage on a Lever apply page now stops that posting with a clear, retryable tool_gap. Before, it was
 planned on a partial form. A closed posting is still `skipped`. The status is `needs_human`, the convention for a
@@ -49,8 +64,9 @@ and not a question for the owner.
 1. `uv run pytest -q tests/test_lever_failclosed_127.py`. This covers a 503, a timeout or any exception becoming a
    tool_gap with no POST (the 503 after 3 attempts), 404/410 becoming closed, Greenhouse and Ashby timeouts,
    categorised plan / submit / get_form results, an end-to-end Lever plan and live submit with no POST, and an
-   `apply_batch` that records the tool_gap and continues. Then `tests/test_lever_cards.py` and the full
-   `uv run pytest -q`.
+   `apply_batch` that records the tool_gap and continues. The amendment adds: a tool_gap takes no run slot, a
+   Lever postings-API timeout is a tool_gap, and a malformed Lever URL is an `invalid_ref` error. Then
+   `tests/test_lever_cards.py` and the full `uv run pytest -q`.
 2. Dry run only: call `get_form` / `plan_application` on a Lever ref while its apply page is unreachable (for
    example, offline). The result must be `status: needs_human`, `category: tool_gap`, with a non-empty `reason`
    and no `fields`.

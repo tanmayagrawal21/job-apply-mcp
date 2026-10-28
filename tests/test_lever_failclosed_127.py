@@ -190,3 +190,59 @@ async def test_run_applications_records_tool_gap_and_continues(tmp_path):
     assert "failed" not in rep["counts"]
     assert not any("gapco" in s for s in ad.submits)
     assert rep["counts"].get("dry_run_ok") == 1                 # the other posting still ran
+
+
+# ------------------------------------------------------------------------------------------------ review of #130
+async def test_tool_gap_takes_no_run_slot(tmp_path):
+    """ADR-0049 / ADR-0074: a fetch tool_gap must not use up max_applications; the ready posting still runs."""
+    from test_intake import MultiAdapter, make
+
+    class _OneGap(MultiAdapter):
+        async def get_form(self, ref):
+            if "/gapco/" in ref:
+                raise AdapterError("tool_gap: could not read the Lever apply page (HTTP 503)")
+            return await super().get_form(ref)
+
+    r, ad, _ = make(tmp_path, adapter=_OneGap())
+    rep = await r.run(links=["https://boards.greenhouse.io/gapco/jobs/1", "https://boards.greenhouse.io/okco/jobs/2"],
+                      sources=["links"], max_applications=1)
+    assert rep["counts"].get("dry_run_ok") == 1 and rep["counts"].get("needs_human") == 1
+    assert "skipped" not in rep["counts"]
+    assert any("okco" in s for s in ad.submits)
+
+
+@respx.mock
+async def test_lever_posting_api_timeout_is_tool_gap(http):
+    respx.get(f"https://api.lever.co/v0/postings/democo/{LEVER_ID}").mock(side_effect=httpx.ReadTimeout("slow"))
+    respx.get(APPLY).respond(text=page())
+    a = LeverAdapter(http, env={})
+    with pytest.raises(AdapterError, match="^tool_gap: could not read the Lever postings API") as ei:
+        await a.get_posting(REF)
+    assert not isinstance(ei.value, PostingClosed)
+    e, _ = engine(adapter=a)
+    d = (await e.plan(REF)).compact()
+    assert d["category"] == "tool_gap" and d["reason"].startswith("tool_gap:")
+
+
+@respx.mock
+async def test_malformed_lever_url_is_invalid_ref_not_tool_gap(http):
+    from job_apply_mcp.platforms import InvalidRef
+    bad = "https://jobs.lever.co/"                      # no board, no posting
+    a = LeverAdapter(http, env={})
+    with pytest.raises(InvalidRef, match="not a Lever URL"):
+        await a.get_form(bad)
+    with pytest.raises(InvalidRef, match="names a board"):
+        await a.get_form("lever:democo:")
+    e, _ = engine(adapter=a)
+    with pytest.raises(InvalidRef):
+        await e.plan(bad)
+    r = await e.submit(bad, {}, dry_run=True)
+    assert r.status == "error" and r.detail.startswith("invalid ref: not a Lever URL")
+    assert categorize(r.status, r.detail) is None
+    rows = await e.apply_batch([bad], dry_run=True)
+    assert rows[0]["status"] == "error" and rows[0]["error"] == "invalid_ref" and "category" not in rows[0]
+    svc = Services(e.s, engine=e)
+    svc._adapters = {"lever": a}
+    for d in (await svc.get_form(bad), await svc.plan(bad)):
+        assert d["status"] == "error" and d["error"] == "invalid_ref" and "not a Lever URL" in d["reason"]
+        assert "category" not in d and "cat" not in d and d["next_action"] == "fix_input"

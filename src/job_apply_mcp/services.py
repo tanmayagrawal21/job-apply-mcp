@@ -24,6 +24,12 @@ from .platforms.textflags import grad_window_conflict, years_required
 from .search.sessions import Session, SessionError, SessionStore, parse_cursor
 
 
+def _invalid_ref(ref: str, e: Exception) -> dict[str, Any]:
+    """ADR-0074: a malformed ref or URL is the caller's input error, not a tool_gap and not a handoff."""
+    return {"ref": ref, "status": "error", "error": "invalid_ref", "reason": f"invalid ref: {e}"[:200],
+            "next_action": "fix_input", "hint": "Pass a posting URL or a <platform>:<board>:<id> ref."}
+
+
 class Services:
     def __init__(self, settings: Settings, engine: Any = None):
         self.settings = settings
@@ -420,12 +426,14 @@ class Services:
         from .apply.closed import challenge_label, closed_reason
         from .apply.engine import OPTIONS_MAX, tool_gap_reason
         from .core.output import full_label
-        from .platforms import NotSupported, PostingClosed
+        from .platforms import InvalidRef, NotSupported, PostingClosed
         a = self.resolve(ref_or_url)
         try:
             f = await a.get_form(ref_or_url)
         except PostingClosed as e:                     # ADR-0056: closed per the platform API
             return {"ref": ref_or_url, "status": "skipped", "closed": f"closed: {e}"}
+        except InvalidRef as e:                        # ADR-0074: input error, never a tool_gap
+            return _invalid_ref(ref_or_url, e)
         except NotSupported:
             raise
         except AdapterError as e:                      # ADR-0074: unreadable form -> categorised tool_gap, never partial
@@ -464,7 +472,11 @@ class Services:
             if full is None:
                 raise ValueError(f"no {kind} result in memory for this ref; call it with cursor=0 first")
         else:
-            out = await (self.engine.plan(ref) if kind == "plan" else self.engine.draft(ref))
+            from .platforms import InvalidRef
+            try:
+                out = await (self.engine.plan(ref) if kind == "plan" else self.engine.draft(ref))
+            except InvalidRef as e:                    # ADR-0074: input error, never a tool_gap
+                return _invalid_ref(ref, e)
             full = out.compact()
             st = plan_status(full)                   # next-step guidance for any client (ADR-0059)
             full = self._guided({**full, "status": st})   # category + guidance (ADR-0059, ADR-0067)
