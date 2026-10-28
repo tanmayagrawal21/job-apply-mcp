@@ -391,6 +391,47 @@ def network_verdict(ats: AtsProfile, records: list[dict[str, Any]]) -> str | Non
     return None
 
 
+_GH_REJECT_CODES = ("invalid-attributes", "invalid-attachment")
+
+
+def _gql_errors(data: dict[str, Any]) -> bool:
+    """A GraphQL error payload: `errors` is a non-empty list of objects each with a string `message`, and the
+    response is GraphQL-shaped (a `data` key, or `extensions` / `path` / `locations` on the errors)."""
+    errs = data.get("errors")
+    if not (isinstance(errs, list) and errs and all(isinstance(e, dict) and isinstance(e.get("message"), str)
+                                                    for e in errs)):
+        return False
+    return "data" in data or any(isinstance(e.get("extensions"), dict) or "path" in e or "locations" in e
+                                 for e in errs)
+
+
+def explicit_rejection(ats: AtsProfile, records: list[dict[str, Any]]) -> bool:
+    """True only for an UNAMBIGUOUS refusal in the latest submit response (ADR-0068): the ATS itself processed the
+    request and said no, in its OWN response shape:
+      - Ashby: a GraphQL error payload (_gql_errors) without FormSubmitSuccess, status 200, 400 or 422;
+      - Greenhouse: its error schema {"code": "invalid-attributes" | "invalid-attachment", ...}, status 400 or 422.
+    Everything else is NOT a rejection, so the outcome stays unknown: other statuses (403 from a WAF/CDN, 408, 409,
+    429, 5xx, timeouts), other ATSs (Lever posts a form), JSON that merely has an `errors` key, unparseable bodies and
+    bodies that only contain words like "required" or "invalid"."""
+    subs = [r for r in records if r.get("submit")]
+    if not subs:
+        return False
+    r = subs[-1]
+    status = int(r.get("status") or 0)
+    body = str(r.get("_cls") or r.get("body") or "")
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if ats.name == "ashby":
+        return status in (200, 400, 422) and _gql_errors(data) and "FormSubmitSuccess" not in body
+    if ats.name == "greenhouse":
+        return status in (400, 422) and data.get("code") in _GH_REJECT_CODES
+    return False
+
+
 def decide_outcome(ats: AtsProfile, url: str, text: str, form_present: bool,
                    records: list[dict[str, Any]]) -> str | None:
     """'submitted' | 'failed' | None. The network response outranks page text; URL/text are the fallback."""
@@ -2528,9 +2569,12 @@ class PlaywrightDriver(VerificationMixin):
                 if k == "blocked":
                     return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"blocked: {why}{ev}")
                 errs = (await self._validation_errors(page))[:5]
-                return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
-                                    detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT retry "
-                                           f"automatically.{ev}")
+                # ADR-0068: only a structured rejection (Greenhouse error code, Ashby FormRender errors) is re-enterable;
+                # Lever's re-rendered error text is an inferred signal, so its outcome stays unknown (blocking).
+                inferred = ats.name not in ("greenhouse", "ashby")
+                return SubmitResult(ref=ref, status="roadblock" if attempt or inferred else "needs_human",
+                                    via="browser", detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT "
+                                                          f"retry automatically.{ev}")
             outcome = decide_outcome(ats, page.url, text, still, records[since:])
             if outcome == "failed" and ats.name in ("greenhouse", "ashby") and time.monotonic() < deadline:
                 outcome = None                         # let the page show which failure it is (code step, panel)
@@ -2566,12 +2610,23 @@ class PlaywrightDriver(VerificationMixin):
                 self._handoff_pages.add(id(page))          # keep the tab open for the human (ADR-0036)
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
         errs = (await self._validation_errors(page))[:5]
-        why = ("ATS rejected the submission" if outcome == "failed"
-               else "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)")
         # After an attempt-policy click, never return a re-enterable state: roadblock -> engine `unknown` (ADR-0036).
-        # ADR-0066: likewise once a submit request was issued (it may have arrived): unknown, never "not sent".
+        # ADR-0066: likewise when a submit request was issued but NO verdict came back (it may have arrived): unknown.
+        # An explicit ATS rejection (outcome "failed") is a verdict, not an ambiguity: needs_human, as before.
         sent_now = self._sent_count(page)
-        issued = sent0 is not None and sent_now is not None and sent_now != sent0
+        ambiguous = outcome == "failed" and not explicit_rejection(ats, (await self._records(page))[since:])
+        if ambiguous:
+            # ADR-0068: "failed" from status >= 400 or a keyword in the body is not a verdict (408 / 5xx / timeouts may
+            # have been processed): the request was sent, so the outcome is unknown (blocking), never re-enterable.
+            outcome = None
+        issued = ambiguous or (outcome is None and sent0 is not None and sent_now is not None and sent_now != sent0)
+        if outcome == "failed":
+            why = "ATS rejected the submission"
+        elif issued:
+            why = ("outcome unknown: a submit request was sent but no success confirmation appeared (it may have been "
+                   "received)")
+        else:
+            why = "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)"
         return SubmitResult(ref=ref, status="roadblock" if attempt or issued else "needs_human", via="browser",
                             detail=f"{why}; errors={errs}; do NOT retry, check manually.{ev}")
 

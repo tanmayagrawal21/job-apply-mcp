@@ -43,10 +43,13 @@ document.getElementById('f').onsubmit=async ev=>{ev.preventDefault();
 class Srv:
     def __init__(self, page_html, api_body, api_status=200):
         self.posts = 0
+        self.clicks = 0                     # submit events seen by the page (GET /clicked beacon)
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                if self.path.startswith("/clicked"):
+                    outer.clicks += 1
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -157,15 +160,18 @@ async def test_text_confirmation_requires_form_gone(drv, resume):
     assert res.status == "submitted", res.detail
 
 
-async def test_no_confirmation_is_needs_human_with_evidence(drv, resume):
+async def test_no_confirmation_after_a_sent_request_is_unknown_with_evidence(drv, resume):
+    """ADR-0066: the submit request WAS sent and answered without a verdict, so it may have been received. That is
+    `roadblock` (engine state `unknown`, blocking and reconcilable), never the re-enterable "not submitted"."""
     srv = Srv(page(), "{}")
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
-    assert res.status == "needs_human" and "no success confirmation" in res.detail and "evidence=" in res.detail
+    assert res.status == "roadblock" and "no success confirmation" in res.detail and "evidence=" in res.detail
+    assert "outcome unknown" in res.detail and "treat as NOT submitted" not in res.detail
     assert list(_evidence(drv).glob("no-confirmation-*.png")) and srv.posts == 1
 
 
 async def test_server_error_response_reported(drv, resume):
-    srv = Srv(page(), '{"errors":[{"message":"Invalid email"}]}')
+    srv = Srv(page(), '{"data":null,"errors":[{"message":"Invalid email","extensions":{"ashbyErrorType":"VALIDATION"}}]}')
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
     assert res.status == "needs_human" and "rejected" in res.detail
     meta = json.loads(next(_evidence(drv).glob("failed-*.json")).read_text())
@@ -506,3 +512,60 @@ async def test_final_click_human_never_submits(drv, resume):
     res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "ashby:acme:fc"}), ANS, resume,
                                     dry_run=False)
     assert srv.posts == 0 and res.status == "needs_human" and "final_click=human" in res.detail, res.detail
+
+
+# ---------------------------------------------------------------- ADR-0068: only an unambiguous rejection is re-enterable
+
+
+def _rec(status, body):
+    return [{"url": "u", "status": status, "submit": True, "body": body[:50], "_cls": body}]
+
+
+GQL = '{"data":null,"errors":[{"message":"Invalid email","extensions":{"ashbyErrorType":"VALIDATION"}}]}'
+GH = '{"code":"invalid-attributes","message":"email"}'
+
+
+@pytest.mark.parametrize(("ats", "status", "body", "rejected"), [
+    ("ashby", 200, GQL, True),
+    ("ashby", 422, GQL, True),
+    ("ashby", 400, GQL, True),
+    ("ashby", 403, GQL, False),                                       # WAF / CDN status: never a verdict
+    ("ashby", 403, '{"errors":[{"message":"Forbidden"}]}', False),
+    ("ashby", 200, '{"errors":[{"message":"x"}]}', False),            # no GraphQL shape (no data / extensions)
+    ("ashby", 200, '{"errors":["x"]}', False),
+    ("ashby", 409, GQL, False),
+    ("ashby", 502, GQL, False), ("ashby", 503, GQL, False), ("ashby", 504, "Gateway Timeout", False),
+    ("ashby", 408, GQL, False), ("ashby", 429, GQL, False),
+    ("ashby", 200, '{"data":null,"note":"this field is required"}', False),
+    ("ashby", 200, "Required field missing", False),
+    ("greenhouse", 422, GH, True), ("greenhouse", 400, GH, True),
+    ("greenhouse", 403, GH, False), ("greenhouse", 200, GH, False), ("greenhouse", 500, GH, False),
+    ("greenhouse", 422, '{"errors":[{"field":"email","message":"is invalid"}]}', False),   # not Greenhouse's schema
+    ("greenhouse", 422, GQL, False),
+    ("lever", 422, GQL, False), ("lever", 400, GH, False),
+])
+def test_explicit_rejection_requires_the_ats_own_shape(ats, status, body, rejected):
+    from job_apply_mcp.apply.browser_playwright import explicit_rejection
+    assert explicit_rejection(ATS[ats], _rec(status, body)) is rejected
+
+
+CLICK_BEACON = "document.getElementById('f').addEventListener('submit', () => { fetch('/clicked'); });"
+
+
+@pytest.mark.parametrize(("status", "body"), [(502, GQL), (504, "Gateway Timeout"), (403, GQL),
+                                              (408, "Request Timeout"), (200, '{"note":"email is required"}')])
+async def test_ambiguous_failure_after_submit_is_unknown(drv, resume, status, body):
+    srv = Srv(page(extra=CLICK_BEACON), body, api_status=status)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "roadblock" and "outcome unknown" in res.detail, res.detail   # engine: unknown, blocking
+    assert srv.clicks == 1                                             # the tool clicked Submit exactly once
+    # Chrome itself may replay a POST answered 408 (or a dropped keep-alive socket) below the interception layer;
+    # that is why such outcomes stay unknown and never re-enterable (ADR-0068).
+    assert srv.posts >= 1 if status == 408 else srv.posts == 1
+
+
+async def test_structured_422_rejection_is_needs_human(drv, resume):
+    srv = Srv(page(extra=CLICK_BEACON), GQL, api_status=422)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "needs_human" and "rejected" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1

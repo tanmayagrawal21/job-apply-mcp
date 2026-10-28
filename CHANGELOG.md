@@ -4,6 +4,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Submit outcome fix (ADR-0068): only an unambiguous ATS rejection after the click, in the ATS's own response shape
+  (Ashby GraphQL errors on 200/400/422; Greenhouse invalid-attributes / invalid-attachment on 400/422), is
+  `needs_human`. 403/408/409/429/5xx, other shapes, keyword-only bodies, Lever error text and a sent request with no
+  verdict are `roadblock`/`unknown` (blocking). Documents Chrome's own 408 / dropped-socket POST replay (not
+  interceptable) as a residual risk.
 - `browser.keep_unsubmitted_open` (default true): tabs the tool filled but did not submit stay open and are listed
   in `<data_dir>/kept_tabs.json`; on stdio the process lingers after a client disconnect while such tabs exist
   (`browser.linger_after_disconnect_s`). Handoff reasons are categorised `hard_limit` / `unknown_fact` / `tool_gap`
