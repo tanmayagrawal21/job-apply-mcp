@@ -11,6 +11,8 @@
 - `get_derived` memoizes a value computed from a cached response (e.g. a board's finished postings) in memory,
   keyed by the response's content digest, so a repeat search inside the TTL (or after a 304) skips the disk
   read, the JSON decode and the per-posting text work entirely (ADR-0043).
+- `get_text` streams the body and stops reading after `max_bytes` (default `MAX_TEXT_BYTES`, 2 MB), so a huge or
+  endless page cannot exhaust memory; the timeout, retries and rate limit are the same as any GET (ADR-0072).
 - `timings` accumulates seconds spent on the network (inside the limiter slot), in cache lookups (disk read +
   decode) and in derive functions; they are summed over concurrent requests, so they can exceed wall time.
 """
@@ -31,6 +33,8 @@ import httpx
 from ..core.concurrency import HostLimiter
 
 T = TypeVar("T")
+
+MAX_TEXT_BYTES = 2_000_000   # get_text stops reading a body after this many (decoded) bytes
 
 
 class HttpError(Exception):
@@ -106,9 +110,11 @@ class HttpClient:
         finally:
             self.timings["derive_s"] += time.perf_counter() - t
 
-    async def get_text(self, url: str, *, headers: dict[str, str] | None = None) -> str:
-        """GET a page as text (HTML). Rate limited and retried like any GET; never cached."""
-        return (await self._send("GET", url, headers=headers, retry=True)).text
+    async def get_text(self, url: str, *, headers: dict[str, str] | None = None,
+                       max_bytes: int = MAX_TEXT_BYTES) -> str:
+        """GET a page as text (HTML). Rate limited and retried like any GET; never cached. The body is streamed and
+        reading stops after `max_bytes`, so the result is at most that long (a truncated page, never an error)."""
+        return (await self._send("GET", url, headers=headers, retry=True, max_bytes=max_bytes)).text
 
     async def post_json(self, url: str, *, json_body: Any, params: dict[str, Any] | None = None,
                         headers: dict[str, str] | None = None, cache: bool = True, ttl_s: int | None = None) -> Any:
@@ -168,15 +174,17 @@ class HttpClient:
         return hashlib.sha1(body.encode("utf-8", "surrogatepass")).hexdigest()
 
     async def _send(self, method: str, url: str, *, retry: bool, params=None, headers=None, json_body=None,
-                    data=None, files=None, auth=None) -> httpx.Response:
+                    data=None, files=None, auth=None, max_bytes: int | None = None) -> httpx.Response:
         attempts = (self.retries if retry else 0) + 1
         for i in range(attempts):
             try:
                 if self.limiter:
                     async with await self.limiter(url):
-                        resp = await self._timed_request(method, url, params, headers, json_body, data, files, auth)
+                        resp = await self._timed_request(method, url, params, headers, json_body, data, files, auth,
+                                                         max_bytes)
                 else:
-                    resp = await self._timed_request(method, url, params, headers, json_body, data, files, auth)
+                    resp = await self._timed_request(method, url, params, headers, json_body, data, files, auth,
+                                                     max_bytes)
             except httpx.TransportError:
                 if i + 1 >= attempts:
                     raise
@@ -204,9 +212,27 @@ class HttpClient:
         finally:
             self.timings["network_s"] += time.perf_counter() - t
 
-    async def _request(self, method, url, params, headers, json_body, data, files, auth) -> httpx.Response:
-        return await self._http().request(method, url, params=params, headers=headers, json=json_body,
-                                          data=data, files=files, auth=auth)
+    async def _request(self, method, url, params, headers, json_body, data, files, auth,
+                       max_bytes: int | None = None) -> httpx.Response:
+        if max_bytes is None:
+            return await self._http().request(method, url, params=params, headers=headers, json=json_body,
+                                              data=data, files=files, auth=auth)
+        client = self._http()
+        req = client.build_request(method, url, params=params, headers=headers, json=json_body, data=data,
+                                   files=files)
+        resp = await client.send(req, auth=auth, stream=True)
+        try:   # stop reading at the cap; the connection is closed rather than drained
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body += chunk
+                if len(body) >= max_bytes:
+                    break
+        finally:
+            await resp.aclose()
+        hdrs = [(k, v) for k, v in resp.headers.multi_items()
+                if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]   # body is decoded
+        return httpx.Response(resp.status_code, headers=hdrs, content=bytes(body[:max_bytes]), request=req,
+                              history=resp.history, extensions=resp.extensions)
 
     @staticmethod
     def _decode(resp: httpx.Response) -> Any:
