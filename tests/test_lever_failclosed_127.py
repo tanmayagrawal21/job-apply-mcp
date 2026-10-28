@@ -246,3 +246,51 @@ async def test_malformed_lever_url_is_invalid_ref_not_tool_gap(http):
     for d in (await svc.get_form(bad), await svc.plan(bad)):
         assert d["status"] == "error" and d["error"] == "invalid_ref" and "not a Lever URL" in d["reason"]
         assert "category" not in d and "cat" not in d and d["next_action"] == "fix_input"
+
+
+# ------------------------------------------------------------------------------------------------ privacy (#130)
+@respx.mock
+@pytest.mark.parametrize("bad", [
+    "https://user:pass" + "@" + "jobs.lever.co/?token=abc123&x=1#frag",
+    "https://user:pass" + "@" + "example.test/careers?token=abc123&x=1#frag",
+])
+async def test_invalid_ref_never_echoes_userinfo_query_or_fragment(http, bad):
+    from job_apply_mcp.platforms import InvalidRef
+    with pytest.raises(InvalidRef) as ei:
+        await LeverAdapter(http, env={}).get_form(bad)
+    msg = str(ei.value)
+    assert "not a Lever URL" in msg
+    for leak in ("user", "pass", "token", "abc123", "x=1", "frag", "?", "#", "@"):
+        assert leak not in msg, (leak, msg)
+
+
+@pytest.mark.parametrize("make_bad", [
+    lambda: "greenhouse:acmeco",                                       # too few parts
+    lambda: "lever::",                                                 # empty board
+])
+@respx.mock                                                            # any request would fail the test
+async def test_non_url_malformed_ref_is_echoed_safely(http, make_bad):
+    from job_apply_mcp.core import secrets
+    from job_apply_mcp.platforms import InvalidRef
+    secret = "s3cr3t-value-xyz"
+    secrets.Secret(secret).reveal()                                    # a revealed value is redacted from then on
+    try:
+        ref = make_bad() + secret + "?token=abc123#frag" + "z" * 500
+        a = GreenhouseAdapter(http, env={}) if ref.startswith("greenhouse") else LeverAdapter(http, env={})
+        with pytest.raises(InvalidRef) as ei:
+            await a.get_form(ref)
+        msg = str(ei.value)
+        assert secret not in msg and secrets.MASK in msg
+        assert "token" not in msg and "abc123" not in msg and "frag" not in msg
+        assert len(msg) <= 300 and "z" * 200 not in msg
+    finally:
+        secrets.forget(secret)
+
+
+def test_http_error_and_tool_gap_reason_strip_userinfo_and_query():
+    from job_apply_mcp.apply.engine import tool_gap_reason
+    from job_apply_mcp.platforms import HttpError
+    e = HttpError(503, "https://user:pass" + "@" + "jobs.lever.co/democo/x/apply?key=abc123#frag")
+    assert str(e) == "HTTP 503 for https://jobs.lever.co/democo/x/apply"
+    r = tool_gap_reason(AdapterError("boom at https://u:p" + "@" + "api.example.test/v0?key=abc123"))
+    assert r == "tool_gap: boom at https://api.example.test/v0"

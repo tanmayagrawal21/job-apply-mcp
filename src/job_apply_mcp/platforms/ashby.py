@@ -10,6 +10,7 @@ import httpx
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
+from ..core.secrets import safe_ref
 from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import HttpError
 
@@ -36,7 +37,7 @@ class AshbyAdapter(BaseAdapter):
         if not m or m.group(1) in ("posting-api", "api"):
             m = re.search(r"job-board/([^/?#]+)", url)
             if not m:
-                raise InvalidRef(f"not an Ashby URL: {url}")
+                raise InvalidRef(f"not an Ashby URL: {safe_ref(url)}")
             return m.group(1), None
         return m.group(1), m.group(2)
 

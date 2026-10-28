@@ -40,7 +40,8 @@ MAX_TEXT_BYTES = 2_000_000   # get_text stops reading a body after this many (de
 class HttpError(Exception):
     def __init__(self, status: int, url: str, body: str = ""):
         self.status, self.body = status, body[:500]
-        super().__init__(f"HTTP {status} for {url.split('?')[0]}")
+        from ..core.secrets import safe_url
+        super().__init__(f"HTTP {status} for {safe_url(url)}")   # no userinfo / query / fragment (ADR-0074)
 
 
 class HttpClient:

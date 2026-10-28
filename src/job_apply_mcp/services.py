@@ -126,7 +126,8 @@ class Services:
             return ads[head]
         if a := detect(ads, ref_or_url):
             return a
-        raise AdapterError(f"no enabled platform adapter handles '{ref_or_url[:80]}'; enabled: {list(ads)}")
+        from .core.secrets import safe_ref
+        raise AdapterError(f"no enabled platform adapter handles '{safe_ref(ref_or_url, 80)}'; enabled: {list(ads)}")
 
     def _targets(self, boards: list[str] | None, platforms: list[str] | None) -> tuple[list[tuple[Any, str]], list[dict]]:
         ads, cfg = self.adapters, self.settings.platforms

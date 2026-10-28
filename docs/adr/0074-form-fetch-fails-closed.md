@@ -54,6 +54,13 @@ reason or category. Batch callers then recorded it as a bare error.
   - `submit` returns `status: "error"` with detail `invalid ref: ...`.
   - `apply_batch` rows are `error` with `error: "invalid_ref"`, and `run_applications` records `failed`.
 
+- **No secrets in echoed refs.** `InvalidRef` sanitises its own message, and every adapter, `BaseAdapter.parse`
+  and `Services.resolve` format the ref with `core.secrets.safe_ref`. URLs keep only scheme://host[:port]/path,
+  so userinfo, the query string and the fragment are dropped. A non-URL ref loses anything after `?` or `#`.
+  Known secrets are passed through `redact()` and the text is truncated. `HttpError` messages use the same
+  `safe_url`, so userinfo is dropped as well as the query. `tool_gap_reason` applies `safe_text`, the same rules
+  for a whole message.
+
 ## Consequences
 A transient outage on a Lever apply page now stops that posting with a clear, retryable tool_gap. Before, it was
 planned on a partial form. A closed posting is still `skipped`. The status is `needs_human`, the convention for a
@@ -65,7 +72,8 @@ and not a question for the owner.
    tool_gap with no POST (the 503 after 3 attempts), 404/410 becoming closed, Greenhouse and Ashby timeouts,
    categorised plan / submit / get_form results, an end-to-end Lever plan and live submit with no POST, and an
    `apply_batch` that records the tool_gap and continues. The amendment adds: a tool_gap takes no run slot, a
-   Lever postings-API timeout is a tool_gap, and a malformed Lever URL is an `invalid_ref` error. Then
+   Lever postings-API timeout is a tool_gap, and a malformed Lever URL is an `invalid_ref` error,
+   and echoed refs and URLs carry no userinfo, query, fragment or known secret. Then
    `tests/test_lever_cards.py` and the full `uv run pytest -q`.
 2. Dry run only: call `get_form` / `plan_application` on a Lever ref while its apply page is unreachable (for
    example, offline). The result must be `status: needs_human`, `category: tool_gap`, with a non-empty `reason`

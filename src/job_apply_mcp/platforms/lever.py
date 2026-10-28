@@ -10,6 +10,7 @@ import httpx
 
 from ..core.models import ApplicationForm, FieldKind, Posting, SubmitResult
 from ..core.registry import platforms
+from ..core.secrets import safe_ref
 from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import MAX_TEXT_BYTES, HttpError
 from .lever_cards import parse_cards
@@ -35,12 +36,12 @@ class LeverAdapter(BaseAdapter):
         host = urlparse(url).netloc
         m = _URL.search(url)
         if not m or not host.startswith(("jobs.", "api.")):
-            raise InvalidRef(f"not a Lever URL: {url}")
+            raise InvalidRef(f"not a Lever URL: {safe_ref(url)}")
         board = m.group(1)
         if board in ("v0", "postings"):  # api.lever.co/v0/postings/<co>/<id>
             m2 = re.search(r"/postings/([^/?#]+)(?:/([0-9a-f-]{36}))?", url)
             if not m2:
-                raise InvalidRef(f"not a Lever URL: {url}")
+                raise InvalidRef(f"not a Lever URL: {safe_ref(url)}")
             return m2.group(1), m2.group(2)
         return board, m.group(2)
 

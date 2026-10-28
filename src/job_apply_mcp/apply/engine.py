@@ -287,8 +287,10 @@ class FetchGap(AdapterError):
 
 
 def tool_gap_reason(e: BaseException) -> str:
+    """"tool_gap: ..." text for an AdapterError; URLs lose userinfo/query/fragment and secrets are redacted."""
+    from ..core.secrets import safe_text
     msg = str(e) or type(e).__name__
-    return (msg if msg.startswith("tool_gap:") else f"tool_gap: {msg}")[:300]
+    return safe_text(msg if msg.startswith("tool_gap:") else f"tool_gap: {msg}", 300)
 
 
 def _batch_error(ref: str, e: BaseException) -> dict[str, Any]:
