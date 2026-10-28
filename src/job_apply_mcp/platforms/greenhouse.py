@@ -78,7 +78,8 @@ class GreenhouseAdapter(BaseAdapter):
 
     def __init__(self, *a: Any, **kw: Any):
         super().__init__(*a, **kw)
-        self._host_boards: dict[str, str] = {}   # company host -> verified board token (in-process, ADR-0072)
+        self._host_boards: dict[str, str] = {}   # company host -> last verified board token (in-process, ADR-0072)
+        self._job_boards: dict[tuple[str, str], str] = {}   # (host, gh_jid) -> board verified for that exact job
         self._host_locks: dict[str, asyncio.Lock] = {}   # get_posting + get_form run concurrently: one lookup per host
 
     def matches(self, url: str) -> bool:
@@ -108,21 +109,28 @@ class GreenhouseAdapter(BaseAdapter):
     async def _resolve_job(self, url_or_ref: str) -> tuple[str, str]:
         """_need_job, but a company ?gh_jid= page gets its board from the page itself (ADR-0072): candidates from the
         embed script / iframe / og:site_name, then from the host, each verified against the public jobs API; the
-        historic host guess only when none verifies. Verified boards are cached per host."""
+        historic host guess only when none verifies. A verified board is cached per (host, gh_jid); the host's last
+        verified board is tried first for a new gh_jid but only used after it verifies for that id, so a multi-brand
+        careers site whose jobs live on different boards falls through to the page lookup on a miss."""
         page = self._company_gh_page(url_or_ref)
         if not page:
             return self._need_job(url_or_ref)
         host, jid = page
         async with self._host_locks.setdefault(host, asyncio.Lock()):
-            if board := self._host_boards.get(host):
+            if board := self._job_boards.get((host, jid)):
+                return board, jid
+            if (board := self._host_boards.get(host)) and await self._job_exists(board, jid):
+                self._job_boards[(host, jid)] = board
                 return board, jid
             try:
                 found = page_board_candidates(await self.http.get_text(url_or_ref))
             except (HttpError, httpx.HTTPError, UnicodeError):   # unreachable page: the host still yields candidates
                 found = []
             for cand in list(dict.fromkeys(found + host_board_candidates(host)))[:_MAX_CANDIDATES]:
+                if cand == board:   # the host's cached board was just checked for this gh_jid and missed
+                    continue
                 if await self._job_exists(cand, jid):
-                    self._host_boards[host] = cand
+                    self._host_boards[host] = self._job_boards[(host, jid)] = cand
                     return cand, jid
         return self._need_job(url_or_ref)
 
