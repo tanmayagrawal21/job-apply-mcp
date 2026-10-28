@@ -520,6 +520,32 @@ _MEMBERS_JS = """(els, a) => { const key = a[0] || '', fl = a[1] || '';
     if (own.length) rows = own; }
   if (!CONS.test(fl)) rows = rows.filter(r => !CONS.test(r.text) && !CONS.test(r.name) && !CONS.test(r.value));
   return rows; }"""
+def incomplete_rows(empty: list[dict[str, Any]], planned: set[str], demo_bad: list[str],
+                    native: list[str]) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """#126: plan and submit agree on an `incomplete` result. Returns (labels for the detail, unresolved, tasks).
+    A required field the plan ANSWERED but the page still shows empty is the tool's gap: marked NOT_COMMITTED and
+    never listed as unresolved. Every other row (a DOM-only field the plan never saw, a self-ID read-back mismatch,
+    a native-validation error; with or without an id) is listed in `unresolved` and as a task with its category, so
+    a mix classifies as unknown_fact (ADR-0067 ordering: structure before the NOT_COMMITTED wording)."""
+    labels: list[str] = []
+    open_: list[tuple[str, str, str]] = []
+    for e in empty:
+        if e.get("id") and e["id"] in planned:
+            labels.append(f"{e['label']} ({NOT_COMMITTED})")
+        else:
+            labels.append(e["label"])
+            open_.append((e.get("id") or e["label"], e["label"], "required field the plan did not see"))
+    for lab in demo_bad:
+        labels.append(f"{lab} (self-ID read-back mismatch)")
+        open_.append((labels[-1], labels[-1], "self-ID answer did not read back"))
+    for lab in native:
+        labels.append(f"{lab} (native validation)")
+        open_.append((labels[-1], labels[-1], "the form's own validation rejects it"))
+    open_ = open_[:20]
+    tasks = [{"key": k, "label": lab[:80], "category": "unknown_fact", "reason": why} for k, lab, why in open_]
+    return labels, [k for k, _, _ in open_], tasks
+
+
 # Every visible required control that is still empty (ADR-0039). Text inputs / react-selects: required markup or the
 # API marks them required. Radio/checkbox groups and sets (wrapped or not; unnamed boxes grouped by field container)
 # and native selects follow the INVERTED rule: nothing selected -> gap, unless the API form marks that exact field
@@ -1180,21 +1206,14 @@ class PlaywrightDriver(VerificationMixin):
                 if f.key in ids:
                     await self._fill(page, ats, f, v)
             empty = await self._empty_required(page)
-        # #126: plan and submit agree. A required field the plan ANSWERED but the page still shows empty is the tool's
-        # gap (marked, never an "ask the user"); one the plan never saw (DOM-only) is listed in `unresolved`.
-        planned = {f.key for f, v in steps if v is not None and v != ""}
-        unplanned = [e["id"] or e["label"] for e in empty if not (e.get("id") and e["id"] in planned)]
-        empty = [{**e, "label": f"{e['label']} ({NOT_COMMITTED})"} if e.get("id") and e["id"] in planned else e
-                 for e in empty]
-        empty += [{"id": "", "label": f"{lab} (self-ID read-back mismatch)"} for lab in demo_bad]
         known = {e["label"] for e in empty}
-        empty += [{"id": "", "label": f"{lab} (native validation)"} for lab in await self._native_invalid(page)
-                  if lab not in known]
-        if empty:                                   # never submit (or call a dry run complete) with required gaps
-            labels = [e["label"] for e in empty]
+        native = [lab for lab in await self._native_invalid(page) if lab not in known]
+        if empty or demo_bad or native:             # never submit (or call a dry run complete) with required gaps
+            planned = {f.key for f, v in steps if v is not None and v != ""}
+            labels, unresolved, tasks = incomplete_rows(empty, planned, demo_bad, native)
             ev = await self._save_evidence(page, ref, "incomplete", extra={"required_empty": labels})
-            return SubmitResult(ref=ref, status="incomplete", via="browser", unresolved=unplanned[:20],
-                                detail=f"required fields still empty: {labels[:10]}{ev}")
+            return SubmitResult(ref=ref, status="incomplete", via="browser", unresolved=unresolved,
+                                client_tasks=tasks, detail=f"required fields still empty: {labels[:10]}{ev}")
         if self.b.presubmit_validation:
             errs = await self._validation_errors(page)
             if errs:
@@ -2380,7 +2399,11 @@ class PlaywrightDriver(VerificationMixin):
                 # wait for React to commit the pressed state before judging a click (a stale read caused a re-click)
                 if await self._btn_state(btn.first):
                     return True
-                for _ in range(2):                 # bounded: at most two real clicks per field
+                for attempt in range(2):           # bounded: at most two real clicks per field
+                    # control review on #129: a commit that lands after the wait would be toggled OFF by a blind
+                    # second click, so the state is re-read (a second full wait) right before it
+                    if attempt and await self._await_pressed(btn.first):
+                        return True
                     await btn.first.click()
                     st = await self._await_pressed(btn.first)
                     if st is None or st:

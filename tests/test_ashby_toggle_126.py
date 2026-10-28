@@ -87,3 +87,38 @@ def test_incomplete_with_an_unplanned_field_lists_it_and_asks(unresolved):
     detail = f"required fields still empty: ['Relocate? ({NOT_COMMITTED})', 'Shirt size']"
     assert categorize("incomplete", detail, unresolved=unresolved) == UNKNOWN_FACT
     assert with_guide({"status": "incomplete", "detail": detail}, cat=UNKNOWN_FACT)["next_action"] == "ask_user"
+
+
+# control review on #129: React commits AFTER the 1.5 s wait. Each click flips the state when ITS commit lands, so a
+# blind second click would toggle the answer off again.
+SLOW = ("<html><body><form>" + _toggle("q-reloc", "Do you require relocation to the Example Bay Area?")
+        + "</form><script>window.clicks = 0; const fe = document.querySelector('[data-field-path]');"
+        "fe.querySelectorAll('button').forEach(b => { b.onclick = ev => { ev.preventDefault(); window.clicks++;"
+        " setTimeout(() => { const on = b.getAttribute('aria-pressed') !== 'true';"
+        "  fe.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(on && x === b))); }, 2000);"
+        " }; });</script></body></html>")
+
+
+async def test_slow_commit_is_never_toggled_off(drv):  # noqa: F811
+    pg = await _page(drv, SLOW, ats="ashby")
+    assert await drv._fill(pg, ATS["ashby"], RELOC, False)
+    await pg.wait_for_timeout(2500)                          # past any second commit
+    assert await pg.evaluate("window.clicks") == 1
+    assert await pg.evaluate("document.querySelector('[data-option=no]').getAttribute('aria-pressed')") == "true"
+    assert await drv._bool_state(pg, RELOC, await drv._locate(pg, RELOC)) is False
+
+
+def test_rows_without_id_stay_unresolved_and_a_mix_is_unknown_fact():
+    from job_apply_mcp.apply.browser_playwright import incomplete_rows
+    empty = [{"id": "q-reloc", "label": "Relocate?"}, {"id": "", "label": "Shirt size"}]
+    labels, unresolved, tasks = incomplete_rows(empty, {"q-reloc"}, ["Gender"], ["Start date"])
+    assert labels[0] == f"Relocate? ({NOT_COMMITTED})"
+    assert unresolved == ["Shirt size", "Gender (self-ID read-back mismatch)", "Start date (native validation)"]
+    assert [t["category"] for t in tasks] == ["unknown_fact"] * 3 and all(t["reason"] for t in tasks)
+    detail = f"required fields still empty: {labels}"
+    assert categorize("incomplete", detail, unresolved=unresolved, client_tasks=tasks) == UNKNOWN_FACT
+    # only planned fields left empty: nothing to ask -> tool_gap
+    labels, unresolved, tasks = incomplete_rows(empty[:1], {"q-reloc"}, [], [])
+    assert unresolved == [] and tasks == []
+    assert categorize("incomplete", f"required fields still empty: {labels}", unresolved=unresolved,
+                      client_tasks=tasks) == TOOL_GAP

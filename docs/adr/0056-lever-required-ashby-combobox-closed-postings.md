@@ -107,17 +107,23 @@ could also remove an answer. A sibling "Yes" toggle passed because its checkbox 
 - The Yes/No question is scoped to its own `[data-field-path="<key>"]` entry when one exists, so a sibling
   question with similar wording is never read or clicked. The label lookup remains the fallback.
 - Bounded clicks: no click when the wanted option is already pressed, which covers the late refill pass. After a
-  click the state is polled for up to 1.5 s for React to commit, and there are at most two clicks per field.
-  Nothing is clicked at submit time.
+  click the state is polled for up to 1.5 s for React to commit. Before a second click the state is re-read with
+  a second full wait, and the second click happens only if the wanted option is still not pressed. A commit that
+  lands late is therefore never toggled off (a commit later than about 3 s can still get one more click). There are
+  at most two clicks per field, and nothing is clicked at submit time.
 - Plan and submit agree. In an `incomplete` result, a required field that the plan answered but the page shows
   empty is labelled "planned answer not committed on the page". Empty required fields that the plan never saw
-  (DOM-only) are listed in `SubmitResult.unresolved`. When every empty field was planned and none is unresolved,
-  the row is a `tool_gap` (ADR-0067) with `next_action: request_feature`, never "ask the user".
+  (DOM-only) are listed in `SubmitResult.unresolved`. So are rows without an id: self-ID read-back mismatches and
+  native-validation errors. Each of these is also a `client_tasks` entry with `category: unknown_fact` and a
+  `reason` (the ADR-0073 shape). Following the ADR-0067 order, the structure is checked first: any unresolved row
+  makes the result `unknown_fact`, even when NOT_COMMITTED rows are present. Only when every empty field was
+  planned is the result a `tool_gap`, with `next_action: request_feature`, never "ask the user".
 
 ### Verify
 1. `uv run pytest -q tests/test_ashby_toggle_126.py`. A fictional Ashby-shaped fixture with delayed commits and
    click-to-clear covers these cases: committed No is not empty, unanswered still blocks and never verifies as No,
-   the refill does not re-click, a similar sibling is not touched, and the tool_gap or unknown_fact split. Then
+   the refill does not re-click, a slow (2 s) commit is not toggled off, a similar sibling is not touched, rows
+   without an id stay unresolved, and the tool_gap or unknown_fact split. Then
    run the full `uv run pytest -q`.
 2. Dry run, never live: `submit_application(dry_run=True)` on an Ashby posting with a required Yes/No question
    answered No. Expect `dry_run`, not `incomplete`.
@@ -125,5 +131,5 @@ could also remove an answer. A sibling "Yes" toggle passed because its checkbox 
 ### Revert
 Revert the squash commit of this change. No data migration is needed and nothing new is stored. Each part can be
 reverted alone: the `pressed()` check in `_EMPTY_REQUIRED_JS`, the visible-only checkbox in `_bool_state`,
-`_bool_group` / `_await_pressed` in `_set_boolean`, and `NOT_COMMITTED` in `core/handoff.py` / `core/next_steps.py`
+`_bool_group` / `_await_pressed` in `_set_boolean`, and `incomplete_rows` / `NOT_COMMITTED` in `core/handoff.py` / `core/next_steps.py`
 together with the labelling in the `incomplete` result.
