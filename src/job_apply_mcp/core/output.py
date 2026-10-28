@@ -99,10 +99,12 @@ def degraded(e: BaseException) -> dict[str, Any] | None:
     names = {c.__name__ for c in type(e).__mro__}
     if not names & set(_DEGRADE):
         return None
+    sent = bool(getattr(e, "dispatched", False))   # set by the engine when the failure followed dispatch
+    tail = ("it may have been sent: never resubmit; check list_applications / ingest_confirmations." if sent
+            else "nothing was submitted.")
     return {"ok": False, "status": "needs_human", "why": f"{type(e).__name__}: {e}"[:300],
-            "next_action": "fix_setup",
-            "hint": "An optional component is unavailable. Call health for the fix, or tell the user; "
-                    "nothing was submitted.",
+            "next_action": "verify_with_user" if sent else "fix_setup",
+            "hint": f"An optional component is unavailable. Call health for the fix, or tell the user; {tail}",
             "error": {"code": "component_missing" if "ComponentMissing" in names else "unavailable",
                       "message": str(e)[:300], "hint": "Install the needed extra or enable the component in config."}}
 

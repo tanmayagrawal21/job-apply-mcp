@@ -385,6 +385,47 @@ def network_verdict(ats: AtsProfile, records: list[dict[str, Any]]) -> str | Non
     return None
 
 
+_GH_REJECT_CODES = ("invalid-attributes", "invalid-attachment")
+
+
+def _gql_errors(data: dict[str, Any]) -> bool:
+    """A GraphQL error payload: `errors` is a non-empty list of objects each with a string `message`, and the
+    response is GraphQL-shaped (a `data` key, or `extensions` / `path` / `locations` on the errors)."""
+    errs = data.get("errors")
+    if not (isinstance(errs, list) and errs and all(isinstance(e, dict) and isinstance(e.get("message"), str)
+                                                    for e in errs)):
+        return False
+    return "data" in data or any(isinstance(e.get("extensions"), dict) or "path" in e or "locations" in e
+                                 for e in errs)
+
+
+def explicit_rejection(ats: AtsProfile, records: list[dict[str, Any]]) -> bool:
+    """True only for an UNAMBIGUOUS refusal in the latest submit response (ADR-0068): the ATS itself processed the
+    request and said no, in its OWN response shape:
+      - Ashby: a GraphQL error payload (_gql_errors) without FormSubmitSuccess, status 200, 400 or 422;
+      - Greenhouse: its error schema {"code": "invalid-attributes" | "invalid-attachment", ...}, status 400 or 422.
+    Everything else is NOT a rejection, so the outcome stays unknown: other statuses (403 from a WAF/CDN, 408, 409,
+    429, 5xx, timeouts), other ATSs (Lever posts a form), JSON that merely has an `errors` key, unparseable bodies and
+    bodies that only contain words like "required" or "invalid"."""
+    subs = [r for r in records if r.get("submit")]
+    if not subs:
+        return False
+    r = subs[-1]
+    status = int(r.get("status") or 0)
+    body = str(r.get("_cls") or r.get("body") or "")
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if ats.name == "ashby":
+        return status in (200, 400, 422) and _gql_errors(data) and "FormSubmitSuccess" not in body
+    if ats.name == "greenhouse":
+        return status in (400, 422) and data.get("code") in _GH_REJECT_CODES
+    return False
+
+
 def decide_outcome(ats: AtsProfile, url: str, text: str, form_present: bool,
                    records: list[dict[str, Any]]) -> str | None:
     """'submitted' | 'failed' | None. The network response outranks page text; URL/text are the fallback."""
@@ -852,6 +893,9 @@ class PlaywrightDriver(VerificationMixin):
         self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
         # final_click="human" (ADR-0058): ref -> background confirmation watcher; the engine sets the callback
         self._watchers: dict[str, asyncio.Task] = {}
+        # keep_unsubmitted_open (ADR-0067): pages the tool started filling; filled-but-unsubmitted tabs it kept
+        self._filled: set[int] = set()
+        self._kept: dict[int, dict[str, Any]] = {}
         self.on_human_confirmed: Callable[[SubmitResult], Awaitable[Any]] | None = None
 
     # -- lifecycle ------------------------------------------------------------------------------
@@ -883,6 +927,9 @@ class PlaywrightDriver(VerificationMixin):
             await route.continue_()
 
     async def aclose(self) -> None:
+        if self._kept and not self.b.keep_pages_open:
+            log.warning("closing the browser with %d filled-but-unsubmitted tab(s); they are listed in "
+                        "kept_tabs.json for the person", len(self._kept))
         for t in self._watchers.values():
             t.cancel()
         self._watchers.clear()
@@ -905,12 +952,16 @@ class PlaywrightDriver(VerificationMixin):
         ctx = await self._context()
         page = await ctx.new_page()
         self._attach_recorder(page, ats)
+        res: SubmitResult | None = None
         try:
-            return await self._run(page, ats, greenhouse_embed_url(apply_url, ref) if ats_name == "greenhouse"
-                                   else apply_url, form, answers, files, dry_run)
+            res = await self._run(page, ats, greenhouse_embed_url(apply_url, ref) if ats_name == "greenhouse"
+                                  else apply_url, form, answers, files, dry_run)
+            return res
         except Exception as e:
-            return SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
+            res = SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
+            return res
         finally:
+            keep_unsent = self._keep_unsubmitted(page, res)
             self._api_keys.pop(id(page), None)
             self._exempt.pop(id(page), None)
             self._ticked.pop(id(page), None)
@@ -920,8 +971,54 @@ class PlaywrightDriver(VerificationMixin):
                 self._net.pop(id(page), None)
                 self._tasks.pop(id(page), None)
                 self._sent.pop(id(page), None)
-            if not self.b.keep_pages_open and id(page) not in self._handoff_pages:
+            self._filled.discard(id(page))
+            if keep_unsent:
+                self._remember_kept(page, ref, res)
+            elif not self.b.keep_pages_open and id(page) not in self._handoff_pages:
                 await page.close()
+
+    # -- keep_unsubmitted_open (ADR-0067) -------------------------------------------------------
+    _NOT_KEPT = frozenset({"submitted", "skipped", "duplicate"})
+
+    def _keep_unsubmitted(self, page, res: SubmitResult | None) -> bool:
+        """Keep a tab the tool FILLED but did not submit (needs_human, incomplete, handoff, roadblock, a filled
+        dry run, no confirmation, error after filling). Closed postings and never-filled pages still close."""
+        if not self.b.keep_unsubmitted_open or self.b.headless or id(page) not in self._filled:
+            return False
+        return res is None or res.status not in self._NOT_KEPT
+
+    def _remember_kept(self, page, ref: str, res: SubmitResult | None) -> None:
+        pid = id(page)
+        st = res.status if res else "error"
+        self._kept[pid] = {"ref": ref, "status": st, "url": str(getattr(page, "url", "") or "")[:300]}
+        if st in ("unknown", "roadblock", "error"):        # the click may have happened
+            self._kept[pid]["note"] = "may already be sent; do not click Submit again"
+        elif st == "captcha_rejected":                     # ADR-0066: refused, nothing accepted; never retried by the tool
+            self._kept[pid]["note"] = "the site rejected the automated submit; the tool will not retry it"
+        on_close = getattr(page, "on", None)
+        if callable(on_close):
+            try:
+                on_close("close", lambda *_: self._forget_kept(pid))
+            except Exception:
+                pass
+        self._write_kept()
+
+    def _forget_kept(self, pid: int) -> None:
+        if self._kept.pop(pid, None) is not None:
+            self._write_kept()
+
+    def kept_tabs(self) -> list[dict[str, Any]]:
+        """Filled-but-unsubmitted tabs still open (no secrets: ref, status and the page URL only)."""
+        return list(self._kept.values())
+
+    def _write_kept(self) -> None:
+        """<data_dir>/kept_tabs.json lists the kept tabs so they can be reopened if the browser goes away."""
+        try:
+            p = Path(self.s.paths.data_dir).expanduser() / "kept_tabs.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(self.kept_tabs(), indent=1), encoding="utf-8")
+        except Exception:
+            log.debug("could not write kept_tabs.json", exc_info=True)
 
     async def _run(self, page, ats: AtsProfile, url: str, form: ApplicationForm, answers: dict[str, Any],
                    files: dict[str, str], dry_run: bool) -> SubmitResult:
@@ -976,6 +1073,7 @@ class PlaywrightDriver(VerificationMixin):
                                     "keys": [f.key for f in form.fields], "stop": list(self.s.policy.stop_phrases),
                                     "ats": ats.name}
         steps = fill_order(form, answers, files)
+        self._filled.add(id(page))                   # from here on the tab holds the tool's work (ADR-0067)
         texty = [(f, v) for f, v in steps if f.kind != FieldKind.file]
         uploads = [(f, v) for f, v in steps if f.kind == FieldKind.file]
         failed: list[str] = []
@@ -2451,9 +2549,12 @@ class PlaywrightDriver(VerificationMixin):
                 if k == "blocked":
                     return SubmitResult(ref=ref, status="needs_human", via="browser", detail=f"blocked: {why}{ev}")
                 errs = (await self._validation_errors(page))[:5]
-                return SubmitResult(ref=ref, status="roadblock" if attempt else "needs_human", via="browser",
-                                    detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT retry "
-                                           f"automatically.{ev}")
+                # ADR-0068: only a structured rejection (Greenhouse error code, Ashby FormRender errors) is re-enterable;
+                # Lever's re-rendered error text is an inferred signal, so its outcome stays unknown (blocking).
+                inferred = ats.name not in ("greenhouse", "ashby")
+                return SubmitResult(ref=ref, status="roadblock" if attempt or inferred else "needs_human",
+                                    via="browser", detail=f"validation_error: {why}; errors={errs}; not accepted, do NOT "
+                                                          f"retry automatically.{ev}")
             outcome = decide_outcome(ats, page.url, text, still, records[since:])
             if outcome == "failed" and ats.name in ("greenhouse", "ashby") and time.monotonic() < deadline:
                 outcome = None                         # let the page show which failure it is (code step, panel)
@@ -2489,12 +2590,23 @@ class PlaywrightDriver(VerificationMixin):
                 self._handoff_pages.add(id(page))          # keep the tab open for the human (ADR-0036)
             return SubmitResult(ref=ref, status="roadblock", via="browser", detail=f"{blk} after submit{ev}")
         errs = (await self._validation_errors(page))[:5]
-        why = ("ATS rejected the submission" if outcome == "failed"
-               else "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)")
         # After an attempt-policy click, never return a re-enterable state: roadblock -> engine `unknown` (ADR-0036).
-        # ADR-0066: likewise once a submit request was issued (it may have arrived): unknown, never "not sent".
+        # ADR-0066: likewise when a submit request was issued but NO verdict came back (it may have arrived): unknown.
+        # An explicit ATS rejection (outcome "failed") is a verdict, not an ambiguity: needs_human, as before.
         sent_now = self._sent_count(page)
-        issued = sent0 is not None and sent_now is not None and sent_now != sent0
+        ambiguous = outcome == "failed" and not explicit_rejection(ats, (await self._records(page))[since:])
+        if ambiguous:
+            # ADR-0068: "failed" from status >= 400 or a keyword in the body is not a verdict (408 / 5xx / timeouts may
+            # have been processed): the request was sent, so the outcome is unknown (blocking), never re-enterable.
+            outcome = None
+        issued = ambiguous or (outcome is None and sent0 is not None and sent_now is not None and sent_now != sent0)
+        if outcome == "failed":
+            why = "ATS rejected the submission"
+        elif issued:
+            why = ("outcome unknown: a submit request was sent but no success confirmation appeared (it may have been "
+                   "received)")
+        else:
+            why = "FAILED: submit clicked but no success confirmation appeared (treat as NOT submitted)"
         return SubmitResult(ref=ref, status="roadblock" if attempt or issued else "needs_human", via="browser",
                             detail=f"{why}; errors={errs}; do NOT retry, check manually.{ev}")
 

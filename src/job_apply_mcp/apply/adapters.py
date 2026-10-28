@@ -2,6 +2,7 @@
 Protocols in ports.py. Imports of those components are lazy so the apply package loads without them."""
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import Any, ClassVar
 
@@ -189,7 +190,23 @@ class ProfileView:
         return [Project(name=f.title or f.org, summary="; ".join(f.bullets[:2]))
                 for f in self.resume_facts if f.section == "projects" and (f.title or f.org)]
 
+    # ADR-0062: [preferences] facts whose profile gap ("profile.preferences.<field>") the owner may answer through
+    # answer_profile_question / `profile ask`. The profile value always wins; the owner's stored answer fills it only
+    # when the profile leaves it unset.
+    _PREF_GAP_FIELD: ClassVar[dict[str, str]] = {"willing_to_relocate": "willing_to_relocate",
+                                                 "relocation_support": "needs_relocation_support",
+                                                 "open_to_hybrid": "open_to_hybrid", "open_to_onsite": "open_to_onsite"}
+
     def _structured(self, key: str) -> bool | None:
+        v = self._structured_profile(key)
+        if v is None and self.persona is not None and key in self._PREF_GAP_FIELD:
+            with contextlib.suppress(Exception):
+                stored = self.persona.stored(f"profile.preferences.{self._PREF_GAP_FIELD[key]}")
+                v = {"yes": True, "y": True, "true": True, "no": False, "n": False, "false": False}.get(
+                    str(stored or "").strip().lower())
+        return v
+
+    def _structured_profile(self, key: str) -> bool | None:
         a, pr = self.p.authorization, self.p.preferences
         home = a.facts_for(a.home_country) if a.home_country else None   # ADR-0050: flat keys need a home country
         return {"work_authorized": home and home.work_authorized,
@@ -221,6 +238,8 @@ class ProfileView:
         return orgs + [f.org for f in self.resume_facts if f.section == "experience" and f.org]
 
     def _derived(self, key: str) -> Any | None:
+        if key == "work:several_current":           # ADR-0062
+            return "Yes" if sum(1 for w in self.p.work if not w.end) > 1 else None
         if key == "work:last_internship":           # ADR-0055
             return self._last_internship()
         if key.startswith("work:"):                 # ADR-0053: employer / title facts from [[work]]
@@ -358,15 +377,19 @@ class ProfileView:
 class PolicyGates:
     """GatesLike over policy.gates.evaluate_posting (ADR-0009)."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, profile: Any = None):
         from ..policy.gates import evaluate_posting
         self._eval = evaluate_posting
         self.cfg = settings.policy
+        self.graduation = ""                 # ADR-0062: the profile's graduation date drives the graduation gate
+        with contextlib.suppress(Exception):
+            p = getattr(profile, "p", profile)
+            self.graduation = (p.graduation() if p is not None and hasattr(p, "graduation") else None) or ""
 
     async def evaluate(self, posting: Posting, form: ApplicationForm) -> GateResult:
         # one line per field (label and its options) so a phrase never spans two fields (ADR-0040)
         lines = [" | ".join([f.label, *f.options]).replace("\n", ". ") for f in form.fields]
-        return self._eval(posting, self.cfg, "\n".join(lines))
+        return self._eval(posting, self.cfg, "\n".join(lines), self.graduation)
 
 
 class RouterView:

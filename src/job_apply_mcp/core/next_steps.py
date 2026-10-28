@@ -6,6 +6,7 @@ Token-lean by design: one snake_case verb phrase plus one short sentence, never 
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # status -> (next_action, hint). Hints never promise an outcome and never tell a client to bypass the tool.
@@ -30,6 +31,8 @@ GUIDE: dict[str, tuple[str, str]] = {
                       "Ask the user for the code they received, then call provide_verification_code."),
     "awaiting_approval": ("approve",
                           "Ask the user to approve, then call submit_application with approval_id."),
+    "captcha_rejected": ("tell_user",
+                         "The site rejected the automated submit (captcha); never retry. The user may submit it."),
     "submitted": ("confirm_to_user", "Submitted. Tell the user; the confirmation email is matched later."),
     "dry_run": ("show_user", "Dry run: nothing was sent. Show the user what would be submitted."),
     "duplicate": ("stop", "Already applied (or in progress) for this posting; do not resubmit."),
@@ -47,11 +50,47 @@ def guide(status: str | None) -> dict[str, str]:
     return {"next_action": g[0], "hint": g[1]} if g else {}
 
 
-def with_guide(row: dict[str, Any], status: str | None = None) -> dict[str, Any]:
-    """Return `row` plus guidance for its status (an explicit next_action already in the row wins)."""
+# next_actions that hand the work to the person
+HUMAN_ACTIONS = frozenset({"ask_user", "verify_with_user", "user_clicks_submit", "approve",
+                           "provide_verification_code", "revise_answers"})
+# ADR-0067: a tool_gap inside an active consent window never becomes the person's job
+_GAP_IN_WINDOW: dict[str, tuple[str, str]] = {
+    "unknown": ("reconcile", "Outcome unclear; never resubmit. Run ingest_confirmations; do not ask the user."),
+    "": ("retry_via_tool", "Tool gap in the consent window: retry via the tool or request_feature; do not ask the user."),
+}
+
+# submission states that override a row's status for guidance (an unclear outcome is never "retry")
+_STATE_GUIDE = {"submitting": "unknown", "unknown": "unknown", "handoff": "handoff", "awaiting_code": "awaiting_code"}
+# the application may already be sent: whatever the status or category, the next step is reconcile (ADR-0025)
+_RECONCILE_STATES = frozenset({"submitting", "unknown"})
+RECONCILE = {"next_action": "reconcile",
+             "hint": "May already be sent; never resubmit. User finishes any open tab; run ingest_confirmations."}
+# a handoff raised AFTER the submit click (code prompts, "already submitted once"): reconcile, never retry
+POST_CLICK = re.compile(r"already submitted|submitted once|not retried|verification prompt|code field|"
+                        r"enter the code|after (?:the )?submit|may already be sent", re.IGNORECASE)
+# filled in an open tab or waiting for a code: never steered to a retry (a retry could submit twice)
+NO_RETRY = frozenset({"handoff", "awaiting_code", "submitting", "unknown", "captcha_rejected"})
+
+
+def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | None = None,
+               window: bool = False, state: str | None = None) -> dict[str, Any]:
+    """Return `row` plus guidance for its status (an explicit next_action already in the row wins). The submission
+    `state` wins over an error status (ADR-0059); in a consent window a tool_gap never asks the user (ADR-0067)."""
     if "next_action" in row:
         return row
-    return {**row, **guide(status if status is not None else row.get("status"))}
+    st = str(status if status is not None else row.get("status") or "")
+    detail = str(row.get("detail") or "")
+    if state in _RECONCILE_STATES or st == "unknown" or (st != "awaiting_code" and POST_CLICK.search(detail)):
+        return {**row, **RECONCILE}           # whatever the status or category (control review, ADR-0067)
+    if state in _STATE_GUIDE and st in ("error", "needs_human", "roadblock", "unknown", ""):
+        st = _STATE_GUIDE[state]
+    g = guide(st)
+    if st in NO_RETRY or state in NO_RETRY:
+        window = False
+    if cat == "tool_gap" and window and g.get("next_action") in HUMAN_ACTIONS:
+        a, h = _GAP_IN_WINDOW.get(st, _GAP_IN_WINDOW[""])
+        g = {"next_action": a, "hint": h}
+    return {**row, **g}
 
 
 def plan_status(compact: dict[str, Any]) -> str:
