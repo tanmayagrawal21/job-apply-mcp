@@ -105,3 +105,5 @@ class SubmitResult(BaseModel):
     pending_id: str | None = None   # awaiting_code only: pass to provide_verification_code (ADR-0026)
     client_tasks: list[dict[str, Any]] = Field(default_factory=list)   # needs_review: prose that failed review (ADR-0044)
     unresolved: list[str] = Field(default_factory=list)   # ADR-0055: the plan's open fields (same mapping call as answers)
+    captcha: list[dict[str, Any]] | None = None   # ADR-0071: dry run only; [{kind, visible, enterprise}]; None = not inspected
+    captcha_mode: str | None = None   # ADR-0071: none | implicit | challenge | unclear (core/captcha_report.py)

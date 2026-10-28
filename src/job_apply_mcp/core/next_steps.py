@@ -90,6 +90,10 @@ def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | Non
     if cat == "tool_gap" and window and g.get("next_action") in HUMAN_ACTIONS:
         a, h = _GAP_IN_WINDOW.get(st, _GAP_IN_WINDOW[""])
         g = {"next_action": a, "hint": h}
+    if st == "dry_run" and g:                  # ADR-0071: never let a captcha-protected dry run read as "good to go"
+        from .captcha_report import HINTS
+        if (h := HINTS.get(str(row.get("captcha_mode") or ""))):
+            g = {**g, "hint": h}
     return {**row, **g}
 
 
