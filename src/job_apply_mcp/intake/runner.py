@@ -81,11 +81,12 @@ class Cand:
     assumed: list[dict[str, Any]] | None = None   # ADR-0052: answers the agent assumed for this posting
     prose: list[dict[str, Any]] | None = None     # ADR-0057: unresolved essays for the MCP client to draft
     attested: list[dict[str, Any]] | None = None  # ADR-0065: attestations ticked under the owner's consent window
+    captcha: str | None = None    # ADR-0071: captcha_mode of the dry run (none | implicit | challenge | unclear)
 
     def row(self) -> dict[str, Any]:
         r = {"ref": self.target, "url": self.target if self.target.startswith("http") else None,
              "source": self.source, "status": self.status, "why": self.why[:240] or None, "co": self.co or None,
-             "title": self.title or None, "approval_id": self.approval_id}
+             "title": self.title or None, "approval_id": self.approval_id, "captcha": self.captcha}
         return r
 
 
@@ -516,6 +517,7 @@ class IntakeRunner:
                          "reconcile / ingest_confirmations can resolve it)")
                 return
             c.status = _SUBMIT_MAP.get(r.status, "unknown")
+            c.captcha = getattr(r, "captcha_mode", None)          # ADR-0071 (dry run only)
             if c.status == "needs_human" and _quota_hit(r.detail or ""):
                 c.status = "quota_blocked"   # the engine's control layer refused it; nothing was sent
                 c.deferred = True            # not final: its mail message stays unprocessed so a later run retries
@@ -636,9 +638,13 @@ class IntakeRunner:
             cats[r["status"]].append({k: v for k, v in (("ref", r["ref"]), ("src", r["source"]), ("co", r.get("co")),
                                                         ("title", r.get("title")), ("why", r.get("why")),
                                                         ("cat", categorize(r["status"], r.get("why"), settings)),
+                                                        ("captcha", r.get("captcha")),     # ADR-0071
                                                         ("approval_id", r.get("approval_id")
                                                          if r["status"] == "needs_human" else None)) if v})
         out: dict[str, Any] = {"run_id": run_id, "counts": {k: len(v) for k, v in cats.items() if v}}
+        from ..core.captcha_report import counts as captcha_counts
+        if cc := captcha_counts(rows, "captcha"):      # ADR-0071: dry runs, per captcha_mode
+            out["captcha_counts"] = cc
         handoffs = count_handoffs([x for v in cats.values() for x in v])   # ADR-0067: drive tool_gap down
         if handoffs:
             out["handoff_categories"] = handoffs

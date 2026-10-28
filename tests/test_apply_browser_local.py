@@ -193,6 +193,17 @@ async def test_dry_run_reads_back_and_saves_evidence(drv, resume):
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=True)
     assert res.status == "dry_run", res.detail
     assert list(_evidence(drv).glob("dry-run-*.png")) and srv.posts == 0
+    # ADR-0071: no widget on the local form, but Ashby is always treated as captcha-protected -> unclear
+    assert res.captcha_mode == "unclear" and res.captcha == [{"kind": "ats:ashby", "visible": None,
+                                                              "enterprise": None}], res.captcha
+
+
+async def test_dry_run_no_widget_non_ashby_is_none(drv, resume):
+    srv = Srv(page(), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM.model_copy(update={"ref": "lever:acme:job1"}), ANS, resume,
+                                    dry_run=True)
+    assert res.status == "dry_run", res.detail
+    assert res.captcha_mode == "none" and res.captcha == [] and srv.posts == 0, res.captcha
 
 
 async def test_boolean_not_registering_click_fails_readback(drv, resume):
