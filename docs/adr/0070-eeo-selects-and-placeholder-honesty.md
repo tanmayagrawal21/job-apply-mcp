@@ -56,6 +56,14 @@ Chime-style surveys complete once the profile has an `is_veteran` answer. Until 
 the key to set. Lever EEO selects are filled. Forms whose wording matches nothing still leave the select blank, but
 now say so. `apply/mapper.py` (API-planned EEO fields) is unchanged.
 
+## Amendment (2026-10-28): served, protected status declined
+`is_veteran = "Yes"` says nothing about protected status, so a veteran select that offers only protected-veteran
+options (plus a decline) has no option for it. When the owner's `veteran_status` is a decline, or is empty and the
+select is required (the decline table as before `is_veteran`), the driver now picks the decline option instead of
+leaving the select blank and the run `incomplete`. An optional select with no `veteran_status` stays blank. A
+protected classification is never implied from `is_veteran`, and a select with no decline option stays blank.
+Tests: `test_served_veteran_*` in `tests/test_eeo_selects_97_110.py`.
+
 ## Verify / revert
 `uv run pytest tests/test_eeo_selects_97_110.py tests/test_driver_fills_97_100.py tests/test_apply_engine.py`.
 Revert by reverting this PR. Leaving `is_veteran` unset, or setting `acknowledge_privacy_notices = false`, turns

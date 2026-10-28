@@ -51,7 +51,7 @@ jobs:
           uv run job-apply-mcp doctor --offline --json
   browser:
     # Local-fixture browser tests (no real sites, no network beyond 127.0.0.1). They skip without a browser, so the
-    # matrix above never runs them; this job installs one and FAILS if any of them is skipped for lack of a browser.
+    # matrix above never runs them; this job installs one and FAILS if any of them is skipped for any reason.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -65,17 +65,20 @@ jobs:
         run: |
           if ! command -v google-chrome >/dev/null; then uv run playwright install --with-deps chrome; fi
           google-chrome --version
-      - name: Browser fixture tests (must not skip for lack of a browser)
+      - name: Browser fixture tests (must not skip)
         env:
           JOB_APPLY__APPLY__APPROVAL_MODE: agent
           JOB_APPLY__DRY_RUN: "false"
         run: |
-          files=$(grep -l "no local browser" tests/*.py | sort)
+          files=$(grep -l "no local browser" tests/*.py | sort || true)
+          # An empty list would make pytest run the whole suite and pass without testing any browser fixture.
+          test -n "$files" || { echo "::error::no browser fixture test files found"; exit 1; }
           echo "$files"
           set -o pipefail
-          uv run pytest -q -rs $files 2>&1 | tee "$RUNNER_TEMP/browser-tests.log"
-          if grep -q "no local browser" "$RUNNER_TEMP/browser-tests.log"; then
-            echo "::error::browser fixture tests were skipped: no local browser"; exit 1
+          # JAM_LIVE-gated tests are deselected (not skipped), so any SKIPPED line below is a real gap.
+          uv run pytest -q -rs -m "not live" $files 2>&1 | tee "$RUNNER_TEMP/browser-tests.log"
+          if grep -qE "^SKIPPED|no local browser" "$RUNNER_TEMP/browser-tests.log"; then
+            echo "::error::browser fixture tests were skipped (see SKIPPED lines above)"; exit 1
           fi
   package:
     runs-on: ubuntu-latest

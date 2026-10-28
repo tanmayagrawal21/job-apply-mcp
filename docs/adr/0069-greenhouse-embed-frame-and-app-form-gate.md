@@ -48,6 +48,12 @@ without `gh_jid`, a redirect done by script after load, a ref without board/toke
   still handed off as before.
 - Cost: on a company page that announces an embed which never arrives, at most 10 s extra before `needs_human`.
 
+## Amendment (2026-10-28): one posting id per frame URL
+`greenhouse_frame_target` now refuses a frame URL whose query repeats `token` or `gh_jid` (including empty values),
+or carries both with different values, whether or not a ref job id is known. A repeated id used to pass the job-id
+check when any one value matched; the host was still allow-listed, so this is hardening, not a security fix.
+`token` and `gh_jid` naming the same id are accepted. Tests: `test_frame_target_refuses_ambiguous_job_ids`.
+
 ## Verify
 - `uv run pytest -q tests/test_greenhouse_embed_98_99.py`. The pure tests cover backslash, userinfo, tab/newline/CR/
   NUL/space, non-ASCII and percent-encoded (`%40`, `%5C`, `%2f`, `%2e`) src variants, a browser resolution naming

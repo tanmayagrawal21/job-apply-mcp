@@ -480,10 +480,10 @@ class Services:
         tok = FINAL_CLICK.set("human" if fc == "human" else None)
         try:
             r = await self.engine.submit(ref_or_url, answers, approval_id, dry_run, approver)
+            st = self.engine.approvals.state(ref_or_url)
+            return self._submit_row(r, st, self.engine.timings.get(ref_or_url))   # hint sees the per-call final_click
         finally:
             FINAL_CLICK.reset(tok)
-        st = self.engine.approvals.state(ref_or_url)
-        return self._submit_row(r, st, self.engine.timings.get(ref_or_url))
 
     def _submit_row(self, r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
@@ -513,7 +513,11 @@ class Services:
         win = (in_window(cfg) if cat else False) and not blocked
         if cat:
             row = {**row, "cat": cat, "cat_hint": category_hint(cat, win)}
-        return with_guide(row, cat=cat, window=win, state=state)
+        from .apply.ports import final_click
+        b = getattr(cfg, "browser", None)
+        return with_guide(row, cat=cat, window=win, state=state,     # ADR-0071: dry-run captcha hint wording
+                          final_click=final_click(str(getattr(b, "final_click", "agent"))),
+                          captcha_handoff=bool(getattr(b, "captcha_handoff", True)))
 
     async def provide_verification_code(self, pending_id: str, code: str) -> dict[str, Any]:
         r = await self.engine.provide_verification_code(pending_id, code)

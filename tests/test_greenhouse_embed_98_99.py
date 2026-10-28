@@ -81,6 +81,19 @@ def test_frame_target_must_be_the_refs_job():
     assert greenhouse_frame_target(P, "https://job-boards.greenhouse.io/embed/job_app?for=initech") is not None
 
 
+@pytest.mark.parametrize("query", ["token=56&token=55", "token=55&token=55", "gh_jid=56&gh_jid=55",
+                                   "token=55&gh_jid=56", "token=&token=55", "token=55&gh_jid="])
+def test_frame_target_refuses_ambiguous_job_ids(query):
+    src = f"https://job-boards.greenhouse.io/embed/job_app?for=initech&{query}"
+    assert greenhouse_frame_target(P, src, job_id="55") is None
+    assert greenhouse_frame_target(P, src) is None
+
+
+def test_frame_target_accepts_matching_token_and_gh_jid():
+    src = "https://job-boards.greenhouse.io/embed/job_app?for=initech&token=55&gh_jid=55"
+    assert greenhouse_frame_target(P, src, job_id="55") == src
+
+
 def test_app_form_missing_needs_two_keys_and_zero_hits():
     assert app_form_missing(["first_name", "last_name", "email"], 0)
     assert not app_form_missing(["first_name", "last_name", "email"], 1)

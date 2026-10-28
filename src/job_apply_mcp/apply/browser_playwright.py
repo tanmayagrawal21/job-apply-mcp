@@ -2052,8 +2052,16 @@ class PlaywrightDriver(VerificationMixin):
 
         def choose(texts: list[str]) -> str | None:
             texts = [t for t in texts if t and normalize(t) not in ("select", "")]
-            return (exact_decline(texts) if declined
-                    else demographic_pick(ck, values, texts, lab, hispanic=hisp, is_veteran=served))
+            if declined:
+                return exact_decline(texts)
+            pick = demographic_pick(ck, values, texts, lab, hispanic=hisp, is_veteran=served)
+            # ADR-0070 amendment: is_veteran="Yes" says nothing about PROTECTED status, so a protected-only select
+            # has no option for it. The owner's veteran_status decline (or, on a required select, the decline
+            # table as before is_veteran existed) then applies; never a protected classification.
+            if (pick is None and served and (values or row["required"])
+                    and all(is_decline_value(v) or normalize(v) in _DECLINE_SYNONYMS for v in values)):
+                pick = exact_decline(texts)
+            return pick
         loc = page.locator(f'[id="{el_id}"]' if el_id else f'select[name="{row["name"]}"]').first
         try:
             await loc.scroll_into_view_if_needed()

@@ -168,3 +168,55 @@ async def test_recaptcha_enterprise_report(page, want):
     from job_apply_mcp.apply.browser_playwright import PlaywrightDriver
     drv = object.__new__(PlaywrightDriver)
     assert await drv._recaptcha_enterprise(page) is want
+
+
+@pytest.mark.parametrize("mode", ["none", "implicit", "challenge", "unclear"])
+def test_dry_run_hint_final_click_human(mode):
+    g = with_guide({"status": "dry_run", "captcha_mode": mode}, final_click="human")
+    assert "final_click='human'" in g["hint"] and "user" in g["hint"] and "nothing was sent" in g["hint"]
+    assert ("visible captcha" in g["hint"]) is (mode == "challenge") and len(g["hint"]) <= 200
+    assert g["next_action"] == "show_user"
+
+
+@pytest.mark.parametrize("mode", ["implicit", "challenge", "unclear"])
+def test_dry_run_hint_captcha_handoff_off(mode):
+    g = with_guide({"status": "dry_run", "captcha_mode": mode}, captcha_handoff=False)
+    assert "captcha_handoff=false" in g["hint"] and "may reject" in g["hint"] and len(g["hint"]) <= 200
+    assert with_guide({"status": "dry_run", "captcha_mode": "none"}, captcha_handoff=False)["hint"] \
+        == GUIDE["dry_run"][1]
+    # final_click=human wins: the user clicks whatever captcha_handoff says
+    assert "final_click='human'" in with_guide({"status": "dry_run", "captcha_mode": mode}, final_click="human",
+                                               captcha_handoff=False)["hint"]
+
+
+def test_hint_wording_never_suggests_evasion():
+    for mode in captcha_report.MODES:
+        for fc in ("agent", "human"):
+            for ch in (True, False):
+                h = (captcha_report.hint(mode, final_click=fc, captcha_handoff=ch) or "").lower()
+                assert not any(w in h for w in ("solve", "bypass", "evade", "stealth"))
+    assert captcha_report.hint(None) is None and captcha_report.hint("bogus", final_click="human") is None
+
+
+def test_submit_row_hint_follows_settings(tmp_path):
+    svc = _svc(tmp_path)
+    r = SubmitResult(ref="r", status="dry_run", via="browser", captcha=[], captcha_mode="implicit")
+    svc.settings.browser.final_click = "human"
+    assert "final_click='human'" in svc._submit_row(r)["hint"]
+    svc.settings.browser.final_click = "agent"
+    svc.settings.browser.captcha_handoff = False
+    assert "captcha_handoff=false" in svc._submit_row(r)["hint"]
+
+
+async def test_per_call_final_click_reaches_the_hint(tmp_path):
+    class Eng:
+        approvals = types.SimpleNamespace(state=lambda ref: None)
+        timings = types.MappingProxyType({})
+
+        async def submit(self, ref, answers, approval_id, dry_run, approver):
+            return SubmitResult(ref=ref, status="dry_run", via="browser", captcha=[], captcha_mode="none")
+
+    row = await _svc(tmp_path, Eng()).submit("r", {}, True, final_click="human")
+    assert "final_click='human'" in row["hint"]
+    row = await _svc(tmp_path, Eng()).submit("r", {}, True)
+    assert row["hint"] == GUIDE["dry_run"][1]
