@@ -13,8 +13,10 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 import threading
 from typing import Any, NoReturn
+from urllib.parse import urlsplit, urlunsplit
 
 MASK = "***"
 _MIN_REDACT = 4                     # never redact trivially short strings (would mangle ordinary output)
@@ -85,6 +87,41 @@ def redact(text: str) -> str:
             if form in text:
                 text = text.replace(form, MASK)
     return text
+
+
+# ------------------------------------------------------------------ refs / URLs in error text (ADR-0074)
+
+_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
+
+
+def safe_url(url: str) -> str:
+    """scheme://host[:port]/path of a URL: no userinfo, query string or fragment (they can carry tokens)."""
+    try:
+        p = urlsplit(url)
+        host = p.hostname or ""
+        if p.port:
+            host = f"{host}:{p.port}"
+    except ValueError:              # unparsable (e.g. a bad port): keep only what precedes any '@', '?' or '#'
+        return re.split(r"[@?#]", url, maxsplit=1)[0]
+    if not p.scheme or not p.netloc:
+        return re.split(r"[?#]", url, maxsplit=1)[0]
+    return urlunsplit((p.scheme, host, p.path, "", ""))
+
+
+def safe_ref(text: Any, limit: int = 120) -> str:
+    """A caller-supplied ref or URL made safe to echo in an error: every URL in it reduced by `safe_url`, any
+    remaining query/fragment dropped, known secrets redacted, then truncated to `limit` chars."""
+    t = _URL_RE.sub(lambda m: safe_url(m.group(0)), str(text if text is not None else ""))
+    if not _URL_RE.search(t):
+        t = re.split(r"[?#]", t, maxsplit=1)[0]
+    t = redact(t)
+    return t if len(t) <= limit else t[: max(limit - 3, 0)] + "..."
+
+
+def safe_text(text: Any, limit: int = 300) -> str:
+    """An error message made safe to echo: URLs reduced by `safe_url`, known secrets redacted, truncated."""
+    t = redact(_URL_RE.sub(lambda m: safe_url(m.group(0)), str(text if text is not None else "")))
+    return t if len(t) <= limit else t[: max(limit - 3, 0)] + "..."
 
 
 # ------------------------------------------------------------------ logging

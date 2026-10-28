@@ -7,7 +7,8 @@ from typing import Any
 
 from ..core.models import ApplicationForm, FieldKind, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, iso_date, not_before
+from ..core.secrets import safe_ref
+from .base import AdapterError, BaseAdapter, InvalidRef, iso_date, not_before
 from .http import HttpError
 from .textflags import html_to_text
 
@@ -24,7 +25,7 @@ class SmartRecruitersAdapter(BaseAdapter):
     def _parse_url(self, url: str) -> tuple[str, str | None]:
         m = _URL.search(url)
         if not m:
-            raise AdapterError(f"not a SmartRecruiters URL: {url}")
+            raise InvalidRef(f"not a SmartRecruiters URL: {safe_ref(url)}")
         return m.group(1), m.group(2)
 
     @staticmethod

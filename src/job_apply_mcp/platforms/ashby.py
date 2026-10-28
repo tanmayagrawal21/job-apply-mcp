@@ -6,9 +6,12 @@ import re
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
+
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
+from ..core.secrets import safe_ref
+from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import HttpError
 
 BOARD_API = "https://api.ashbyhq.com/posting-api/job-board"
@@ -34,7 +37,7 @@ class AshbyAdapter(BaseAdapter):
         if not m or m.group(1) in ("posting-api", "api"):
             m = re.search(r"job-board/([^/?#]+)", url)
             if not m:
-                raise AdapterError(f"not an Ashby URL: {url}")
+                raise InvalidRef(f"not an Ashby URL: {safe_ref(url)}")
             return m.group(1), None
         return m.group(1), m.group(2)
 
@@ -81,6 +84,8 @@ class AshbyAdapter(BaseAdapter):
             d = await self.http.get_json(f"{BOARD_API}/{board}", params=_BOARD_PARAMS)
         except HttpError as e:
             raise AdapterError("board not found" if e.status == 404 else str(e)) from e
+        except httpx.HTTPError as e:   # timeout / transport error after the client's retries (ADR-0074)
+            raise AdapterError(f"tool_gap: could not read the Ashby board ({type(e).__name__})") from e
         return self._listed(d)
 
     async def list_postings(self, board: str, *, since: str | None = None, query: str = "",
@@ -112,12 +117,14 @@ class AshbyAdapter(BaseAdapter):
             d = await self.http.post_json(GRAPHQL, params={"op": "ApiJobPosting"}, json_body=body,
                                           headers={"content-type": "application/json"})
         except HttpError as e:
-            raise AdapterError(str(e)) from e
+            raise AdapterError(f"tool_gap: could not read the Ashby form ({e})") from e
+        except httpx.HTTPError as e:   # timeout / transport error after the client's retries (ADR-0074): fail closed
+            raise AdapterError(f"tool_gap: could not read the Ashby form ({type(e).__name__})") from e
         if isinstance(d, dict) and not d.get("errors") and isinstance(d.get("data"), dict) \
                 and d["data"].get("jobPosting", 0) is None:      # the API answered: no such open posting
             raise PostingClosed("Ashby returned no posting (closed or unlisted)")
         if not isinstance(d, dict) or d.get("errors") or not (d.get("data") or {}).get("jobPosting"):
-            raise AdapterError("Ashby form query returned no posting (closed, or the query shape changed)")
+            raise AdapterError("tool_gap: Ashby form query returned no posting (closed, or the query shape changed)")
         fields: list[FormField] = []
         for sec in d["data"]["jobPosting"]["applicationForm"]["sections"]:
             for e in sec.get("fieldEntries") or []:

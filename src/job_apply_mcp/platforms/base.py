@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from ..config import PlatformsCfg
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
+from ..core.secrets import safe_ref
 from .http import HttpClient
 from .textflags import extract_salary, flag_text
 
@@ -21,6 +22,16 @@ class AdapterError(Exception):
 
 class NotSupported(AdapterError):
     pass
+
+
+class InvalidRef(AdapterError):
+    """The ref or URL itself is malformed or names no posting: an input error for the caller, never a tool_gap
+    (ADR-0074). The message is sanitised here, so a pasted URL never echoes userinfo, a query string, a fragment
+    or a known secret."""
+
+    def __init__(self, message: str):
+        from ..core.secrets import safe_text
+        super().__init__(safe_text(message))
 
 
 class PostingClosed(AdapterError):
@@ -65,7 +76,7 @@ class BaseAdapter:
             parts = url_or_ref.split(":", 2)
             if len(parts) == 3 and parts[1]:
                 return parts[1], parts[2] or None
-            raise AdapterError(f"malformed ref '{url_or_ref}' (expected {self.name}:<board>:<id>)")
+            raise InvalidRef(f"malformed ref '{safe_ref(url_or_ref)}' (expected {self.name}:<board>:<id>)")
         return self._parse_url(url_or_ref)
 
     def _parse_url(self, url: str) -> tuple[str, str | None]:  # pragma: no cover - overridden
@@ -74,7 +85,7 @@ class BaseAdapter:
     def _need_job(self, url_or_ref: str) -> tuple[str, str]:
         board, job = self.parse(url_or_ref)
         if not job:
-            raise AdapterError(f"'{url_or_ref}' names a board, not a posting")
+            raise InvalidRef(f"'{safe_ref(url_or_ref)}' names a board, not a posting")
         return board, job
 
     # ---------------------------------------------------------------- credentials

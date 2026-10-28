@@ -13,7 +13,8 @@ import httpx
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
-from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
+from ..core.secrets import safe_ref
+from .base import AdapterError, BaseAdapter, InvalidRef, PostingClosed, iso_date, not_before
 from .http import HttpError
 from .textflags import html_to_text
 
@@ -155,7 +156,7 @@ class GreenhouseAdapter(BaseAdapter):
         if "gh_jid" in q:  # company career page embedding Greenhouse: best-effort board guess from the host
             labels = p.netloc.split(".")
             return (labels[-2] if len(labels) >= 2 else labels[0]), q["gh_jid"][0]
-        raise AdapterError(f"not a Greenhouse URL: {url}")
+        raise InvalidRef(f"not a Greenhouse URL: {safe_ref(url)}")
 
     # ------------------------------------------------------------------ discovery
     def _to_posting(self, board: str, j: dict, *, with_description: bool) -> Posting:
@@ -241,7 +242,9 @@ class GreenhouseAdapter(BaseAdapter):
         except HttpError as e:
             if e.status == 404:
                 raise PostingClosed("job not found (closed or moved)") from e
-            raise AdapterError(str(e)) from e
+            raise AdapterError(f"tool_gap: could not read the Greenhouse API ({e})") from e
+        except httpx.HTTPError as e:   # timeout / transport error after the client's retries (ADR-0074): fail closed
+            raise AdapterError(f"tool_gap: could not read the Greenhouse API ({type(e).__name__})") from e
 
     async def _questions(self, board: str, jid: str) -> dict:
         return await self._get(f"{API}/{board}/jobs/{jid}", params={"questions": "true"})
