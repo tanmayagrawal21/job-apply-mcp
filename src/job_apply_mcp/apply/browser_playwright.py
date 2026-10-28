@@ -1259,7 +1259,8 @@ class PlaywrightDriver(VerificationMixin):
                                             enterprise=await self._recaptcha_enterprise(page))
             return SubmitResult(ref=ref, status="dry_run", via="browser", captcha=items, captcha_mode=mode,
                                 detail=f"filled and verified {len(steps)} fields{gap}; not submitted{ev}")
-        return await self._submit(page, ats, ref, attempt=attempt)
+        toggles = [(f, v) for f, v in texty if f.kind == FieldKind.boolean and v is not None and f.key not in skipped]
+        return await self._submit(page, ats, ref, attempt=attempt, toggles=toggles)
 
     # -- final_click="human" (ADR-0058) ----------------------------------------------------------
     async def _human_handoff(self, page, ats: AtsProfile, ref: str) -> SubmitResult:
@@ -2663,7 +2664,21 @@ class PlaywrightDriver(VerificationMixin):
                 break
         return None, seen
 
-    async def _submit(self, page, ats: AtsProfile, ref: str, *, attempt: bool = False) -> SubmitResult:
+    async def _toggle_drift(self, page, toggles: list[tuple[FormField, Any]]) -> list[dict[str, Any]]:
+        """READ-ONLY re-read of every Yes/No field the plan answered: the rows whose state is no longer the planned
+        one (a React commit that landed late can flip a toggle off after the fill). Never clicks."""
+        out: list[dict[str, Any]] = []
+        for f, v in toggles:
+            try:
+                st = await self._bool_state(page, f, await self._locate(page, f))
+            except Exception:
+                st = None
+            if st is None or st != bool(v):
+                out.append({"id": f.key, "label": re.sub(r"\s*\*\s*$", "", f.label).strip()[:80] or f.key})
+        return out
+
+    async def _submit(self, page, ats: AtsProfile, ref: str, *, attempt: bool = False,
+                      toggles: list[tuple[FormField, Any]] | None = None) -> SubmitResult:
         target, n = await self._pick_submit(page)
         if target is None:
             return SubmitResult(ref=ref, status="needs_human", via="browser",
@@ -2674,6 +2689,15 @@ class PlaywrightDriver(VerificationMixin):
             ev = await self._save_evidence(page, ref, "upload-pending")
             return SubmitResult(ref=ref, status="needs_human", via="browser",
                                 detail=f"not sent: an upload / autofill was still in progress; Submit not clicked{ev}")
+        # follow-up to #129 (control WARN): the LAST read before the one submit click. Every planned Yes/No is re-read
+        # (no clicks); one that is no longer in its planned state means a late commit flipped it, so nothing is sent.
+        # Only this pre-click phase is affected; the ADR-0066/0068 post-click rules are unchanged.
+        if toggles and (drift := await self._toggle_drift(page, toggles)):
+            labels, unresolved, tasks = incomplete_rows(drift, {d["id"] for d in drift}, [], [])
+            ev = await self._save_evidence(page, ref, "toggle-drift", extra={"required_empty": labels})
+            return SubmitResult(ref=ref, status="incomplete", via="browser", unresolved=unresolved,
+                                client_tasks=tasks, detail=f"planned Yes/No answers changed before submit, Submit not "
+                                                           f"clicked: {labels[:10]}{ev}")
         await target.scroll_into_view_if_needed()
         since = len(self._net.get(id(page), []))
         sent0 = self._sent_count(page)
