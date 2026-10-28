@@ -71,34 +71,6 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
   when `_OFFICE_NEG` finds nothing. Coverage: every preference wording the test suite answered on main before this
   PR is still answered (15 wordings, probed by instrumenting the full suite). Anything outside the templates is
   now the owner's.
-- **Company names in a question**: the posting company, its `dedupe.company_aliases`, and one label word that
-  begins or ends a one-word board token ("Quillon" for `getquillon`). That word needs at least 4 letters and at
-  least half the token's length, and it must be capitalized wherever it appears (a proper noun). It may not be an authorization word, a country, a US state (or a word of one,
-  e.g. "jersey"), a US hub city, a region, or a generic word such as office, remote, team, careers, jobs, global
-  or labs, or a scope word such as outside, abroad, overseas, foreign, other or within. Stripping one of those
-  would change the question ("work outside the United States"). A company name that contains a scope word
-  ("Outside Inc") is never stripped, so its questions stay unresolved.
-- **Either-country sponsorship** ("Do you require sponsorship to work in Canada or the United States?"), Yes/No
-  only. The answer is Yes when `requires_sponsorship` is true for at least one named country and No when it is
-  false for every one. A missing fact leaves the field unresolved, with an `authorization.<CC>.requires_sponsorship`
-  gap. The rule never applies to "and", to authorization ("authorized to work in A or B"), to now-only wording,
-  or to any extra word.
-- **Job country**: a location string that is a confirmed entry with its trailing comma parts dropped
-  ("Somerville, MA" beside "Somerville, MA, United States") counts as confirmed. At least two parts (city plus
-  region or country) must agree, so a bare city ("Paris" beside "Paris, Texas, United States") never confirms. Every other ADR-0040 rule stays.
-- **Office HQ**: "Can you work from our <city> HQ (4 days a week)?" goes to the ADR-0055 office rule. HQ and
-  headquarters count as offices, and fewer than five days a week reads `open_to_hybrid` instead of
-  `open_to_onsite`. The slot before "work" is a closed list of neutral adverbs: regularly, also, ever,
-  possibly, please, consistently, occasionally, sometimes, comfortably, reliably. Any other word ("mind", "hate",
-  "not", "hesitate to") leaves the question unresolved.
-- **Polarity (amends ADR-0055).** The ADR-0055 open-wording preference and office aliases match words around a
-  keyword, so "Are you not able to work onsite?" or "Would you mind working from our office?" used to take the
-  plain preference value, with the meaning reversed. Any preference or office question that contains a negation
-  or an aversion word now stays with the owner. The words are: not, no, never, unable, unwilling, cannot,
-  refuse, avoid, rather, instead, except, mind, dislike, hate, resent, object, resist, oppose, hesitate,
-  struggle, against, reluctant, hardly, barely, only, nowhere, neither, nor, without, unless, no longer,
-  difficult, problem, concern, and "n't". This is defence in depth for wording that is not a closed list. A leading residence condition ("If you are not
-  local to the area, are you willing to relocate?") is not counted as a negation.
 - **Citizen fact**: answers only a plain "Are you a US citizen?" (every word is citizen-question wording, and
   there is no "not" or "or"). A
   certification ("I certify that I am a US citizen and will provide proof"), an export-control note or any

@@ -1698,24 +1698,30 @@ _PREF_TEMPLATES: list[tuple[str, re.Pattern[str], bool]] = [(k, re.compile(p + "
     ("relocate", rf"(?:can|could|would|will) you relocate{_pl('a')}{_FOR}", False),
     ("relocate", rf"would you consider relocating{_pl('a')}{_FOR}", False),
     # "Are you currently based in the SF Bay Area, or ready to relocate?": only a Yes is decidable from the fact
-    ("relocate", rf"are you (?:currently )?(?:based|located|living) in (?P<b>(?:\w+ ){{0,4}}\w+) or "
-                 rf"(?:are you )?{_ADJ} to relocate{_pl('a')}", True),
+    ("relocate", (rf"are you (?:currently )?(?:based|located|living) in (?P<b>(?:\w+ ){{0,4}}\w+) or "
+                 rf"(?:are you )?{_ADJ} to relocate{_pl('a')}"),
+     True),
     # hybrid
-    ("hybrid", rf"{_BE}?{_ADJ} (?:to |with )?(?:work |working )?(?:in )?(?:a |the |our )?hybrid(?: work| working)?"
+    ("hybrid", (rf"{_BE}?{_ADJ} (?:to |with )?(?:work |working )?(?:in )?(?:a |the |our )?hybrid(?: work| working)?"
                rf"(?: (?:schedule|arrangement|model|environment|policy|role|position|setup|basis|capacity))?{_DAYS}"
-               rf"{_pl('a')}{_FOR}", False),
+               rf"{_pl('a')}{_FOR}"),
+     False),
     ("hybrid", rf"{_BE}?{_ADJ} to commit to (?:the|our|a) hybrid (?:work )?(?:policy|schedule|model|arrangement){_FOR}",
      False),
     ("hybrid", rf"(?:can|could|will|would) you work (?:in )?(?:a )?hybrid(?: schedule)?{_DAYS}{_pl('a')}", False),
     # on site / in office
-    ("onsite", rf"{_BE}?{_ADJ} (?:to |with )?(?:work|working|be|being) (?:on ?site|in (?:the |our )?office|in person)"
-               rf"{_DAYS}{_pl('a')}{_DAYS}{_FOR}", False),
-    ("onsite", rf"{_BE}?{_ADJ} to (?:work|working) (?:from|in|out of|at) (?:one of )?(?:our|the) "
-               rf"(?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}{_FOR}", False),
-    ("onsite", rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:from|in|out of|at) "
-               rf"(?:one of )?(?:our|the) (?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}", False),
-    ("onsite", rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:on ?site|in (?:the |our )?office|"
-               rf"in person){_DAYS}{_pl('a')}", False),
+    ("onsite", (rf"{_BE}?{_ADJ} (?:to |with )?(?:work|working|be|being) (?:on ?site|in (?:the |our )?office|in person)"
+               rf"{_DAYS}{_pl('a')}{_DAYS}{_FOR}"),
+     False),
+    ("onsite", (rf"{_BE}?{_ADJ} to (?:work|working) (?:from|in|out of|at) (?:one of )?(?:our|the) "
+               rf"(?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}{_FOR}"),
+     False),
+    ("onsite", (rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:from|in|out of|at) "
+               rf"(?:one of )?(?:our|the) (?P<o>(?:\w+ ){{0,4}}){_OFFICE_WORD}{_pl('a')}{_DAYS}"),
+     False),
+    ("onsite", (rf"(?:can|could|will|would) you (?:(?:{_SLOT_ADVERBS}) ){{0,2}}work (?:on ?site|in (?:the |our )?office|"
+               rf"in person){_DAYS}{_pl('a')}"),
+     False),
 )]
 _HINT_TAIL = re.compile(r"\s*\(?\s*(?:yes\s*/\s*no|y\s*/\s*n|yes or no)\s*\)?\s*[?.!:]*\s*$", re.IGNORECASE)
 
