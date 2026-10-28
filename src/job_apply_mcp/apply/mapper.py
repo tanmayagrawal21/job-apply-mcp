@@ -2080,8 +2080,9 @@ def demographic_label_ok(label: str, ck: str) -> bool:
 
 
 def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any | None:
-    """The owner's [demographics] value as the exact option; the decline option when the profile declines or the
-    value/wording does not match exactly; else None. Never a guessed or nearest option."""
+    """The owner's [demographics] value as the exact option; the decline option only when the profile declines; else
+    None (unresolved), also when an answered value or its wording matches no option exactly (#119: a profile answer
+    never becomes a decline). Never a guessed or nearest option."""
     if not ck:
         return None
     if not f.options and f.kind != FieldKind.boolean:
@@ -2106,13 +2107,17 @@ def demographic_value(f: FormField, ck: str | None, profile: ProfileLike) -> Any
         if f.kind == FieldKind.boolean:
             return _truth(v)
         return str(v) if f.kind in (FieldKind.text, FieldKind.unknown) else None
-    else:   # the exact option for a plainly-worded question; otherwise declining (never a nearest guess)
+    else:   # the exact option for a plainly-worded question; otherwise unresolved (never a nearest guess)
         ok_label = demographic_label_ok(f.label, ck)
         detail = profile.lookup("race_detail") if ck == "race" and ok_label else None
         # ADR-0055: [demographics].race_detail (a finer race value) wins when an option matches it exactly; otherwise the
         # race_ethnicity (EEO-1) option. exact_option never takes a broader or narrower option.
+        # ADR-0070 amendment (#119): the owner ANSWERS this topic, so no match never falls back to the decline option;
+        # the field is left unresolved (asked, never answered for the owner with a decline).
         got = ((exact_option(str(detail), f.options) if detail and not _is_decline(detail) else None)
-               or (exact_option(str(v), f.options) if ok_label else None) or decline_option(f.options))
+               or (exact_option(str(v), f.options) if ok_label else None))
+        if got is not None and decline_option([got]) is not None:
+            got = None
     return None if got is None else [got] if f.kind == FieldKind.multiselect else got
 
 

@@ -54,7 +54,7 @@ QA issues #97 and #110, re-checked after ADR-0063 with dry runs against the live
 ## Consequences
 Chime-style surveys complete once the profile has an `is_veteran` answer. Until then the dry run names the field and
 the key to set. Lever EEO selects are filled. Forms whose wording matches nothing still leave the select blank, but
-now say so. `apply/mapper.py` (API-planned EEO fields) is unchanged.
+now say so. `apply/mapper.py` (API-planned EEO fields) is unchanged (until the #119 amendment below).
 
 ## Amendment (2026-10-28): served, protected status declined
 `is_veteran = "Yes"` says nothing about protected status, so a veteran select that offers only protected-veteran
@@ -64,7 +64,45 @@ leaving the select blank and the run `incomplete`. An optional select with no `v
 protected classification is never implied from `is_veteran`, and a select with no decline option stays blank.
 Tests: `test_served_veteran_*` in `tests/test_eeo_selects_97_110.py`.
 
+## Amendment (2026-10-28): an answered topic is never declined; CC-305 disability family (#119, #120)
+QA dry runs: on a Waymo-like survey the race ("race / ethnic group") and veteran ("a veteran or active member of the
+United States Armed Forces") selects were committed to "I don't wish to answer" although the profile answers both,
+and the dry run said verified. Cause: those labels failed the plain-wording check (`self_id_label_ok`), so the driver
+treated the select as having no profile value, and a required select with no value takes the decline table. The
+API-planned path (`mapper.demographic_value`) had the same fallback (no exact option -> decline option). On a
+MongoDB-like survey the CC-305 disability options matched nothing by exact equality, and the unlabelled hidden
+input behind that select was reported as "invalid field (native validation)".
+- **Invariant.** When the profile holds a non-decline value for the select's topic (or `is_veteran` on a select
+  that is not protected-only), no decline option is ever committed, on the DOM path and the API-planned path. No
+  match leaves the field blank and reported: `unknown_fact` when no option equals the value, `tool_gap` when the
+  wording is not recognised as the plain self-ID question ("... left blank, never declined"). The decline table
+  still answers a required select only when the profile declines or has no value. This supersedes the ADR-0040
+  rule that an unmatched value or a non-plain label takes the decline option.
+- **Closed label rewrites** (`dom_rules._LABEL_REWRITES`), per topic: "ethnic / racial / race group" is the race
+  question; "veteran or (an) active (duty) (service) member (of the United States / U.S. armed forces / military)"
+  is the plain veteran question. Nothing else is added; other labels that mention a topic still fail.
+- **`is_veteran` table** adds "(Yes/No,) I am (not) a veteran or (an) active member". Never served implies neither;
+  served makes the disjunction true. A protected classification is still never implied, and `veteran_status` in
+  protected wording alone still matches no plain-veteran option (ADR-0063).
+- **#118 fallback tightened.** The served-but-protected-status-declined fallback applies only to a select whose
+  every answer option names protected status (`protected_only`). A plain-veteran wording the table misses is an
+  unmatched answer (blank, reported), never a decline.
+- **"(Not of Hispanic Origin)"** counts as a Hispanic parenthetical, like "(Not Hispanic or Latino)".
+- **CC-305 disability family** (`dom_rules.disability_class`): closed patterns over four answers that state
+  different facts: "I have a disability" (now), "I have a disability, or have had one in the past" (now or past),
+  "I do not have a disability" (now, silent on the past) and "I do not have a disability and have not had one in
+  the past" (neither). A profile value selects an option only when the value implies it: "now" implies "now or
+  past", "neither" implies "not now", never the reverse. So a "No" that does not mention the past never selects the
+  newer CC-305 "No ... and have not had one in the past" option; the select stays blank and is reported as
+  `unknown_fact` naming the missing fact (whether there was a disability in the past), for the owner to add to
+  `[demographics].disability_status`. A bare "Yes"/"No" value counts only on the status question. Decline options
+  remain the decline table's.
+- **Native validation detail** names an unlabelled control by its field (the single combobox or single `<label>`
+  of its nearest wrapper), else "unlabelled <tag> type=<type>".
+Tests: `tests/test_eeo_decline_119_120.py`.
+
 ## Verify / revert
-`uv run pytest tests/test_eeo_selects_97_110.py tests/test_driver_fills_97_100.py tests/test_apply_engine.py`.
+`uv run pytest tests/test_eeo_selects_97_110.py tests/test_eeo_decline_119_120.py tests/test_driver_fills_97_100.py
+tests/test_apply_engine.py`.
 Revert by reverting this PR. Leaving `is_veteran` unset, or setting `acknowledge_privacy_notices = false`, turns
 the respective behaviour off without a code change.

@@ -258,15 +258,16 @@ async def test_dom_only_self_id_uses_profile_or_decline_and_never_invents(drv):
     ans = {"first_name": "Alex", "demographic:gender": "Female", "demographic:disability": "No",
            "demographic:hispanic": "Martian"}           # not an offered option -> decline, never a guess
     res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/acme/jobs/5", form, ans, {}, dry_run=True)
-    # the native Disability select is DOM-only (no API required:false) and "No" has no equal option: left blank,
-    # and under the inverted rule a blank DOM-only native select is a gap
-    assert res.status == "incomplete" and "Disability Status" in res.detail, res.detail
+    # #120: on the status question a bare "No" is the CC-305 "no" answer, so the DOM-only native select is filled;
+    # the optional Hispanic select with an unmatched value is reported, never verified
+    assert res.status == "dry_run" and res.unresolved == [
+        "Are you Hispanic/Latino? (unknown_fact: no option equals [demographics].hispanic_latino)"], res.detail
     st = json.loads([p for p in posts if p[0] == "/state"][-1][1])
     assert st == {"gender": "Female",                                   # profile value, exact option
                   "race": "",                                           # optional, no profile value: blank
                   "hispanic_ethnicity": "",                             # no equal option: blank, never decline/guess
                   "veteran_status": "I don't wish to answer",           # required, no profile value: decline table
-                  "disability_status": ""}                              # "No" is not "No, I do not have ...": blank
+                  "disability_status": "No, I do not have a disability"}  # #120: same CC-305 answer class
 
 
 SELFID_PAIR_HTML = """<html><body><form id=f>

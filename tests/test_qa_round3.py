@@ -99,8 +99,8 @@ def test_adversarial_labels_never_take_a_real_value():
     for f in cases:
         ans, unres, skipped, _ = mapped([f], p)
         assert ans == {} and unres == ["x"] and skipped == ["x"], f.label
-    # with a decline option the safe answer is to decline, never the profile value
-    assert mapped([opt("x", "Race and gender", RACE)], p)[0] == {"x": "Decline to self-identify"}
+    # #119: with a decline option it is still never the profile value, and never a decline the owner did not choose
+    assert mapped([opt("x", "Race and gender", RACE)], p)[:2] == ({}, ["x"])
     assert mapped([opt("x", "Gender", ["Man", "Non-binary"])], p)[1] == ["x"]   # "Woman" has no exact option
 
 
@@ -217,8 +217,9 @@ def full(demo=None, ack=True, answers=None):
 def test_eeo_labels_never_take_another_rules_answer():
     p = full()
     assert mapped([opt("x", "Gender (required for US citizens)", ["Yes", "No"])], p)[1] == ["x"]
-    assert mapped([opt("x", "Gender (required for US citizens)", DISABILITY)], p)[0] == {"x": "I do not want to answer"}
-    assert mapped([opt("x", "Gender (required for US citizens)", GENDER)], p)[0] == {"x": "Decline to self-identify"}
+    # #119: the profile answers gender, so neither the wrong-domain options nor a decline is taken: unresolved
+    assert mapped([opt("x", "Gender (required for US citizens)", DISABILITY)], p)[:2] == ({}, ["x"])
+    assert mapped([opt("x", "Gender (required for US citizens)", GENDER)], p)[:2] == ({}, ["x"])
     assert mapped([opt("x", "Are you a U.S. citizen or protected veteran?", ["Yes", "No"])], p)[1] == ["x"]
     assert mapped([opt("x", "Are you authorized to work in the US? (veterans: see below)", ["Yes", "No"])], p)[1] == ["x"]
     assert mapped([opt("x", "Have you ever worked for Acme Robotics? (EEO data)", ["Yes", "No"])], p)[1] == ["x"]
