@@ -35,6 +35,11 @@ streams the body and stops reading after `max_bytes` (default `MAX_TEXT_BYTES` =
 closes the connection. The result is a truncated page, never an error. Timeouts, retries, the host rate limit,
 redirects and decoding (charset, gzip) are unchanged. The cap is in the shared client, so the other `get_text`
 caller (the Lever apply page) gets the same cap. JSON requests (`get_json`, `post_json`) are not capped.
+Truncation is reported: `get_text_capped` returns `(text, truncated)`, where truncated is True only when the body
+was longer than the cap (one byte past the cap is read to tell). The Lever apply page fails closed: if it was cut,
+`get_form` raises an `AdapterError` ("tool_gap: ... text cap") instead of returning a form whose custom-question
+cards past the cut would be silently missing, so no API submit is ever built from a partial page. Greenhouse only
+loses board candidates on a cut page (each is verified against the API anyway), so it logs the cut and continues.
 
 ## Consequences
 Pasted company URLs resolve to the real board. A resolution costs one page GET plus up to 6 small API
@@ -45,7 +50,8 @@ frame resolution and fill/submit logic are unchanged.
 1. `uv run pytest -q tests/test_greenhouse_board_from_page_116.py`, then the full `uv run pytest -q`. The
    cache-key amendment is covered by `test_second_gh_jid_on_same_host_on_another_board_is_not_skipped` and
    `test_second_gh_jid_on_same_board_reuses_host_board_without_page_fetch`. The size cap is covered by
-   `uv run pytest -q tests/test_http_text_cap.py` (an endless body stops at the cap).
+   `uv run pytest -q tests/test_http_text_cap.py` (an endless body stops at the cap; truncation is flagged only past the cap), and
+   `tests/test_lever_cards.py::test_truncated_apply_page_fails_get_form_closed`.
 2. Dry run, never live: `applywise run --dry-run --source links --link <company careers URL with ?gh_jid=>`. The
    plan should name the real board in the ref and must not end in "job not found".
 

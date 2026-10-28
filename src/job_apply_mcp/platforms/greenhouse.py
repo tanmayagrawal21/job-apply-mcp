@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -15,6 +16,8 @@ from ..core.registry import platforms
 from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
 from .http import HttpError
 from .textflags import html_to_text
+
+log = logging.getLogger(__name__)
 
 _REMOTE_WORD = re.compile(r"\bremote\b", re.IGNORECASE)
 API = "https://boards-api.greenhouse.io/v1/boards"
@@ -123,7 +126,11 @@ class GreenhouseAdapter(BaseAdapter):
                 self._job_boards[(host, jid)] = board
                 return board, jid
             try:
-                found = page_board_candidates(await self.http.get_text(url_or_ref))
+                text, truncated = await self.http.get_text_capped(url_or_ref)
+                if truncated:   # only board candidates are lost; each one is verified against the API anyway
+                    log.info("greenhouse: company page for host %s was cut at the text cap; board candidates past "
+                             "the cut are not read", host)
+                found = page_board_candidates(text)
             except (HttpError, httpx.HTTPError, UnicodeError):   # unreachable page: the host still yields candidates
                 found = []
             for cand in list(dict.fromkeys(found + host_board_candidates(host)))[:_MAX_CANDIDATES]:

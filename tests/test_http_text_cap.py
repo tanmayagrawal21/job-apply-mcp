@@ -71,3 +71,14 @@ async def test_retries_errors_and_rate_limit_still_apply():
 async def test_json_callers_are_not_capped(http):
     respx.get("https://x.test/j").respond(json={"v": "y" * (MAX_TEXT_BYTES + 10)})
     assert len((await http.get_json("https://x.test/j", cache=False))["v"]) == MAX_TEXT_BYTES + 10
+
+
+@respx.mock
+async def test_get_text_capped_flags_truncation_only_past_the_cap(http):
+    respx.get("https://x.test/exact").respond(content=b"a" * 100)
+    respx.get("https://x.test/over").respond(content=b"a" * 101)
+    respx.get("https://x.test/under").respond(content=b"a" * 99)
+    assert await http.get_text_capped("https://x.test/exact", max_bytes=100) == ("a" * 100, False)
+    assert await http.get_text_capped("https://x.test/under", max_bytes=100) == ("a" * 99, False)
+    assert await http.get_text_capped("https://x.test/over", max_bytes=100) == ("a" * 100, True)
+    assert await http.get_text("https://x.test/over", max_bytes=100) == "a" * 100

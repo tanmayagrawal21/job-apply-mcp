@@ -113,8 +113,16 @@ class HttpClient:
     async def get_text(self, url: str, *, headers: dict[str, str] | None = None,
                        max_bytes: int = MAX_TEXT_BYTES) -> str:
         """GET a page as text (HTML). Rate limited and retried like any GET; never cached. The body is streamed and
-        reading stops after `max_bytes`, so the result is at most that long (a truncated page, never an error)."""
-        return (await self._send("GET", url, headers=headers, retry=True, max_bytes=max_bytes)).text
+        reading stops after `max_bytes`, so the result is at most that long (a truncated page, never an error).
+        A caller that must not act on a partial page uses `get_text_capped`."""
+        return (await self.get_text_capped(url, headers=headers, max_bytes=max_bytes))[0]
+
+    async def get_text_capped(self, url: str, *, headers: dict[str, str] | None = None,
+                              max_bytes: int = MAX_TEXT_BYTES) -> tuple[str, bool]:
+        """(text, truncated) for a GET as in `get_text`; truncated is True only when the body was longer than
+        `max_bytes` (and was cut there)."""
+        resp = await self._send("GET", url, headers=headers, retry=True, max_bytes=max_bytes)
+        return resp.text, bool(resp.extensions.get("jam_truncated"))
 
     async def post_json(self, url: str, *, json_body: Any, params: dict[str, Any] | None = None,
                         headers: dict[str, str] | None = None, cache: bool = True, ttl_s: int | None = None) -> Any:
@@ -225,14 +233,15 @@ class HttpClient:
             body = bytearray()
             async for chunk in resp.aiter_bytes():
                 body += chunk
-                if len(body) >= max_bytes:
+                if len(body) > max_bytes:   # one byte past the cap, so truncation is detectable
                     break
         finally:
             await resp.aclose()
         hdrs = [(k, v) for k, v in resp.headers.multi_items()
                 if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]   # body is decoded
         return httpx.Response(resp.status_code, headers=hdrs, content=bytes(body[:max_bytes]), request=req,
-                              history=resp.history, extensions=resp.extensions)
+                              history=resp.history,
+                              extensions={**resp.extensions, "jam_truncated": len(body) > max_bytes})
 
     @staticmethod
     def _decode(resp: httpx.Response) -> Any:
