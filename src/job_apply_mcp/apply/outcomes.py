@@ -101,7 +101,9 @@ def classify(ats: str, records: list[dict[str, Any]], dom: dict[str, Any], *, si
             return "captcha_rejected", "Ashby reCAPTCHA score rejection: " + fail[:200]
         if dom.get("captcha_toast"):
             return "captcha_rejected", "Ashby could not verify the submission with CAPTCHA"
-        if dom.get("corrections"):
+        if dom.get("corrections") and not subs and not requested:
+            # Client-side banner, nothing sent: re-enterable. After a sent request only Ashby's own response is a
+            # verdict (_ashby_net above); a banner beside an undecided request falls through -> unknown (ADR-0068).
             return "validation_error", "Ashby: your form needs corrections"
         if dom.get("updating_toast") and not subs and not requested:
             return "not_sent", "Ashby was still updating the application (upload in flight); nothing was sent"

@@ -568,3 +568,33 @@ async def test_structured_422_rejection_is_needs_human(drv, resume):
     res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
     assert res.status == "needs_human" and "rejected" in res.detail, res.detail
     assert srv.posts == 1 and srv.clicks == 1
+
+
+# ---------------------------------------------------------------- ADR-0068 amendment: Ashby "needs corrections" banner
+CORRECTIONS = ("document.getElementById('err').innerHTML="
+               "'<div role=alert>Your form needs corrections</div>';")
+CLIENT_SIDE_BLOCK = ("window.addEventListener('submit', ev => { ev.preventDefault(); ev.stopImmediatePropagation(); "
+                     "fetch('/clicked'); " + CORRECTIONS + " }, true);")
+
+
+async def test_corrections_banner_without_a_request_is_needs_human(drv, resume):
+    """Client-side validation: the banner shows and nothing is sent, so the handoff is re-enterable."""
+    srv = Srv(page(extra=CLIENT_SIDE_BLOCK), GOOD)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "needs_human" and "needs corrections" in res.detail, res.detail
+    assert srv.posts == 0 and srv.clicks == 1
+
+
+async def test_corrections_banner_after_a_sent_request_without_verdict_is_unknown(drv, resume):
+    """A submit was sent and answered 502 (no Ashby verdict); the banner beside it is not a verdict: unknown."""
+    srv = Srv(page(extra=CLICK_BEACON, onresp=CORRECTIONS), "Bad Gateway", api_status=502)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "roadblock" and "outcome unknown" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1
+
+
+async def test_corrections_banner_with_structured_ashby_rejection_is_needs_human(drv, resume):
+    srv = Srv(page(extra=CLICK_BEACON, onresp=CORRECTIONS), GQL, api_status=422)
+    res = await drv.fill_and_submit(srv.url, FORM, ANS, resume, dry_run=False)
+    assert res.status == "needs_human" and "rejected" in res.detail, res.detail
+    assert srv.posts == 1 and srv.clicks == 1

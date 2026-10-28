@@ -64,7 +64,13 @@ def test_ashby_dom():
         "captcha_rejected"
     assert classify("ashby", [], {"captcha_toast": True})[0] == "captcha_rejected"
     assert classify("ashby", [], {"ashby_success": True})[0] == "success"
-    assert classify("ashby", [], {"corrections": True})[0] == "validation_error"
+    assert classify("ashby", [], {"corrections": True}, requested=False)[0] == "validation_error"   # nothing sent
+    # ADR-0068 amendment: the banner beside a sent request without a verdict is not a verdict -> undecided (unknown)
+    assert classify("ashby", [], {"corrections": True}) is None                   # issued (or maybe), no response
+    assert classify("ashby", [_rec("{}")], {"corrections": True}, requested=False) is None
+    assert classify("ashby", [_rec("Bad Gateway")], {"corrections": True}) is None
+    gql = '{"data":null,"errors":[{"message":"Invalid email"}],"errorMessages":["Invalid email"]}'
+    assert classify("ashby", [_rec(gql)], {"corrections": True})[0] == "validation_error"   # Ashby's own verdict
     assert classify("ashby", [], {"ashby_failure": "Something went wrong - sorry."}) is None   # generic: unknown
 
 
