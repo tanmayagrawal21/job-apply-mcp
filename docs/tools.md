@@ -26,11 +26,30 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 |---|---|---|---|
 | `plan_application` | `ref_or_url`, `cursor=0` | `{ref, gate, why?, answers, src, unresolved, client_tasks?, approval_id?, t, next?, total?}` | Runs gates and duplicate check, fills from profile and local LLMs. `client_tasks` are the only things you must write (short, with bounded context). `src` names every answer source other than `profile`. A result over the response budget is paged: pass `next` as `cursor` until it is null; later pages come from memory, with no re-plan (ADR-0049). |
 | `draft_answers` | `ref_or_url`, `cursor=0` | same shape as `plan_application` | Runs the local writer + reviewer for prose fields a plan left open (`writing.mode="deferred"` lists them with `deferred:true`; a `timed_out` task carries a partial `draft`). Bounded by `writing.timeout_s`; re-issues `approval_id` over the grown answer set (ADR-0041). |
-| `submit_application` | `ref_or_url`, `answers=None`, `dry_run=None`, `approval_id=None`, `final_click=None` (`"human"`: fill only, the user clicks; tighten-only, ADR-0060) | `{ok, ref, status, via, confirmation?, detail?}`; status is one of `submitted`, `dry_run`, `duplicate`, `needs_human`, `needs_review` (+`client_tasks`: supplied prose that failed review, agent mode, ADR-0044), `roadblock`, `error`, `awaiting_code` (+`pending_id`) | Real submits need the server-issued `approval_id` from `plan_application` (human approval unless `approval_mode=agent`). Global `dry_run` wins. |
+| `submit_application` | `ref_or_url`, `answers=None`, `dry_run=None`, `approval_id=None`, `final_click=None` (`"human"`: fill only, the user clicks; tighten-only, ADR-0060) | `{ok, ref, status, via, confirmation?, detail?}`; status is one of `submitted`, `dry_run`, `duplicate`, `needs_human`, `needs_review` (+`client_tasks`: supplied prose that failed review, agent mode, ADR-0044), `roadblock`, `error`, `awaiting_code` (+`pending_id`); a browser dry run adds `captcha` and `captcha_mode` (see [Captcha in dry runs](#captcha-in-dry-runs)) | Real submits need the server-issued `approval_id` from `plan_application` (human approval unless `approval_mode=agent`). Global `dry_run` wins. |
 | `provide_verification_code` | `pending_id`, `code` | same row shape as `submit_application` (`submitted`, `awaiting_code` on a bad format, or `handoff`) | The USER types the code they received by email/SMS after a submit returned `awaiting_code`; ask them, never read their mail. Format-checked only, typed into the open page, verify clicked once, no resubmit. Expires after `verification.code_ttl_s` (ADR-0026). |
 | `resolve_submission` | `ref`, `outcome=""`, `note=""`, `evidence=""` | `{ok, state, ...}` | Only exposed when `apply.approval_mode=agent`; resolves a submission stuck in submitting/unknown, evidence folder required. |
-| `apply_batch` | `refs`, `dry_run=None`, `max_parallel=None` | `{results:[{ref,status,...}]}` one row per ref; unresolved items come back as `needs_input` with `client_tasks`, never silently skipped | Use for dozens of refs; rows stay under ~60 tokens each unless they carry `client_tasks`. |
+| `apply_batch` | `refs`, `dry_run=None`, `max_parallel=None` | `{results:[{ref,status,...}], captcha_counts?}` one row per ref; unresolved items come back as `needs_input` with `client_tasks`, never silently skipped; dry-run rows carry `captcha_mode` (and `captcha`), `captcha_counts` totals them | Use for dozens of refs; rows stay under ~60 tokens each unless they carry `client_tasks`. |
 | `list_applications` | `status=""`, `limit=50`, `cursor=0` | `{rows:[{ref,co,title,st,...}], next, total}` | Local store only. |
+
+### Captcha in dry runs
+
+A browser dry run reports what the fail-closed captcha classifier (ADR-0036) sees on the filled form, so a client
+can tell what a live submit would meet without opening evidence files (ADR-0071). Reporting only: it changes
+nothing a live submit does, and the tool never solves, evades or hides from a captcha.
+
+- `captcha`: `[{kind, visible, enterprise}]`. `kind` is `recaptcha`, `hcaptcha`, `turnstile`, `frame`, `marker`,
+  `unknown` or `ats:<name>` (an ATS whose live submit is always treated as captcha-protected). `visible` and
+  `enterprise` are `true`, `false` or `null` (unknown).
+- `captcha_mode`: `none` (no widget: a live submit clicks Submit normally), `implicit` (only invisible widgets:
+  a live submit clicks Submit once if `browser.captcha_policy="attempt"` or a consent window allows
+  `captcha_attempt`, otherwise the user clicks; the site may still reject it), `challenge` (a visible challenge:
+  the user must finish it) or `unclear` (not provably passive: the user makes the final click).
+- The `hint` of a dry run says the same in one line. A missing `captcha_mode` means the form was not inspected
+  (API path, or another driver), never "no captcha".
+- `apply_batch` adds `captcha_counts` (`{mode: n}`); `run_applications` / `run_report` rows carry `captcha`
+  (the mode) and the report adds `captcha_counts`. To pick forms for an acceptance run, filter on
+  `captcha_mode` (or the row's `captcha`) in `none` or `implicit`.
 
 `needs_human` is returned for CAPTCHAs, verification codes, account creation, attestation checkboxes that match
 `policy.stop_phrases`, and unresolved required fields. See the safety model in the [README](../README.md#safety-model).
@@ -39,7 +58,7 @@ Every tool returns `{"ok":true,...}` or `{"ok":false,"error":{"code","message","
 
 | Tool | Inputs | Output |
 |---|---|---|
-| `run_applications` | `links=None`, `links_file=None`, `sources=None` (links, mail, discovery), `max_applications=None`, `dry_run=None`, `mail=None` (narrowing only: {query, since, since_days}; sender, recipient and label are config-only), `messages=None` (client mail source), `discovery=None` (search_jobs arguments) | the run report: `run_id`, `mode`, `max_applications`, `counts`, rows per status with `why` (see [Run statuses](../README.md#run-statuses)), `plan_context` (feedback applied, notes) and, on a dry run, `live_preview` {would_submit, quota_blocked, remaining, blocked, warning}, always present. `max_applications` must be a whole number >= 1 and caps eligible postings the same in dry and live mode. Priority: explicit links, emailed links, discovery |
+| `run_applications` | `links=None`, `links_file=None`, `sources=None` (links, mail, discovery), `max_applications=None`, `dry_run=None`, `mail=None` (narrowing only: {query, since, since_days}; sender, recipient and label are config-only), `messages=None` (client mail source), `discovery=None` (search_jobs arguments) | the run report: `run_id`, `mode`, `max_applications`, `counts`, `captcha_counts?` (dry run, per captcha mode), rows per status with `why` (and `captcha` = the dry run's captcha mode) (see [Run statuses](../README.md#run-statuses)), `plan_context` (feedback applied, notes) and, on a dry run, `live_preview` {would_submit, quota_blocked, remaining, blocked, warning}, always present. `max_applications` must be a whole number >= 1 and caps eligible postings the same in dry and live mode. Priority: explicit links, emailed links, discovery |
 | `run_report` | `run_id=""` (latest), `category=""`, `limit=20` | submitted, confirmed, dry_run_ok, needs_human, quota_blocked, skipped, unsupported_site, unknown and failed rows, each with `why` (old names `handed_off`/`dry_run` accepted as `category`); `auto_attested`: attestations ticked under the consent window (ADR-0065) |
 | `give_feedback` | `run_id`, `feedback` (free text or {kind: deny_company, deny_title, answer, profile_answer, salary, run_size, ...}), `ref=None` | the stored feedback and what the next run will apply. Salary feedback never goes below the configured floor; any sensitive answer goes to `answer_profile_question`; client-supplied answers (and pay changes in human approval mode) apply only after `job-apply-mcp feedback --confirm <id>` on a terminal |
 

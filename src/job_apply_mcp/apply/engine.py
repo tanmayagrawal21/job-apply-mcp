@@ -1741,7 +1741,8 @@ class ApplyEngine:
             async with browser_cap:
                 r = await self.submit(ref, {}, out.approval_id, dry)
             row = {"ref": ref, "status": r.status, "via": r.via, "detail": r.detail, "pending_id": r.pending_id,
-                   "t": self.timings.get(ref, {}), "skipped_voluntary": out.skipped_voluntary}
+                   "t": self.timings.get(ref, {}), "skipped_voluntary": out.skipped_voluntary,
+                   "captcha": r.captcha, "captcha_mode": r.captcha_mode}      # ADR-0071 (dry run only)
             return {k: v for k, v in row.items() if v}
 
         # every ref starts at once; the pools above (plan_sem, browser_cap/_browser_sem) do the limiting
