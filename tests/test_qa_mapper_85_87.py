@@ -314,10 +314,11 @@ def test_race_detail_falls_back_to_the_eeo1_option():
 
 
 def test_race_detail_never_picks_a_broader_or_narrower_option():
-    # no matching detail option and no plain "White" option: decline, never "English" / "Scottish"
-    assert _race(DETAIL, race_ethnicity="White", race_detail="Welsh")[0] == "Decline to self-identify"
+    # no matching detail option and no plain "White" option: unresolved, never "English" / "Scottish" and (#119)
+    # never the decline option, because the profile answers race
+    assert _race(DETAIL, race_ethnicity="White", race_detail="Welsh") is None
     assert _race(["Northern Irish", "Scottish", "Decline to self-identify"], race_ethnicity="White",
-                 race_detail="Irish")[0] == "Decline to self-identify"
+                 race_detail="Irish") is None
 
 
 def test_declined_race_wins_over_detail():
