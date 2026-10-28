@@ -780,17 +780,21 @@ _VALIDITY_JS = """(a) => { a = a || {}; const keys = new Set(a.keys || []);
 # Visible, still-empty selects (react-select comboboxes and native <select>), required or not, with their labels.
 # Used only for DOM-only voluntary self-identification questions (_fill_demographics).
 _DOM_SELECTS_JS = """(a) => { const OPTK = (a && a.opt) || [];
-  const SECTION = '#demographic-section, [class*=demographic--container], [class*=eeoc__container]';
+  const SECTION = '#demographic-section, [class*=demographic--container], [class*=eeoc__container], .eeo-section';
   const apiOpt = xs => xs.filter(Boolean).some(x => OPTK.includes(x));
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length) && getComputedStyle(e).visibility !== 'hidden';
   const clean = t => (t || '').replace(/[*✱]/g, '').replace(/\\s+/g, ' ').trim();
   const labelOf = e => { let t = '';
     const lb = e.getAttribute('aria-labelledby'); if (lb) t = lb.split(' ').map(i => (document.getElementById(i) || {}).textContent || '').join(' ');
     if (!t && e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.textContent; }
-    if (!t) t = e.getAttribute('aria-label') || ''; return t; };
+    if (!t) t = e.getAttribute('aria-label') || '';
+    if (!t) { const q = e.closest('.application-question');          // Lever: <label><div .application-label>
+      const l = q && q.querySelector('.application-label'); if (l) t = l.textContent; }
+    return t; };
   const out = [];
   for (const e of document.querySelectorAll('input[role=combobox], select')) {
-    if (!e.id || e.disabled || e.closest('.iti__dropdown-content')) continue;
+    // ADR-0070: Lever EEO selects carry only a name (eeo[gender]); they are addressed by name
+    if (!(e.id || (e.tagName === 'SELECT' && e.name)) || e.disabled || e.closest('.iti__dropdown-content')) continue;
     const ctl = e.tagName === 'INPUT' && e.closest('[class*=select__control]');
     if (e.tagName === 'INPUT' && !ctl) continue;
     if (!vis(ctl || e)) continue;
@@ -798,9 +802,11 @@ _DOM_SELECTS_JS = """(a) => { const OPTK = (a && a.opt) || [];
     if (!empty) continue;
     const raw = labelOf(e);
     const required = e.required || e.getAttribute('aria-required') === 'true' || /[*✱]\\s*$/.test(raw.trim())
-      || (e.tagName === 'SELECT' && !apiOpt([e.id, e.name]));          // native: inverted rule (ADR-0039)
+      || (e.tagName === 'SELECT' && !apiOpt([e.id, e.name]) && !e.closest('.eeo-section'));   // native: inverted
+    // rule (ADR-0039), except Lever's voluntary EEO block, which is optional unless marked (ADR-0070)
     const section = !!e.closest(SECTION);
-    out.push({id: e.id, label: clean(raw).slice(0, 120), required, native: e.tagName === 'SELECT', section});
+    out.push({id: e.id, name: e.id ? '' : e.name, label: clean(raw).slice(0, 120), required,
+              native: e.tagName === 'SELECT', section});
   }
   return out.slice(0, 40); }"""
 # ADR-0063: on a page with several <form>s (company-hosted boards: job-alert sign-up, newsletter), the APPLICATION form
@@ -909,6 +915,7 @@ class PlaywrightDriver(VerificationMixin):
         self._api_keys: dict[int, dict[str, list[str]]] = {}   # page -> API required / optional keys (ADR-0039)
         self._exempt: dict[int, list[str]] = {}                # page -> allowlisted opt-in groups left empty (logged)
         self._ticked: dict[int, list[str]] = {}                # page -> rule-ticked boxes, shown in evidence (ADR-0063)
+        self._demo_gaps: dict[int, list[str]] = {}             # page -> self-ID selects left at placeholder (ADR-0070)
         self._combo: dict[tuple[int, str], str | None] = {}    # (page, key) -> committed autocomplete text / None=failed
         # final_click="human" (ADR-0058): ref -> background confirmation watcher; the engine sets the callback
         self._watchers: dict[str, asyncio.Task] = {}
@@ -975,6 +982,8 @@ class PlaywrightDriver(VerificationMixin):
         try:
             res = await self._run(page, ats, greenhouse_embed_url(apply_url, ref) if ats_name == "greenhouse"
                                   else apply_url, form, answers, files, dry_run)
+            if gaps := self._demo_gaps.get(id(page)):          # ADR-0070: never silently "verified"
+                res.unresolved = list(dict.fromkeys([*res.unresolved, *gaps]))
             return res
         except Exception as e:
             res = SubmitResult(ref=ref, status="error", via="browser", detail=f"{type(e).__name__}: {e}"[:200])
@@ -984,6 +993,7 @@ class PlaywrightDriver(VerificationMixin):
             self._api_keys.pop(id(page), None)
             self._exempt.pop(id(page), None)
             self._ticked.pop(id(page), None)
+            self._demo_gaps.pop(id(page), None)
             for k in [k for k in self._combo if k[0] == id(page)]:
                 self._combo.pop(k, None)
             if id(page) not in self._handoff_pages:      # awaiting_code/handoff pages keep their recorder
@@ -1136,7 +1146,8 @@ class PlaywrightDriver(VerificationMixin):
             ev = await self._save_evidence(page, ref, "fill-failed", extra={"fields": problems[:20]})
             return SubmitResult(ref=ref, status="needs_human", via="browser",
                                 detail=f"could not fill/verify: {problems[:8]}{ev}")
-        demo_bad, demo_given = await self._fill_demographics(page, answers)
+        demo_bad, demo_given, demo_gaps = await self._fill_demographics(page, answers)
+        self._demo_gaps[id(page)] = demo_gaps
         await self._fill_pronouns(page, answers)
         await self._fill_education(page, answers)
         await self._fill_privacy_groups(page, answers)
@@ -1187,11 +1198,13 @@ class PlaywrightDriver(VerificationMixin):
                                                f"Submit (captcha-protected){ev}")
         if dry_run:
             ev = await self._save_evidence(page, ref, "dry-run", extra={"exempt_optin": self._exempt.get(id(page), [])})
+            gap = (f"; {len(demo_gaps)} self-ID select(s) left at the placeholder, NOT verified (see unresolved): "
+                   f"{[g.split(' (', 1)[0] for g in demo_gaps][:6]}" if demo_gaps else "")
             # ADR-0071: report (read-only) what the classifier sees, so a client knows what a live submit would meet
             items, mode = summarize_captcha(await self._captcha_state(page), ats=ats.name,
                                             enterprise=await self._recaptcha_enterprise(page))
             return SubmitResult(ref=ref, status="dry_run", via="browser", captcha=items, captcha_mode=mode,
-                                detail=f"filled and verified {len(steps)} fields; not submitted{ev}")
+                                detail=f"filled and verified {len(steps)} fields{gap}; not submitted{ev}")
         return await self._submit(page, ats, ref, attempt=attempt)
 
     # -- final_click="human" (ADR-0058) ----------------------------------------------------------
@@ -1973,7 +1986,7 @@ class PlaywrightDriver(VerificationMixin):
             self._note_exempt(page, list(res["exempt"]))
         return list(res.get("bad") or [])
 
-    async def _fill_demographics(self, page, answers: dict[str, Any]) -> tuple[list[str], int]:
+    async def _fill_demographics(self, page, answers: dict[str, Any]) -> tuple[list[str], int, list[str]]:
         """Voluntary EEO / self-ID selects that exist only in the DOM (not in the job API; planned fields are left to
         the plan). EXACT matching only (demographic_pick: normalised equality plus the closed equivalence tables of
         ADR-0063; never a substring or fuzzy match, so Female never selects Male). The profile's [demographics] value
@@ -1984,33 +1997,38 @@ class PlaywrightDriver(VerificationMixin):
         ADR-0063: a select inside the board's demographic / EEOC section counts as self-ID even when its label names
         no topic ("I identify as:"); a label canonical_key misses is classified by dom_demographic_key; the scan is
         repeated (max 3 passes) because some questions only appear after another is answered (race after
-        "Hispanic/Latino? No"). Returns (problems, number of non-decline profile answers committed)."""
+        "Hispanic/Latino? No"). ADR-0070: a select the owner's profile meant to answer (a non-decline value) that is
+        still at its placeholder afterwards is returned in `gaps` ("<label> (<category>: <why>)"), never verified.
+        Returns (problems, number of non-decline profile answers committed, gaps)."""
         bad: list[str] = []
+        gaps: list[str] = []
         given = 0
         handled: set[str] = set()
         for _ in range(3):
             try:
                 rows = [r for r in await page.evaluate(_DOM_SELECTS_JS, self._api_keys.get(id(page), {}))
-                        if r["id"] not in handled]
+                        if (r["id"] or r.get("name")) not in handled]
             except Exception:
                 break
-            rows = [r for r in rows if r["id"] and r["id"] not in answers]
+            rows = [r for r in rows if (k := r["id"] or r.get("name")) and k not in answers]
             if not rows:
                 break
             for row in rows:
-                handled.add(row["id"])
-                b, g = await self._fill_one_demographic(page, row, answers)
+                handled.add(row["id"] or row["name"])
+                b, g, gap = await self._fill_one_demographic(page, row, answers)
                 bad += b
                 given += g
-        return bad, given
+                gaps += [gap] if gap else []
+        return bad, given, gaps
 
-    async def _fill_one_demographic(self, page, row: dict[str, Any], answers: dict[str, Any]) -> tuple[list[str], int]:
+    async def _fill_one_demographic(self, page, row: dict[str, Any],
+                                    answers: dict[str, Any]) -> tuple[list[str], int, str | None]:
         lab, el_id = row["label"], row["id"]
         ck = canonical_key(lab)
         if ck not in DEMOGRAPHIC_KEYS:
             ck = dom_demographic_key(lab)
         if not (ck in DEMOGRAPHIC_KEYS or _DEMOGRAPHIC_LABEL.search(lab) or row.get("section")):
-            return [], 0
+            return [], 0, None
         # ADR-0063: the owner's value is used only for a plainly-worded self-ID question (every word generic self-ID
         # wording or the topic's own words); "accommodation for a disability", "Spanish to Latino customers" etc.
         # get no profile value (decline table when required, blank when optional), exactly as before this ADR.
@@ -2019,21 +2037,31 @@ class PlaywrightDriver(VerificationMixin):
             keys = []
         values = [str(answers.get(f"demographic:{k}") or "").strip() for k in keys]
         values = [v for v in values if v]
-        if not values and not row["required"]:
-            return [], 0                                       # optional, nothing in the profile: stay blank
-        declined = all(is_decline_value(v) or normalize(v) in _DECLINE_SYNONYMS for v in values)
+        served = str(answers.get("demographic:is_veteran") or "").strip() if ck == "veteran" and keys else ""
+        if is_decline_value(served):
+            served = ""
+        if not values and not served and not row["required"]:
+            return [], 0, None                                 # optional, nothing in the profile: stay blank
+        declined = not served and all(is_decline_value(v) or normalize(v) in _DECLINE_SYNONYMS for v in values)
+        # ADR-0070: the profile meant to answer this select; a placeholder left afterwards is a reported gap
+        field = {"gender": "gender", "race": "race_ethnicity / race_detail", "hispanic": "hispanic_latino",
+                 "veteran": "veteran_status / is_veteran", "disability": "disability_status"}.get(str(ck), str(ck))
+        no_match = None if declined else f"{lab} (unknown_fact: no option equals [demographics].{field})"
+        not_set = None if declined else f"{lab} (tool_gap: the chosen self-ID option did not commit)"
+        hisp = str(answers.get("demographic:hispanic") or "")
 
         def choose(texts: list[str]) -> str | None:
             texts = [t for t in texts if t and normalize(t) not in ("select", "")]
-            return exact_decline(texts) if declined else demographic_pick(ck, values, texts, lab)
-        loc = page.locator(f'[id="{el_id}"]').first
+            return (exact_decline(texts) if declined
+                    else demographic_pick(ck, values, texts, lab, hispanic=hisp, is_veteran=served))
+        loc = page.locator(f'[id="{el_id}"]' if el_id else f'select[name="{row["name"]}"]').first
         try:
             await loc.scroll_into_view_if_needed()
             if row["native"]:
                 texts = [t.strip() for t in await loc.locator("option").all_inner_texts()]
                 pick = choose(texts)
                 if pick is None:
-                    return [], 0
+                    return [], 0, no_match
                 await loc.select_option(label=pick, timeout=2000)
                 got = await loc.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].text : ''")
                 if normalize(got) != normalize(pick):              # exact read-back failed: blank it
@@ -2042,8 +2070,8 @@ class PlaywrightDriver(VerificationMixin):
                     except Exception:
                         pass
                     blank = not (await loc.evaluate("e => e.value || ''"))
-                    return ([lab] if row["required"] or not blank else []), 0
-                return [], 0 if declined else 1
+                    return ([lab] if row["required"] or not blank else []), 0, not_set
+                return [], 0 if declined else 1, None
             marked = bool(await loc.evaluate(_MARK_SCOPE_JS))
             opts = (page.locator("[data-jam-scope]") if marked else page).locator(_MENU_SCOPED)
             await loc.click()
@@ -2052,7 +2080,7 @@ class PlaywrightDriver(VerificationMixin):
             pick = choose(texts)
             if pick is None:
                 await self._close_menu(page)
-                return [], 0
+                return [], 0, no_match
             await opts.nth(texts.index(pick)).click(timeout=3000)
             await self._close_menu(page)
             shown: list[str] = []
@@ -2071,11 +2099,11 @@ class PlaywrightDriver(VerificationMixin):
                 except Exception:
                     pass
                 left = await page.locator("[data-jam-commit]").locator(_SELECT_VALUES).count()
-                return ([lab] if row["required"] or left else []), 0
-            return [], 0 if declined else 1
+                return ([lab] if row["required"] or left else []), 0, not_set
+            return [], 0 if declined else 1, None
         except Exception:
             await self._close_menu(page)
-            return ([lab] if row["required"] else []), 0
+            return ([lab] if row["required"] else []), 0, not_set
 
     async def _fill_pronouns(self, page, answers: dict[str, Any]) -> None:
         """Pronouns choice groups that exist only in the DOM (Lever: a checkbox list titled by a sibling

@@ -81,6 +81,7 @@ hispanic_latino = "Decline to self-identify"   # or the exact option text, e.g. 
 race_ethnicity = "Decline to self-identify"
 # race_detail = ""                  # optional finer option, e.g. "Irish"; used only when a form offers it exactly
 veteran_status = "Decline to self-identify"
+# is_veteran = ""                   # optional "Yes"/"No": ever served, protected or not; answers "I am not a veteran"
 disability_status = "Decline to self-identify"
 
 [salary]

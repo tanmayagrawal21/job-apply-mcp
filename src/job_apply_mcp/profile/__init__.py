@@ -62,6 +62,7 @@ class Demographics(BaseModel):
     race_ethnicity: str = DECLINE
     race_detail: str = ""               # ADR-0055: optional finer race option; "" = race_ethnicity only
     veteran_status: str = DECLINE
+    is_veteran: str = ""                # ADR-0070: "Yes"/"No": ever served (protected or not); "" = unknown, never derived
     disability_status: str = DECLINE
     sexual_orientation: str = DECLINE
     pronouns: str = DECLINE

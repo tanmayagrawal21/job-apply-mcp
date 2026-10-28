@@ -10,6 +10,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
   run never reports success for it (#98, #99). The frame URL is checked with the browser's own (WHATWG) parse,
   refusing backslash/control/non-ASCII/userinfo/percent-encoded authorities, must name the ref's job id, and the
   gate fails closed.
+- EEO selects (ADR-0070, #97 #110): the privacy-notice opt-in now actually reaches the browser driver, so the
+  demographic-data consent box is ticked under the ADR-0063 rule. Lever's U.S. EEO block (name-only selects) is
+  filled from `[demographics]`. A new optional `[demographics].is_veteran` ("Yes"/"No") answers the plain
+  "I am (not) a veteran" wording. "(Not Hispanic or Latino)" race options need the owner's Hispanic answer. A
+  self-ID select the profile meant to answer but that is still at its placeholder is listed in `unresolved`, and a
+  dry run no longer calls it verified.
 - Submit outcome fix (ADR-0068): only an unambiguous ATS rejection after the click, in the ATS's own response shape
   (Ashby GraphQL errors on 200/400/422; Greenhouse invalid-attributes / invalid-attachment on 400/422), is
   `needs_human`. 403/408/409/429/5xx, other shapes, keyword-only bodies, Lever error text and a sent request with no

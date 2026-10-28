@@ -24,6 +24,15 @@ def _rec(body, status=200):
     ('{"code":"captcha-failed"}', 428, "captcha_rejected"),
     ('{"code":"captcha-retry"}', 428, "captcha_rejected"),
     ('{"code":"invalid-attributes","message":"email"}', 422, "validation_error"),
+    ('{"code":"invalid-attachment","message":"resume"}', 400, "validation_error"),
+    # ADR-0068 amendment: the same shape on any other status is not a verdict -> undecided (unknown)
+    ('{"code":"invalid-attributes","message":"email"}', 500, None),
+    ('{"code":"invalid-attributes","message":"email"}', 502, None),
+    ('{"code":"invalid-attachment","message":"resume"}', 403, None),
+    ('{"code":"invalid-attributes","message":"email"}', 408, None),
+    ('{"code":"invalid-attributes","message":"email"}', 200, None),
+    ('{"code":"invalid-attributes","message":"email"}', 0, None),
+    ('Internal Server Error: invalid-attributes', 500, None),
     ('{"code":"invalid-security-code","message":"Invalid"}', 422, "code_requested"),
     ('{}', 200, "success"),
     ('{"code":"something-new"}', 500, None),
@@ -64,7 +73,13 @@ def test_ashby_dom():
         "captcha_rejected"
     assert classify("ashby", [], {"captcha_toast": True})[0] == "captcha_rejected"
     assert classify("ashby", [], {"ashby_success": True})[0] == "success"
-    assert classify("ashby", [], {"corrections": True})[0] == "validation_error"
+    assert classify("ashby", [], {"corrections": True}, requested=False)[0] == "validation_error"   # nothing sent
+    # ADR-0068 amendment: the banner beside a sent request without a verdict is not a verdict -> undecided (unknown)
+    assert classify("ashby", [], {"corrections": True}) is None                   # issued (or maybe), no response
+    assert classify("ashby", [_rec("{}")], {"corrections": True}, requested=False) is None
+    assert classify("ashby", [_rec("Bad Gateway")], {"corrections": True}) is None
+    gql = '{"data":null,"errors":[{"message":"Invalid email"}],"errorMessages":["Invalid email"]}'
+    assert classify("ashby", [_rec(gql)], {"corrections": True})[0] == "validation_error"   # Ashby's own verdict
     assert classify("ashby", [], {"ashby_failure": "Something went wrong - sorry."}) is None   # generic: unknown
 
 
