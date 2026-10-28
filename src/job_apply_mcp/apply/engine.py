@@ -1729,6 +1729,7 @@ class ApplyEngine:
         except PermissionError as e:
             return [{"ref": r, "status": "error", "detail": str(e)} for r in refs]
         browser_cap = asyncio.Semaphore(max_parallel or self.s.concurrency.browser_workers)
+        from .. import consent
 
         async def one(ref: str) -> dict[str, Any]:
             out = await self.plan(ref)
@@ -1742,7 +1743,8 @@ class ApplyEngine:
                 return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,
                         "client_tasks": out.client_tasks, "approval_id": out.approval_id, "t": out.timings,
                         **({"skipped_voluntary": out.skipped_voluntary} if out.skipped_voluntary else {})}
-            if not dry and not self.s.apply.auto_approve_active:
+            # a consent window covering approve_submissions lets engine.submit meter it (ADR-0048); read-only here
+            if not dry and not self.s.apply.auto_approve_active and consent.active(self.s, "approve_submissions") is None:
                 return {"ref": ref, "status": "awaiting_approval", "approval_id": out.approval_id, "t": out.timings}
             async with browser_cap:
                 r = await self.submit(ref, {}, out.approval_id, dry)
