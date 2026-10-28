@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Reviewer follow-ups: the CI browser job fails on any skipped fixture test or an empty file list; EEO fixtures
+  use varied fictional personas; `is_veteran="Yes"` with a declined `veteran_status` takes the decline option on a
+  protected-only veteran select (ADR-0070); a Greenhouse frame URL with repeated or conflicting `token`/`gh_jid` is
+  refused (ADR-0069); the dry-run captcha hint reflects `final_click="human"` and `captcha_handoff=false` (ADR-0071).
 - Greenhouse company-hosted embeds (ADR-0069): the driver opens the `#grnhse_app` application iframe (bounded wait
   for a lazily inserted one) instead of filling the host page, and never fills a page that holds none of the
   posting's own fields (`needs_human`, "application form not found"), so a job-alert box is never filled and a dry

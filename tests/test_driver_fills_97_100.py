@@ -48,7 +48,7 @@ def test_dom_demographic_key_needs_exactly_one_topic(label, key):
 def test_demographic_pick_closed_equivalences_only():
     race = ["Central Asian (inclusive of A, B)", "South Asian (inclusive of C, D)", "East Asian (inclusive of E)",
             "I don't wish to answer"]
-    assert demographic_pick("race", ["South Asian", "Asian"], race) == "South Asian (inclusive of C, D)"
+    assert demographic_pick("race", ["Central Asian", "Asian"], race) == "Central Asian (inclusive of A, B)"
     assert demographic_pick("race", ["", "Asian"], race) is None                 # never a prefix / substring
     assert demographic_pick("race", ["Asian"], ["Asian Indian", "White"]) is None
     assert demographic_pick("gender", ["Male"], ["Man", "Woman", "Non-binary"]) == "Man"
@@ -143,9 +143,9 @@ rs('4005', ['Central Asian (inclusive of A, B)', 'South Asian (inclusive of C, D
 __REPORT__
 </script></body></html>""".replace("__RS__", RS_JS).replace("__REPORT__", REPORT)
 
-PROFILE = {"demographic:gender": "Male", "demographic:race": "Asian", "demographic:race_detail": "South Asian",
+PROFILE = {"demographic:gender": "Female", "demographic:race": "Asian", "demographic:race_detail": "Central Asian",
            "demographic:veteran": "I am not a protected veteran",
-           "demographic:disability": "No, I do not have a disability"}
+           "demographic:disability": "Yes, I have a disability"}
 FORM_SURVEY = ApplicationForm(ref="greenhouse:initech:41", fields=[
     FormField(key="first_name", label="First Name", kind=FieldKind.text, required=True)])
 
@@ -163,9 +163,9 @@ VET_OK = ["I am a protected veteran", "I am not a protected veteran", "I don't w
 async def test_survey_filled_from_profile_and_consent_ticked_when_opted_in(drv):
     res, st = await _survey(drv, VET_OK, {**PROFILE, "pref:acknowledge_privacy_notices": True})
     assert res.status == "dry_run", res.detail
-    assert st["4001"] == "Man" and st["4002"] == "I don't wish to answer"     # no profile key: required -> decline
-    assert st["4003"] == "I am not a protected veteran" and st["4004"] == "No"
-    assert st["4005"] == "South Asian (inclusive of C, D)"                   # race_detail wins over race
+    assert st["4001"] == "Woman" and st["4002"] == "I don't wish to answer"   # no profile key: required -> decline
+    assert st["4003"] == "I am not a protected veteran" and st["4004"] == "Yes"
+    assert st["4005"] == "Central Asian (inclusive of A, B)"                 # race_detail wins over race
     assert st.get("checked:gdpr_demographic_data_consent_given_1") is True
     ev = res.detail.split("evidence=", 1)[1].strip().replace("~", str(__import__("pathlib").Path.home()), 1)
     metas = [json.loads(p.read_text()) for p in __import__("pathlib").Path(ev).glob("dry-run-*.json")]
@@ -175,7 +175,7 @@ async def test_survey_filled_from_profile_and_consent_ticked_when_opted_in(drv):
 async def test_consent_not_ticked_without_the_privacy_opt_in(drv):
     res, st = await _survey(drv, VET_OK, {**PROFILE, "pref:acknowledge_privacy_notices": False})
     assert res.status == "incomplete" and "I consent to Initech" in res.detail, (res.detail, st)
-    assert st["4001"] == "Man" and not st.get("checked:gdpr_demographic_data_consent_given_1")
+    assert st["4001"] == "Woman" and not st.get("checked:gdpr_demographic_data_consent_given_1")
 
 
 async def test_consent_not_ticked_when_the_profile_supplies_no_demographics(drv):
@@ -215,11 +215,12 @@ async def test_conditional_race_select_is_filled_on_rescan(drv):
     form = ApplicationForm(ref="greenhouse:initech:42", fields=[FormField(key="first_name", label="First Name",
                                                                           kind=FieldKind.text)])
     res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/42", form,
-                                    {"first_name": "Alex", "demographic:gender": "Male", "demographic:hispanic": "No",
-                                     "demographic:race": "Asian"}, {}, dry_run=True)
+                                    {"first_name": "Alex", "demographic:gender": "Female", "demographic:hispanic": "No",
+                                     "demographic:race": "American Indian or Alaskan Native"}, {}, dry_run=True)
     assert res.status == "dry_run", res.detail
     st = _state(posts)
-    assert st["gender"] == "Male" and st["hispanic_ethnicity"] == "No" and st["race"] == "Asian"
+    assert st["gender"] == "Female" and st["hispanic_ethnicity"] == "No"
+    assert st["race"] == "American Indian or Alaskan Native"
 
 
 # #98: a job-alert sign-up form above the application form, sharing field ids and labels

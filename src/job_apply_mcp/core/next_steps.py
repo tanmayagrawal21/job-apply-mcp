@@ -73,7 +73,8 @@ NO_RETRY = frozenset({"handoff", "awaiting_code", "submitting", "unknown", "capt
 
 
 def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | None = None,
-               window: bool = False, state: str | None = None) -> dict[str, Any]:
+               window: bool = False, state: str | None = None, final_click: str = "agent",
+               captcha_handoff: bool = True) -> dict[str, Any]:
     """Return `row` plus guidance for its status (an explicit next_action already in the row wins). The submission
     `state` wins over an error status (ADR-0059); in a consent window a tool_gap never asks the user (ADR-0067)."""
     if "next_action" in row:
@@ -91,8 +92,9 @@ def with_guide(row: dict[str, Any], status: str | None = None, *, cat: str | Non
         a, h = _GAP_IN_WINDOW.get(st, _GAP_IN_WINDOW[""])
         g = {"next_action": a, "hint": h}
     if st == "dry_run" and g:                  # ADR-0071: never let a captcha-protected dry run read as "good to go"
-        from .captcha_report import HINTS
-        if (h := HINTS.get(str(row.get("captcha_mode") or ""))):
+        from .captcha_report import hint  # wording follows final_click / captcha_handoff (report only)
+        if (h := hint(str(row.get("captcha_mode") or ""), final_click=final_click,
+                      captcha_handoff=captcha_handoff)):
             g = {**g, "hint": h}
     return {**row, **g}
 

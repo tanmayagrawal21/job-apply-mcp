@@ -24,3 +24,11 @@ user, so clients had to open evidence files to choose no-captcha forms for accep
 ## Consequences
 Reporting only. Captcha detection, the live attempt/handoff rule, outcome classification and every browser
 interaction are unchanged; the tool still never solves, evades or hides from a captcha (ADR-0036).
+
+## Amendment (2026-10-28): hint follows final_click and captcha_handoff
+The dry-run hint (`captcha_report.hint`) now reflects the settings a live submit would use, since the mode alone
+can mislead. With `browser.final_click="human"` (config, or `final_click="human"` on the call) the hint says the user
+clicks Submit (and finishes a visible challenge); this wins over everything else. With
+`browser.captcha_handoff=false` (tests only) a captcha-bearing mode's hint says a live submit clicks Submit with no
+captcha handoff and the site may reject it. `captcha_mode`, detection, the attempt/handoff rule and submit
+behaviour are unchanged. Tests: `tests/test_dry_run_captcha.py`.

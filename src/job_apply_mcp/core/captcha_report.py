@@ -28,6 +28,26 @@ HINTS: dict[str, str] = {
                 "the final click to the user."),
 }
 
+_SENT = "Dry run: nothing was sent. "
+
+
+def hint(mode: str | None, *, final_click: str = "agent", captcha_handoff: bool = True) -> str | None:
+    """The dry-run hint for `mode` under the settings a live submit would use (report only, never behaviour).
+    final_click="human" (config or per call): the user always clicks Submit. captcha_handoff=false (tests only):
+    a live submit clicks normally, captcha or not. None: no captcha-specific hint (mode absent, or none + agent)."""
+    if mode not in MODES:
+        return None
+    if final_click == "human":
+        if mode == "challenge":
+            return _SENT + ("final_click='human': a live submit fills and verifies; the user finishes the visible "
+                            "captcha challenge and clicks Submit.")
+        return _SENT + "final_click='human': a live submit fills and verifies; the user clicks Submit in the open tab."
+    if not captcha_handoff and mode != "none":
+        lead = "A visible captcha challenge is on the form. " if mode == "challenge" else ""
+        return _SENT + lead + ("captcha_handoff=false: a live submit clicks Submit with no captcha handoff; "
+                               "the site may reject it.")
+    return HINTS.get(mode)
+
 
 def _kind_visible(kind: str, visible: list[str]) -> bool:
     if kind == "frame":

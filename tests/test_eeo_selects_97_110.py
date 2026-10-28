@@ -24,15 +24,17 @@ LEVER_RACE = ["Hispanic or Latino", "White (Not Hispanic or Latino)", "Asian (No
 
 
 def test_not_hispanic_parenthetical_needs_the_owners_hispanic_answer():
-    assert demographic_pick("race", ["Asian"], LEVER_RACE, "Race", hispanic="No") == "Asian (Not Hispanic or Latino)"
-    assert demographic_pick("race", ["Asian"], LEVER_RACE, "Race", hispanic="No, I am not Hispanic or Latino") \
-        == "Asian (Not Hispanic or Latino)"
-    assert demographic_pick("race", ["Asian"], LEVER_RACE, "Race") is None                    # hispanic unknown
-    assert demographic_pick("race", ["Asian"], LEVER_RACE, "Race", hispanic="Yes") is None    # contradicts the option
-    assert demographic_pick("race", ["Asian"], LEVER_RACE, "Race", hispanic="Decline to self-identify") is None
+    two = "Two or More Races"
+    assert demographic_pick("race", [two], LEVER_RACE, "Race", hispanic="No") == f"{two} (Not Hispanic or Latino)"
+    assert demographic_pick("race", ["White"], LEVER_RACE, "Race", hispanic="No, I am not Hispanic or Latino") \
+        == "White (Not Hispanic or Latino)"
+    assert demographic_pick("race", [two], LEVER_RACE, "Race") is None                    # hispanic unknown
+    assert demographic_pick("race", [two], LEVER_RACE, "Race", hispanic="Yes") is None    # contradicts the option
+    assert demographic_pick("race", [two], LEVER_RACE, "Race", hispanic="Decline to self-identify") is None
     # a finer race_detail still wins when the form offers it
-    gh = ["East Asian (inclusive of A)", "South Asian (inclusive of B, C)", "White (origins in D)"]
-    assert demographic_pick("race", ["South Asian", "Asian"], gh, "Race") == "South Asian (inclusive of B, C)"
+    gh = ["West African (inclusive of A)", "East African (inclusive of B, C)", "White (origins in D)"]
+    assert demographic_pick("race", ["East African", "Black or African American"], gh, "Race") \
+        == "East African (inclusive of B, C)"
 
 
 def test_contractions_fold():
@@ -158,7 +160,7 @@ LEVER_HTML = ("""<html><body><form id=application-form><ul>
 </body></html>""").replace("__REPORT__", REPORT)
 FORM_LEVER = ApplicationForm(ref="lever:initech:abc", fields=[
     FormField(key="name", label="Full name", kind=FieldKind.text, required=True)])
-LEVER_PROFILE = {"demographic:gender": "Female", "demographic:race": "Asian", "demographic:hispanic": "No",
+LEVER_PROFILE = {"demographic:gender": "Female", "demographic:race": "Two or More Races", "demographic:hispanic": "No",
                  "demographic:veteran": "I am not a protected veteran"}
 
 
@@ -172,7 +174,7 @@ async def _lever(drv, answers):
 async def test_lever_eeo_selects_filled_from_profile(drv):
     res, st = await _lever(drv, {**LEVER_PROFILE, "demographic:is_veteran": "No"})
     assert res.status == "dry_run", res.detail
-    assert st["sel:eeo[gender]"] == "Female" and st["sel:eeo[race]"] == "Asian (Not Hispanic or Latino)"
+    assert st["sel:eeo[gender]"] == "Female" and st["sel:eeo[race]"] == "Two or More Races (Not Hispanic or Latino)"
     assert st["sel:eeo[veteran]"] == "I am not a veteran"
     assert not res.unresolved and "NOT verified" not in res.detail
 
@@ -216,11 +218,12 @@ and processing my responses to the demographic data surveys above.*</label></div
 const D = "I don't wish to answer";
 rs('4001', ['Man', 'Woman', D]);
 rs('4003', ['Yes, I am a veteran', 'No, I am not a veteran', 'I identify as one or more protected veteran classifications', D]);
-rs('4005', ['South Asian (inclusive of A, B)', 'White (origins in C)', D], {multi: true});
+rs('4005', ['West African (inclusive of A)', 'East African (inclusive of B, C)', 'White (origins in D)', D], {multi: true});
 ['4001', '4003', '4005'].forEach(i => document.getElementById(i).setAttribute('aria-required', 'true'));
 __REPORT__
 </script></body></html>""".replace("__RS__", RS_JS).replace("__REPORT__", REPORT)
-GH_PROFILE = {"demographic:gender": "Female", "demographic:race": "Asian", "demographic:race_detail": "South Asian",
+GH_PROFILE = {"demographic:gender": "Male", "demographic:race": "Black or African American",
+              "demographic:race_detail": "East African",
               "demographic:veteran": "I am not a protected veteran", "pref:acknowledge_privacy_notices": True}
 FORM_GH = ApplicationForm(ref="greenhouse:initech:51", fields=[
     FormField(key="first_name", label="First Name", kind=FieldKind.text, required=True)])
@@ -236,8 +239,8 @@ async def _gh(drv, html, answers):
 async def test_greenhouse_survey_complete_with_is_veteran(drv):
     res, st = await _gh(drv, SURVEY_HTML, {**GH_PROFILE, "demographic:is_veteran": "No"})
     assert res.status == "dry_run", res.detail
-    assert st["4001"] == "Woman" and st["4003"] == "No, I am not a veteran"
-    assert st["4005"] == "South Asian (inclusive of A, B)"
+    assert st["4001"] == "Man" and st["4003"] == "No, I am not a veteran"
+    assert st["4005"] == "East African (inclusive of B, C)"                   # race_detail wins over race
     assert st.get("checked:gdpr_demographic_data_consent_given_1") is True and not res.unresolved
 
 
@@ -273,12 +276,58 @@ FORM_NATIVE = ApplicationForm(ref="greenhouse:initech:52", fields=[
 async def test_greenhouse_native_eeoc_selects(drv):
     srv, posts = _serve(NATIVE_HTML)
     res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/52", FORM_NATIVE,
-                                    {"first_name": "Alex", "demographic:gender": "Female", "demographic:race": "Asian",
+                                    {"first_name": "Alex", "demographic:gender": "Male", "demographic:race": "White",
                                      "demographic:hispanic": "No",
-                                     "demographic:veteran": "I am not a protected veteran",
-                                     "demographic:disability": "No, I do not have a disability"}, {}, dry_run=True)
+                                     "demographic:veteran": "I am a protected veteran",
+                                     "demographic:disability": "Yes, I have a disability (or previously had a "
+                                                               "disability)"}, {}, dry_run=True)
     st = _state(posts)
     assert res.status == "dry_run" and not res.unresolved, (res.detail, res.unresolved)
-    assert st["sel:gender"] == "Female" and st["sel:race"] == "Asian (Not Hispanic or Latino)"
-    assert st["sel:veteran_status"] == "I am not a protected veteran"
-    assert st["sel:disability_status"] == "No, I don't have a disability"
+    assert st["sel:gender"] == "Male" and st["sel:race"] == "White (Not Hispanic or Latino)"
+    assert st["sel:veteran_status"] == "I am a protected veteran"
+    assert st["sel:disability_status"] == "Yes, I have a disability (or previously had a disability)"
+
+
+# ADR-0070 amendment: is_veteran="Yes" with a veteran_status decline on a PROTECTED-only veteran select
+def _vet_html(opts, required):
+    """Required: a Greenhouse native EEOC select (inverted rule). Optional: Lever's voluntary .eeo-section."""
+    o = "".join(f"<option>{t}</option>" for t in opts)
+    req = " required" if required else ""
+    box = "eeoc__container" if required else "eeo-section"
+    return (f"""<html><body><form id=application-form>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<div class="{box}"><h2>Voluntary Self-Identification</h2>
+<label for=veteran_status>Veteran Status{" *" if required else ""}</label><select id=veteran_status{req}>
+<option value="">Please select</option>{o}</select></div>
+<button type=submit>Submit application</button></form><script>__REPORT__</script></body></html>"""
+            .replace("__REPORT__", REPORT))
+
+
+PROTECTED_ONLY = ["I identify as one or more of the classifications of protected veteran",
+                  "I am not a protected veteran", "I don't wish to answer"]
+
+
+@pytest.mark.parametrize("answers,required,want", [
+    ({"demographic:veteran": "Decline to self-identify"}, True, "I don't wish to answer"),
+    ({"demographic:veteran": "Decline to self-identify"}, False, "I don't wish to answer"),   # owner's own decline
+    ({}, True, "I don't wish to answer"),           # required, nothing on protected status: decline table
+    ({}, False, ""),                                # optional, nothing on protected status: blank
+])
+async def test_served_veteran_on_protected_only_select_declines_never_protected(drv, answers, required, want):
+    srv, posts = _serve(_vet_html(PROTECTED_ONLY, required))
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/53", FORM_NATIVE,
+                                    {"first_name": "Sam", "demographic:is_veteran": "Yes", **answers}, {},
+                                    dry_run=True)
+    st = _state(posts)
+    assert st["sel:veteran_status"] == want, (res.status, res.detail)
+    assert "protected veteran" not in st["sel:veteran_status"]
+    if want:
+        assert res.status == "dry_run" and not res.unresolved, (res.detail, res.unresolved)
+
+
+async def test_served_veteran_without_a_decline_option_stays_blank(drv):
+    srv, posts = _serve(_vet_html(PROTECTED_ONLY[:2], True))
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/53", FORM_NATIVE,
+                                    {"first_name": "Sam", "demographic:is_veteran": "Yes",
+                                     "demographic:veteran": "Decline to self-identify"}, {}, dry_run=True)
+    assert _state(posts)["sel:veteran_status"] == "" and res.status == "incomplete", res.detail

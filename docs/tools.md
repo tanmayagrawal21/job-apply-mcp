@@ -45,7 +45,10 @@ nothing a live submit does, and the tool never solves, evades or hides from a ca
   a live submit clicks Submit once if `browser.captcha_policy="attempt"` or a consent window allows
   `captcha_attempt`, otherwise the user clicks; the site may still reject it), `challenge` (a visible challenge:
   the user must finish it) or `unclear` (not provably passive: the user makes the final click).
-- The `hint` of a dry run says the same in one line. A missing `captcha_mode` means the form was not inspected
+- The `hint` of a dry run says the same in one line, worded for the settings a live submit would use: with
+  `browser.final_click="human"` (config or per call) it says the user clicks Submit; with
+  `browser.captcha_handoff=false` it says a live submit clicks with no captcha handoff and may be rejected.
+  `captcha_mode` itself does not change. A missing `captcha_mode` means the form was not inspected
   (API path, or another driver), never "no captcha".
 - `apply_batch` adds `captcha_counts` (`{mode: n}`); `run_applications` / `run_report` rows carry `captcha`
   (the mode) and the report adds `captcha_counts`. To pick forms for an acceptance run, filter on
