@@ -1734,7 +1734,7 @@ _METROS = frozenset([
     "santa monica", "torrance", "irvine", "san diego", "sacramento", "portland", "seattle", "bellevue", "redmond",
     "new york", "new york city", "manhattan", "brooklyn", "jersey city", "hoboken", "boston", "cambridge",
     "somerville", "chicago", "austin", "dallas", "houston", "san antonio", "denver", "boulder", "atlanta",
-    "philadelphia", "pittsburgh", "phoenix", "tucson", "salt lake city", "miami", "tampa", "orlando",
+    "philadelphia", "pittsburgh", "phoenix", "salt lake city", "miami", "tampa", "orlando",
     "minneapolis", "detroit", "ann arbor", "nashville", "raleigh", "durham", "research triangle", "charlotte",
     "baltimore", "columbus", "cleveland", "cincinnati", "indianapolis", "st louis", "saint louis", "kansas city",
     "milwaukee", "madison", "las vegas", "albuquerque", "omaha", "new orleans", "richmond", "arlington",
