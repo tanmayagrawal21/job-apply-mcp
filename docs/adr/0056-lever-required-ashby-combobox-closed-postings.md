@@ -133,3 +133,43 @@ Revert the squash commit of this change. No data migration is needed and nothing
 reverted alone: the `pressed()` check in `_EMPTY_REQUIRED_JS`, the visible-only checkbox in `_bool_state`,
 `_bool_group` / `_await_pressed` in `_set_boolean`, and `incomplete_rows` / `NOT_COMMITTED` in `core/handoff.py` / `core/next_steps.py`
 together with the labelling in the `incomplete` result.
+
+## Amendment (2026-10-28, follow-up to #129): unknown fails everywhere, a strict Yes/No pair, a last pre-click read
+
+### Context
+The reviewer and control notes on #129 found three gaps. (1) Outside Ashby, a hidden backing checkbox next to Yes/No
+buttons that never took read back as unknown, and `_verify` passed unknown on every ATS except Ashby. Before #129
+the hidden checkbox read back False, so a "Yes" that never took failed. (2) In `_EMPTY_REQUIRED_JS`, `pressed()`
+counted ANY `aria-pressed=true` button in a checkbox's container as an answer. A lone required checkbox (a consent
+box included) next to an unrelated pressed button was then not reported empty. (3) A React commit later than the
+fill's waits could flip a planned toggle off after every read-back, just before the submit click.
+
+### Decision
+- `_verify`: an unknown boolean state fails on every ATS. Unknown means no visible checkbox, no pressed Yes/No and
+  no react-select value. This covers the reviewer's "explicitly unanswered" case and every other case where the
+  answer cannot be proven.
+- `pressed()` applies only to a lone HIDDEN checkbox whose own container (holding no other choice input) has
+  exactly two buttons forming a Yes/No pair. Both buttons have yes/no text, or both carry `aria-pressed`, and one
+  of them is pressed. A visible required checkbox is judged by its own checked state alone.
+- `_submit`: just before the first submit click (after the Ashby idle wait), every Yes/No that the plan answered
+  is re-read with `_toggle_drift`. This read is read-only and adds no clicks. Optional fields that the fill left
+  empty are excluded. If any field is not in its planned state, Submit is not clicked. The result is
+  `incomplete`, with those fields marked NOT_COMMITTED through `incomplete_rows()` (a `tool_gap`). Only the
+  pre-click phase changes. The ADR-0066/0068 post-click rules (the single click, the one Ashby re-click when
+  nothing was sent, rejection versus unknown) are unchanged.
+
+### Verify
+1. `uv run pytest -q tests/test_toggle_verify_followup.py tests/test_toggle_drift_presubmit.py tests/test_ashby_toggle_126.py`.
+   Fictional fixtures cover these cases. An uncommitted toggle fails verification on lever, greenhouse and ashby,
+   for both Yes and No, and a committed one passes. A consent box next to an unrelated pressed button is reported
+   empty on every ATS. A visible box next to a pressed pair is judged by itself. Hidden boxes with one, three or
+   non-pair buttons are empty. A genuine pressed pair is answered and an unpressed pair is empty. A late commit
+   after the last scan gives `incomplete`/NOT_COMMITTED with no submit click and no POST. The same form without
+   the late commit submits. The re-read adds no clicks. Then run the full `uv run pytest -q`.
+2. Dry run, never live: `submit_application(dry_run=True)` on an Ashby posting with Yes/No questions. Expect
+   `dry_run`. The pre-click read runs only on a live submit.
+
+### Revert
+Revert the squash commit of this follow-up. No data migration is needed and nothing new is stored. Each part can
+be reverted alone: the `state is None` failure in `_verify`, the stricter `pressed()` in `_EMPTY_REQUIRED_JS`, and
+`_toggle_drift` with its call in `_submit` (plus the `toggles=` argument passed from `_run`).
