@@ -62,7 +62,8 @@ def greenhouse_frame_target(page_url: str, src: str, *, resolved: str | None = N
     characters, no userinfo or percent-encoding in the authority), and when `resolved` is given its scheme and host
     must equal urllib's reading of `src`; `resolved` is then what is opened. Only http(s) on greenhouse.io or on the
     page's own origin is accepted. With `job_id` (the ref's posting id) the target's `token` or `gh_jid` must equal
-    it, so a page embedding another job's form is refused."""
+    it, so a page embedding another job's form is refused. A query with a repeated `token` / `gh_jid`, or with both
+    naming different ids, is refused with or without `job_id`."""
     if not src or not page_url or not _unambiguous(src.strip()) or not _unambiguous(page_url):
         return None
     target = urljoin(page_url, src.strip())
@@ -81,10 +82,12 @@ def greenhouse_frame_target(page_url: str, src: str, *, resolved: str | None = N
         return None
     if target.split("#")[0] == page_url.split("#")[0]:
         return None
-    if job_id:
-        q = parse_qs(t.query)
-        if str(job_id) not in (q.get("token", []) + q.get("gh_jid", [])):
-            return None
+    # A posting id must be unambiguous: one value at most, whether given as `token`, `gh_jid` or both (equal).
+    ids = {*(q := parse_qs(t.query, keep_blank_values=True)).get("token", []), *q.get("gh_jid", [])}
+    if len(q.get("token", [])) > 1 or len(q.get("gh_jid", [])) > 1 or len(ids) > 1:
+        return None
+    if job_id and ids != {str(job_id)}:
+        return None
     return target
 
 
