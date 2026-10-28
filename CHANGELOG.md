@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follo
 
 ## [Unreleased]
 
+- Greenhouse company-hosted embeds (ADR-0069): the driver opens the `#grnhse_app` application iframe (bounded wait
+  for a lazily inserted one) instead of filling the host page, and never fills a page that holds none of the
+  posting's own fields (`needs_human`, "application form not found"), so a job-alert box is never filled and a dry
+  run never reports success for it (#98, #99). The frame URL is checked with the browser's own (WHATWG) parse,
+  refusing backslash/control/non-ASCII/userinfo/percent-encoded authorities, must name the ref's job id, and the
+  gate fails closed.
 - EEO selects (ADR-0070, #97 #110): the privacy-notice opt-in now actually reaches the browser driver, so the
   demographic-data consent box is ticked under the ADR-0063 rule. Lever's U.S. EEO block (name-only selects) is
   filled from `[demographics]`. A new optional `[demographics].is_veteran` ("Yes"/"No") answers the plain
