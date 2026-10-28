@@ -134,6 +134,9 @@ ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("willing_to_relocate", (r"relocat",)),
     ("open_to_hybrid", (r"\bhybrid\b",)),
     ("open_to_onsite", (r"\b(open|willing|able|comfortable|commit)\b.*\b(on site|onsite|in office|in person)\b",
+                        # ADR-0073 amendment (#125): "Do you acknowledge that this is an onsite role in X?"
+                        (r"^(?:do|can) you (?:acknowledge|understand|confirm|recognize|accept)\b.*\b(?:on site|onsite|"
+                         r"in office|in person) (?:role|position|job|opportunity)\b"),
                         # ADR-0055: "able to work from our office in X", "open to working out of our X Office"
                         (r"\b(open|willing|able|comfortable)\b.*\bwork(?:ing)? (?:from|in|out of|at) (?:one of )?"
                          r"(?:our|the|an?) (?:\w+ ){0,4}offices?\b"),
@@ -1787,12 +1790,87 @@ def _place_ok(text: str, raw: str, places: frozenset[str]) -> bool:
 
 _IF_NOT_PREFIX = re.compile(r"^if you (?:are|re) not ")
 
+# ADR-0073 amendment (#125): an acknowledgement of the role's office schedule ("Do you acknowledge that this is a hybrid
+# role based in San Francisco, New York and/or Chicago and you will be required to come into the office four days a
+# week?"). Closed: the whole normalized label must match; the place slot is a list of known places joined by "and",
+# "or" or "and/or" (commas are gone after normalize()).
+_ACK_N = r"(?:at least )?(?:[1-5]|one|two|three|four|five)(?: (?:to|or) (?:[1-5]|two|three|four|five))?"
+_ACK_WEEK = rf"{_ACK_N} (?:days?|x) (?:a|per|each) week"
+_ACK_RX = re.compile(
+    r"(?:do|can) you (?:acknowledge|understand|confirm|recognize|accept)(?: that)? this (?:is|will be) (?:a|an) "
+    r"(?P<mode>hybrid|on ?site|in office|in person)(?: (?:role|position|job|opportunity))"
+    r"(?: (?:that is|which is))?(?: (?:based|located))? (?:in|at|out of) (?P<p>(?:\w+ ){0,11}?\w+)"
+    rf"(?: and (?:that )?you (?:will|would) be (?:required|expected|asked) to (?:come|go|commute|be) "
+    rf"(?:in ?to |to |in )?(?:the|our|an?) office {_ACK_WEEK}"
+    rf"| (?:with|requiring) {_ACK_WEEK} (?:in (?:the |our )?office|on ?site|in person))?$")
+
+
+def _ack_slot(slot: str) -> str:
+    return re.sub(r"\b(?:and or|and)\b", "or", slot)
+
+
+def _place_phrases(text: str, raw: str, places: frozenset[str]) -> list[str]:
+    """The place phrases of the best segmentation of a slot that passed _place_ok (filler words dropped)."""
+    toks = re.sub(r"\s+", " ", text).strip().split()
+    codes = {c.lower() for c in re.findall(r"\b[A-Z]{2}\b", raw) if c in US_STATES}
+    best: list[tuple[int, list[str]] | None] = [(0, [])] + [None] * len(toks)
+    for i in range(len(toks)):
+        cur = best[i]
+        if cur is None:
+            continue
+        cands: list[tuple[int, tuple[int, list[str]]]] = []
+        if toks[i] in _PLACE_FILLER:
+            cands.append((i + 1, cur))
+        for j in range(i + 1, min(len(toks), i + 5) + 1):
+            ph = " ".join(toks[i:j])
+            if ph in places or (j == i + 1 and ph in codes):
+                cands.append((j, (cur[0] + 1, [*cur[1], ph])))
+        for j, c in cands:
+            if best[j] is None or c[0] > best[j][0]:  # type: ignore[index]
+                best[j] = c
+    return best[-1][1] if best[-1] else []
+
+
+def ack_template(label: str, places: frozenset[str] | None = None) -> tuple[str, list[str]] | None:
+    """ADR-0073 amendment (#125): (kind, named places) when the WHOLE label is a closed schedule acknowledgement
+    ("Do you acknowledge that this is a hybrid role based in <known places> ..."), else None. The negation /
+    aversion backstop runs on the whole label first (no condition clause is accepted here)."""
+    places = places if places is not None else known_places(None)
+    raw = _HINT_TAIL.sub("", label.strip())
+    n = normalize(raw)
+    if not n or _OFFICE_NEG.search(n):
+        return None
+    m = _ACK_RX.match(n)
+    if not m:
+        return None
+    slot = _ack_slot(m.group("p"))
+    if slot in _PLACE_REFS or not _place_ok(slot, raw, places):
+        return None
+    named = _place_phrases(slot, raw, places)
+    if not named:
+        return None
+    return ("hybrid" if m.group("mode") == "hybrid" else "onsite"), named
+
+
+def _ack_place_fit(profile: ProfileLike, named: Sequence[str]) -> bool:
+    """The profile's [contact] city or region is one of the acknowledged places (a state code also by its name)."""
+    mine: set[str] = set()
+    for k in ("contact:city", "contact:region"):
+        v = str(profile.lookup(k) or "").strip()
+        if v:
+            mine.add(normalize(v))
+            if len(v) == 2 and v.upper() in US_STATES:
+                mine.add(normalize(US_STATES[v.upper()]))
+    return bool(mine & set(named))
+
 
 def pref_template(label: str, places: frozenset[str] | None = None) -> tuple[str, bool] | None:
     """ADR-0073 (control): (kind, positive_only) when the WHOLE preference question matches one closed positive
     template (relocate / hybrid / onsite), else None. Any extra or unknown word, negation or aversion anywhere in
     the label (the condition clause included), or a place slot that is not a known place -> None."""
     places = places if places is not None else known_places(None)
+    if (ack := ack_template(label, places)) is not None:     # #125: Yes-only, decided by the caller
+        return ack[0], True
     raw = _HINT_TAIL.sub("", label.strip())          # a trailing "(Yes/No)" answer hint is not a negation
     # control: the negation / aversion backstop runs on the whole label first; only the "not" of a leading
     # "If you are not ..." condition is exempt
@@ -2023,6 +2101,28 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             if fact is None:
                 if reasons is not None:
                     reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": why})
+                return True, None
+            ack = ack_template(f.label, known_places(profile, job_locations))
+            if ack is not None:
+                # ADR-0073 amendment (#125): "Do you acknowledge that this is a hybrid role based in <places> ...?" is
+                # Yes only when the schedule fact is true AND (the profile city / region is a named place OR
+                # willing_to_relocate is true). Never No: a mixed profile is the owner's.
+                sv = _truth(profile.lookup(fact))
+                fit = _ack_place_fit(profile, ack[1])
+                rv = None if fit else _truth(profile.lookup("willing_to_relocate"))
+                if sv is True and (fit or rv is True):
+                    return True, profile.lookup(fact)
+                if gaps is not None:
+                    for k, val in ((fact, sv), *((("willing_to_relocate", rv),) if not fit else ())):
+                        if val is None:
+                            gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(k, k),
+                                         "key": f.key, "profile_fact": True})
+                if reasons is not None:
+                    reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
+                        f"an acknowledgement of a {'hybrid' if fact == 'open_to_hybrid' else 'on-site'} role in "
+                        f"{', '.join(ack[1])} is answered Yes only when the profile has {fact} true and its "
+                        "[contact] city / region is one of those places or willing_to_relocate is true; otherwise "
+                        "the owner answers it")})
                 return True, None
             if if_not_local(f.label):
                 # "If you are not local to <place>, are you comfortable working onsite?": a Yes needs the schedule
@@ -2802,7 +2902,8 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             uv = _us_person_value(f, profile, _usp_gap)       # never an [answers] pattern (control, final round)
             ok(f, uv if uv is None or isinstance(uv, list) else _coerce(f, uv, min_score), "rule:us_person")
             continue
-        if ck in ("open_to_onsite", "open_to_hybrid") and _OFFICE_Q.search(normalize(f.label)):
+        if (ck in ("open_to_onsite", "open_to_hybrid") and _OFFICE_Q.search(normalize(f.label))
+                and ack_template(f.label, known_places(profile, job_locations)) is None):   # #125: Yes-only rule
             def _off_gap(fact: str, key: str = f.key) -> None:
                 gaps.append({"country": None, "fact": fact, "key": key, "profile_fact": True})
             ov = _office_value(f, ck, profile, job_locations, job_country, _off_gap)   # ADR-0055

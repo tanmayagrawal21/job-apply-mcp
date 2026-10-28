@@ -115,6 +115,27 @@ gets a stricter rule.
   reason that names both facts), and a missing fact is recorded as a profile gap. "If you are not local ..., are
   you willing to relocate?" still reads `willing_to_relocate` alone.
 
+## Amendment (#125): schedule acknowledgements
+The closed templates of #122 left "Do you acknowledge that this is a hybrid role based in San Francisco, New York
+and/or Chicago and you will be required to come into the office four days a week?" (options No / Yes) unresolved,
+so two postings that passed round 3 were blocked. `ack_template()` adds one more CLOSED positive template. The
+whole normalized label must be "(do | can) you (acknowledge | understand | confirm | recognize | accept) (that)
+this (is | will be) a (hybrid | onsite | in office | in person) (role | position | job | opportunity) (based |
+located) (in | at | out of) <places>". After that comes nothing, or one of two office-days tails: "and (that) you
+(will | would) be (required | expected | asked) to (come | go | commute | be) (into | to | in) (the | our | an)
+office N days a week", or "(with | requiring) N days a week (in office | onsite | in person)".
+- `_OFFICE_NEG` runs on the whole label first, and no condition clause is accepted. `<places>` is a list joined by
+  "and", "or" or "and/or". Every word must pass `_place_ok()` against `known_places()`. A reference ("the area")
+  or any other word leaves the question unresolved, so a compound tail ("and agree to a background check") fails.
+- The fact comes from `schedule_fact()`: hybrid reads `open_to_hybrid`, five days reads `open_to_onsite`, a range
+  that reaches five days is the owner's, and onsite / in office / in person reads `open_to_onsite`.
+- The answer is Yes only when that fact is true AND either the profile's [contact] city or region (a state code
+  also by its name) is one of the named places, or `willing_to_relocate` is true. Anything else is unresolved
+  (`unknown_fact`, with a reason that names the facts), and a missing fact is a profile gap. The rule never
+  answers No, because a mixed profile cannot be split (the same as the conditional office rule of the #122
+  follow-up, #124).
+- An acknowledgement whose tail says "our office" does not take the ADR-0055 office rule, which could answer No.
+
 ## Consequences
 On a dry run of the issue's postings, the wordings above resolve from the structured facts. Some postings have no
 confirmed country: "Remote - USA" with a coded office, "Seattle, WA" with the office "US-PERM", or a Lever posting
@@ -127,6 +148,10 @@ still block every authorization rule.
 0. Amendment (#122 follow-up): `uv run pytest -q tests/test_pref_schedule_followup_122.py` checks each wording
    with Yes, No and mixed fictional profiles (hybrid five days answers from `open_to_onsite`; ranges and
    "full time" stay unresolved; a conditional office question answers Yes only with `willing_to_relocate`).
+0b. Amendment (#125): `uv run pytest -q tests/test_hybrid_ack_125.py` checks the posting's wording with Yes, No and
+   mixed fictional profiles, plus negated, compound and unknown-place variants. Every one that is not Yes stays
+   unresolved. Then run a dry run (never live) on a posting with this question and check in the evidence text that
+   it is filled Yes.
 1. `uv run pytest -q tests/test_auth_wordings_121.py` covers every wording from the issue, the negatives,
    determinism and the plan-level reason. Then run the full `uv run pytest -q`, including
    `tests/test_live_blockers_2.py::test_explicit_country_question_on_an_unconfirmed_job`, which pins the
@@ -142,3 +167,6 @@ isolated (the rewrite, the either-country rule, company names, the shortened loc
 vocabulary, the reasons), so a single rule can also be reverted on its own. To revert only the #122 follow-up
 amendment, revert its commit: hybrid templates then read `open_to_hybrid` whatever the day count, and a
 conditional office question reads the schedule fact alone. No stored data changes.
+
+To revert only the #125 amendment, revert its commit. The acknowledgement wording then falls back to "preference
+wording outside the closed positive templates" and is unresolved. No stored data changes.
