@@ -1861,7 +1861,7 @@ def _state_names(v: str) -> set[str]:
     return set()
 
 
-def _ack_place_fit(profile: ProfileLike, named: Sequence[str]) -> bool:
+def _ack_place_fit(profile: ProfileLike, named: Sequence[str], locations: Sequence[str] = ()) -> bool:
     """The profile's [contact] city is one of the acknowledged places. A region / state match alone is not commuting
     distance ("Chicago, IL" for a Springfield, IL profile; "New York" for an upstate NY profile), so it never counts.
     When the label qualifies the city with a state ("Springfield, MO"), that state must be the profile's region."""
@@ -1869,11 +1869,17 @@ def _ack_place_fit(profile: ProfileLike, named: Sequence[str]) -> bool:
     if not city:
         return False
     mine = _state_names(str(profile.lookup("contact:region") or ""))
+    # a bare city name is a homonym risk (Portland ME / OR, Cambridge MA / UK): it counts only when a posting
+    # location with that city is confirmed in the profile's region / country (residence_match); fail closed
+    want = _CITY_ALIAS.get(city, city)
+    same = [loc for loc in locations
+            if (lc := _loc_region(str(loc))[0]) is not None and _CITY_ALIAS.get(lc, lc) == want]
+    bare_ok = bool(same) and residence_match(profile, same) is True
     for i, ph in enumerate(named):
         if ph != city:
             continue
         nxt = _state_names(named[i + 1]) if i + 1 < len(named) else set()
-        if not nxt or nxt & mine:
+        if (nxt and nxt & mine) or (not nxt and bare_ok):
             return True
     return False
 
@@ -2119,10 +2125,10 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             ack = ack_template(f.label, known_places(profile, job_locations))
             if ack is not None:
                 # ADR-0073 amendment (#125): "Do you acknowledge that this is a hybrid role based in <places> ...?" is
-                # Yes only when the schedule fact is true AND (the profile city / region is a named place OR
+                # Yes only when the schedule fact is true AND (the profile city is a named place, ADR-0073, OR
                 # willing_to_relocate is true). Never No: a mixed profile is the owner's.
                 sv = _truth(profile.lookup(fact))
-                fit = _ack_place_fit(profile, ack[1])
+                fit = _ack_place_fit(profile, ack[1], job_locations)
                 rv = None if fit else _truth(profile.lookup("willing_to_relocate"))
                 if sv is True and (fit or rv is True):
                     return True, profile.lookup(fact)
@@ -2135,8 +2141,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
                     reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
                         f"an acknowledgement of a {'hybrid' if fact == 'open_to_hybrid' else 'on-site'} role in "
                         f"{', '.join(ack[1])} is answered Yes only when the profile has {fact} true and its "
-                        "[contact] city / region is one of those places or willing_to_relocate is true; otherwise "
-                        "the owner answers it")})
+                        "[contact] city is one of those places (with the profile's state, or confirmed by the "
+                        "posting's location) or willing_to_relocate is true; otherwise the owner answers it")})
                 return True, None
             if if_not_local(f.label):
                 # "If you are not local to <place>, are you comfortable working onsite?": a Yes needs the schedule

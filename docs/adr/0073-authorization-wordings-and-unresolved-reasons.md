@@ -133,7 +133,10 @@ office N days a week", or "(with | requiring) N days a week (in office | onsite 
 - The answer is Yes only when that fact is true AND either the profile's [contact] city is one of the named places,
   or `willing_to_relocate` is true. A region or state match alone is not commuting distance ("Chicago, IL" for
   another Illinois city), so it never counts. When the label qualifies the city with a state ("Springfield, MO"),
-  that state must be the profile's region. Anything else is unresolved
+  that state must be the profile's region. A bare city name is a homonym risk (Portland ME / OR, Cambridge MA /
+  UK). It counts only when a posting location with that city is confirmed in the profile's region and country
+  (`residence_match`). With no posting location, or one the parser cannot confirm, the answer depends on
+  relocation, so the rule fails closed. Anything else is unresolved
   (`unknown_fact`, with a reason that names the facts), and a missing fact is a profile gap. The rule never
   answers No, because a mixed profile cannot be split (the same as the conditional office rule of the #122
   follow-up, #124).

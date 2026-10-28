@@ -5,6 +5,10 @@ places are generic public ones."""
 import pytest
 from test_auth_wordings_121 import run, unresolved, view
 
+from job_apply_mcp.apply.adapters import ProfileView
+from job_apply_mcp.config import Settings
+from job_apply_mcp.profile import Contact, Preferences, Profile
+
 # the posting's wording, shape-for-shape (places, "and/or", the office-days tail)
 CHIME_LIKE = ("Do you acknowledge that this is a hybrid role based in San Francisco, New York and/or Chicago and you "
               "will be required to come into the office four days a week?")
@@ -36,14 +40,77 @@ def test_chime_like_wording_answers_yes():
     assert v == "Yes" and not r.unresolved and "q" not in r.reasons
 
 
-def test_profile_city_among_the_places_needs_no_relocation():
-    label = "Do you acknowledge that this is a hybrid role based in Springfield or Chicago?"
-    assert run(label, view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
+def test_profile_city_with_its_state_needs_no_relocation():
     # city plus the profile's state, when the label gives both
     assert run("Do you acknowledge that this is a hybrid role based in Springfield, IL?",
                view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
     assert run("Do you acknowledge that this is a hybrid role based in Springfield, Illinois?",
                view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
+    assert run("Do you acknowledge that this is a hybrid role based in Springfield, IL or Chicago?",
+               view(prefs=HYBRID_NO_MOVE))[0] == "Yes"
+
+
+def test_bare_city_counts_only_when_the_posting_confirms_it():
+    label = "Do you acknowledge that this is a hybrid role based in Springfield?"
+    assert run(label, view(prefs=HYBRID_NO_MOVE), locations=["Springfield, IL, USA"])[0] == "Yes"
+    assert run("Do you acknowledge that this is a hybrid role based in Springfield or Chicago?",
+               view(prefs=HYBRID_NO_MOVE), locations=["Springfield, IL, USA", "Chicago, IL, USA"])[0] == "Yes"
+
+
+def _at(city, region, country, prefs):
+    return ProfileView(Profile(contact=Contact(first_name="Alex", last_name="Rivera", city=city, region=region,
+                                               country=country),
+                               preferences=Preferences(**prefs)), Settings())
+
+
+# (profile city, region, country, the label's place, the posting's location): a same-name city elsewhere
+HOMONYMS = [
+    ("Springfield", "IL", "US", "Springfield", "Springfield, MO, USA"),
+    ("Portland", "ME", "US", "Portland", "Portland, OR, USA"),
+    ("Portland", "OR", "US", "Portland", "Portland, ME, USA"),
+    ("Cambridge", "MA", "US", "Cambridge", "Cambridge, United Kingdom"),
+]
+
+
+@pytest.mark.parametrize("city,region,country,place,loc", HOMONYMS)
+def test_bare_city_homonym_elsewhere_is_not_local(city, region, country, place, loc):
+    label = f"Do you acknowledge that this is a hybrid role based in {place}?"
+    why = unresolved(label, _at(city, region, country, HYBRID_NO_MOVE), locations=[loc])
+    assert "willing_to_relocate" in why["reason"]
+    assert run(label, _at(city, region, country, ALL_YES), locations=[loc])[0] == "Yes"   # relocation decides
+
+
+@pytest.mark.parametrize("city,region,country,place,loc", [
+    ("Portland", "ME", "US", "Portland", "Portland, ME, USA"),
+    ("Cambridge", "MA", "US", "Cambridge", "Cambridge, MA, USA"),
+])
+def test_bare_city_confirmed_by_the_posting_is_local(city, region, country, place, loc):
+    label = f"Do you acknowledge that this is a hybrid role based in {place}?"
+    assert run(label, _at(city, region, country, HYBRID_NO_MOVE), locations=[loc])[0] == "Yes"
+
+
+def test_unparsed_posting_location_fails_closed():
+    # "Portland, OR, USA" is not confirmed by the posting parser ("or" reads as a list of places), so a bare
+    # "Portland" is not local without relocation: fail closed
+    label = "Do you acknowledge that this is a hybrid role based in Portland?"
+    unresolved(label, _at("Portland", "OR", "US", HYBRID_NO_MOVE), locations=["Portland, OR, USA"])
+    assert run(label, _at("Portland", "OR", "US", ALL_YES), locations=["Portland, OR, USA"])[0] == "Yes"
+
+
+@pytest.mark.parametrize("label,locs", [
+    ("Do you acknowledge that this is a hybrid role based in Springfield?", ["Springfield, MO, USA"]),
+    ("Do you acknowledge that this is a hybrid role based in Springfield or Chicago, IL?", ["Springfield, MO, USA"]),
+    ("Do you acknowledge that this is a hybrid role based in Springfield or Chicago, IL?", []),
+    # no posting location: a bare city is unknowable
+    ("Do you acknowledge that this is a hybrid role based in Springfield?", []),
+    ("Do you acknowledge that this is a hybrid role based in Springfield or Chicago?", []),
+    ("Do you acknowledge that this is a hybrid role based in the Springfield area?", []),
+    ("Do you acknowledge that this is a hybrid role based in Springfield, US?", []),
+])
+def test_bare_city_without_confirmation_needs_relocation(label, locs):
+    why = unresolved(label, view(prefs=HYBRID_NO_MOVE), locations=locs)
+    assert "willing_to_relocate" in why["reason"]
+    assert run(label, view(prefs=ALL_YES), locations=locs)[0] == "Yes"
 
 
 @pytest.mark.parametrize("label", [
