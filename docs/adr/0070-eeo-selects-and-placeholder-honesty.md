@@ -88,17 +88,21 @@ input behind that select was reported as "invalid field (native validation)".
   every answer option names protected status (`protected_only`). A plain-veteran wording the table misses is an
   unmatched answer (blank, reported), never a decline.
 - **"(Not of Hispanic Origin)"** counts as a Hispanic parenthetical, like "(Not Hispanic or Latino)".
-- **CC-305 disability family** (`dom_rules.disability_class`): closed patterns for the "yes" answer ("(Yes,) I have
-  a disability (, or have had one in the past / or previously had a disability ...)") and the "no" answer ("(No,) I
-  do not have a disability (and have not had one in the past)"). A value and an option of the same class are the
-  same answer, because the form revisions word one answer differently. This is a deliberate choice: the owner's
-  older-revision "No" is taken as the newer "No ... and have not had one in the past". A bare "Yes"/"No" value
-  counts only on the status question. Decline options remain the decline table's.
+- **CC-305 disability family** (`dom_rules.disability_class`): closed patterns over four answers that state
+  different facts: "I have a disability" (now), "I have a disability, or have had one in the past" (now or past),
+  "I do not have a disability" (now, silent on the past) and "I do not have a disability and have not had one in
+  the past" (neither). A profile value selects an option only when the value implies it: "now" implies "now or
+  past", "neither" implies "not now", never the reverse. So a "No" that does not mention the past never selects the
+  newer CC-305 "No ... and have not had one in the past" option; the select stays blank and is reported as
+  `unknown_fact` naming the missing fact (whether there was a disability in the past), for the owner to add to
+  `[demographics].disability_status`. A bare "Yes"/"No" value counts only on the status question. Decline options
+  remain the decline table's.
 - **Native validation detail** names an unlabelled control by its field (the single combobox or single `<label>`
   of its nearest wrapper), else "unlabelled <tag> type=<type>".
 Tests: `tests/test_eeo_decline_119_120.py`.
 
 ## Verify / revert
-`uv run pytest tests/test_eeo_selects_97_110.py tests/test_driver_fills_97_100.py tests/test_apply_engine.py`.
+`uv run pytest tests/test_eeo_selects_97_110.py tests/test_eeo_decline_119_120.py tests/test_driver_fills_97_100.py
+tests/test_apply_engine.py`.
 Revert by reverting this PR. Leaving `is_veteran` unset, or setting `acknowledge_privacy_notices = false`, turns
 the respective behaviour off without a code change.

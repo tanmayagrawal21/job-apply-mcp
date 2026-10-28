@@ -201,25 +201,45 @@ _VETERAN_ANY = {
 }
 
 # ADR-0070 amendment (#120): the standard disability self-ID answers (OFCCP form CC-305 and its older revision), as
-# closed patterns over the contraction-folded text. "yes" = has (or had) a disability, "no" = does not. The CC-305
-# revisions word the same answer differently ("No, I don't have a disability" vs "No, I do not have a disability and
-# have not had one in the past"), so a value and an option of the same class are the same answer. A bare "Yes"/"No"
-# value counts only on the status question itself (_YESNO_STATUS). Decline options stay the decline table's business.
+# closed patterns over the contraction-folded text. Four classes, because the revisions state different facts:
+#   yes          "I have a disability"                          (now)
+#   yes_or_past  "I have a disability, or have had one in the past"  (now OR in the past)
+#   no           "I do not have a disability"                   (now; says nothing about the past)
+#   no_ever      "I do not have a disability and have not had one in the past"  (neither now nor in the past)
+# A value answers an option only when the value implies it (_DISABILITY_IMPLIES): "no" never selects a "no_ever"
+# option (that would assert "no past disability", which the owner did not state). A bare "Yes"/"No" value counts
+# only on the status question itself (_YESNO_STATUS). Decline options stay the decline table's business.
 _DISABILITY_CLASS = {
-    "yes": re.compile(r"^(?:yes )?i have a disability(?: or (?:i )?(?:have had one in the past|previously had a "
-                      r"disability|had a disability in the past|have a history(?: or record)? of (?:having )?a "
-                      r"disability))?$"),
-    "no": re.compile(r"^(?:no )?i do not have a disability(?: and (?:i )?have not had one in the past| or a history"
-                     r"(?: or record)? of (?:having )?(?:one|a disability))?$"),
+    "yes_or_past": re.compile(r"^(?:yes )?i have a disability or (?:i )?(?:have had one in the past|previously had a "
+                              r"disability|had a disability in the past|have a history(?: or record)? of (?:having )?"
+                              r"a disability)$"),
+    "yes": re.compile(r"^(?:yes )?i have a disability$"),
+    "no_ever": re.compile(r"^(?:no )?i do not have a disability(?: and (?:i )?have not had one in the past| or a "
+                          r"history(?: or record)? of (?:having )?(?:one|a disability))$"),
+    "no": re.compile(r"^(?:no )?i do not have a disability$"),
 }
+_DISABILITY_IMPLIES = {"yes": {"yes", "yes_or_past"}, "yes_or_past": {"yes_or_past"},
+                       "no": {"no"}, "no_ever": {"no_ever", "no"}}
 
 
 def disability_class(text: str, *, bare: bool = False) -> str | None:
-    """"yes" / "no" for a standard disability self-ID answer, else None. `bare`: a lone "Yes"/"No" counts too."""
+    """The _DISABILITY_CLASS of a standard disability self-ID answer, else None. `bare`: a lone "Yes"/"No" counts."""
     n = _canon(text)
     if bare and n in ("yes", "no"):
         return n
     return next((c for c, rx in _DISABILITY_CLASS.items() if rx.match(n)), None)
+
+
+def disability_gap(values: list[str], options: list[str], label: str = "") -> str | None:
+    """Why no disability option was taken, when the reason is a missing PAST fact: the owner's "no" (now) answer
+    against a form whose only "no" option also states no past disability. None otherwise."""
+    status = bool(_YESNO_STATUS["disability"].match(normalize(label)))
+    have = {disability_class(str(v), bare=status) for v in values if v and not is_decline_value(v)}
+    if "no" in have and any(disability_class(o) == "no_ever" for o in options):
+        return ("the only 'No' option also states no disability in the past; [demographics].disability_status does "
+                "not say whether you had one in the past (e.g. 'No, I do not have a disability and have not had one "
+                "in the past')")
+    return None
 
 
 _PLACEHOLDER = re.compile(r"^(?:please )?(?:select|choose)\b(?: an? (?:option|answer))?$")
@@ -273,10 +293,10 @@ def demographic_pick(key: str | None, values: list[str], options: list[str], lab
             hits = [o for o in opts if m and normalize(o) == m.group(1)]
             if len(hits) == 1:
                 return hits[0]
-        if key == "disability":          # #120: the CC-305 answer family, same class on both sides
+        if key == "disability":          # #120: the CC-305 answer family, only an option the value implies
             status = bool(_YESNO_STATUS["disability"].match(normalize(label)))
-            want = disability_class(str(v), bare=status)
-            hits = [o for o in opts if want and disability_class(o) == want]
+            ok = _DISABILITY_IMPLIES.get(disability_class(str(v), bare=status) or "", set())
+            hits = [o for o in opts if disability_class(o) in ok]
             if len(hits) == 1:
                 return hits[0]
     served = normalize(is_veteran).split()[:1]

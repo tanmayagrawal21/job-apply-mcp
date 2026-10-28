@@ -35,6 +35,7 @@ from .closed import CHALLENGE_REASON, challenge_label, closed_text
 from .dom_rules import (
     app_form_missing,
     demographic_pick,
+    disability_gap,
     dom_demographic_key,
     greenhouse_frame_target,
     greenhouse_offsite_embed,
@@ -2072,6 +2073,10 @@ class PlaywrightDriver(VerificationMixin):
         not_set = None if declined else f"{lab} (tool_gap: the chosen self-ID option did not commit)"
         hisp = str(answers.get("demographic:hispanic") or "")
 
+        def why(texts: list[str]) -> str | None:       # the unknown fact, named when it is a missing past fact (#120)
+            gap = disability_gap(values, texts, lab) if ck == "disability" and not declined else None
+            return f"{lab} (unknown_fact: {gap})" if gap else no_match
+
         def choose(texts: list[str]) -> str | None:
             texts = [t for t in texts if t and normalize(t) not in ("select", "")]
             if declined:
@@ -2098,7 +2103,7 @@ class PlaywrightDriver(VerificationMixin):
                 texts = [t.strip() for t in await loc.locator("option").all_inner_texts()]
                 pick = choose(texts)
                 if pick is None:
-                    return [], 0, no_match
+                    return [], 0, why(texts)
                 await loc.select_option(label=pick, timeout=2000)
                 got = await loc.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].text : ''")
                 if normalize(got) != normalize(pick):              # exact read-back failed: blank it
@@ -2117,7 +2122,7 @@ class PlaywrightDriver(VerificationMixin):
             pick = choose(texts)
             if pick is None:
                 await self._close_menu(page)
-                return [], 0, no_match
+                return [], 0, why(texts)
             await opts.nth(texts.index(pick)).click(timeout=3000)
             await self._close_menu(page)
             shown: list[str] = []

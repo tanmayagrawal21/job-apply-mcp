@@ -13,7 +13,13 @@ from test_apply_react_select import RS_JS, _serve
 from test_eeo_selects_97_110 import REPORT, drv  # noqa: F401  # shared browser fixture
 
 from job_apply_mcp.apply.adapters import ProfileView
-from job_apply_mcp.apply.dom_rules import demographic_pick, disability_class, protected_only, self_id_label_ok
+from job_apply_mcp.apply.dom_rules import (
+    demographic_pick,
+    disability_class,
+    disability_gap,
+    protected_only,
+    self_id_label_ok,
+)
 from job_apply_mcp.apply.mapper import DECLINE_MARKERS, map_fields, normalize
 from job_apply_mcp.config import Settings
 from job_apply_mcp.core.handoff import UNKNOWN_FACT, categorize
@@ -71,10 +77,10 @@ def test_not_of_hispanic_origin_needs_the_owners_hispanic_answer():
 
 
 @pytest.mark.parametrize("text,want", [
-    ("Yes, I have a disability, or have had one in the past", "yes"),
-    ("Yes, I have a disability (or previously had a disability)", "yes"),
+    ("Yes, I have a disability, or have had one in the past", "yes_or_past"),
+    ("Yes, I have a disability (or previously had a disability)", "yes_or_past"),
     ("I have a disability", "yes"),
-    ("No, I do not have a disability and have not had one in the past", "no"),
+    ("No, I do not have a disability and have not had one in the past", "no_ever"),
     ("No, I don't have a disability", "no"),
     ("I don't have a disability", "no"),
     ("I don't wish to answer", None),
@@ -87,12 +93,18 @@ def test_disability_answer_classes(text, want):
 
 
 @pytest.mark.parametrize("value,opts,want", [
-    ("No, I do not have a disability", DIS_OPTS, DIS_OPTS[1]),
-    ("No, I don't have a disability", DIS_OPTS, DIS_OPTS[1]),
-    ("Yes, I have a disability (or previously had a disability)", DIS_OPTS, DIS_OPTS[0]),
+    # a "No" that says nothing about the past never selects the option that also denies a past disability
+    ("No, I do not have a disability", DIS_OPTS, None),
+    ("No, I don't have a disability", DIS_OPTS, None),
+    ("No", DIS_OPTS, None),
+    ("No, I do not have a disability and have not had one in the past", DIS_OPTS, DIS_OPTS[1]),
+    ("No, I don't have a disability and I have not had one in the past", DIS_OPTS, DIS_OPTS[1]),
     ("No, I do not have a disability and have not had one in the past", DIS_OPTS_OLD, DIS_OPTS_OLD[1]),
+    ("Yes, I have a disability", DIS_OPTS, DIS_OPTS[0]),             # now implies "now or in the past"
+    ("Yes, I have a disability (or previously had a disability)", DIS_OPTS, DIS_OPTS[0]),
     ("Yes, I have a disability, or have had one in the past", DIS_OPTS_OLD, DIS_OPTS_OLD[0]),
-    ("No", DIS_OPTS, DIS_OPTS[1]),                    # bare answer, on the status question only
+    ("Yes, I have a disability, or have had one in the past", ["I have a disability", "I do not have a disability"],
+     None),                                           # "now or past" never claims "now"
     ("Something else entirely", DIS_OPTS, None),
 ])
 def test_disability_status_matches_the_cc305_family(value, opts, want):
@@ -100,7 +112,15 @@ def test_disability_status_matches_the_cc305_family(value, opts, want):
 
 
 def test_bare_disability_answer_needs_the_status_question():
-    assert demographic_pick("disability", ["No"], DIS_OPTS, "Please indicate your disability status") is None
+    assert demographic_pick("disability", ["No"], DIS_OPTS_OLD, "Disability Status") == DIS_OPTS_OLD[1]
+    assert demographic_pick("disability", ["No"], DIS_OPTS_OLD, "Please indicate your disability status") is None
+
+
+def test_missing_past_fact_is_named():
+    why = disability_gap(["No, I don't have a disability"], DIS_OPTS, "Disability Status")
+    assert why and "in the past" in why and "[demographics].disability_status" in why
+    assert disability_gap(["No, I don't have a disability"], DIS_OPTS_OLD, "Disability Status") is None
+    assert disability_gap(["Decline to self-identify"], DIS_OPTS, "Disability Status") is None
 
 
 def test_protected_only():
@@ -165,7 +185,8 @@ FORM = ApplicationForm(ref="greenhouse:globex:61", fields=[
 # a fictional persona, unrelated to any real profile
 PERSONA = {"demographic:gender": "Female", "demographic:race": "Black or African American",
            "demographic:hispanic": "No", "demographic:veteran": "I am not a protected veteran",
-           "demographic:is_veteran": "Yes", "demographic:disability": "No, I don't have a disability"}
+           "demographic:is_veteran": "Yes",
+           "demographic:disability": "No, I don't have a disability and have not had one in the past"}
 
 
 async def _run(drv, html, answers):  # noqa: F811
@@ -206,11 +227,20 @@ async def test_no_profile_value_still_declines_a_required_select(drv):  # noqa: 
 
 
 @pytest.mark.parametrize("value,want", [("Yes, I have a disability", DIS_OPTS[0]),
-                                        ("No, I do not have a disability", DIS_OPTS[1]),
+                                        ("No, I do not have a disability and have not had one in the past",
+                                         DIS_OPTS[1]),
                                         ("Decline to self-identify", D)])
 async def test_mongodb_like_disability_select(drv, value, want):  # noqa: F811
     res, st = await _run(drv, _survey(), {**PERSONA, "demographic:disability": value})
     assert st["5004"] == want and res.status == "dry_run", (st, res.detail)
+
+
+async def test_no_without_past_clause_is_an_unknown_fact_not_a_guess(drv):  # noqa: F811
+    res, st = await _run(drv, _survey(), {**PERSONA, "demographic:disability": "No, I do not have a disability"})
+    assert st["5004"] == "" and res.status == "incomplete", (st, res.detail)
+    gap = [u for u in res.unresolved if u.startswith("Disability Status")]
+    assert len(gap) == 1 and "(unknown_fact:" in gap[0] and "in the past" in gap[0], res.unresolved
+    assert categorize(res.status, res.detail, unresolved=res.unresolved) == UNKNOWN_FACT
 
 
 async def test_native_invalid_field_is_named(drv):  # noqa: F811
