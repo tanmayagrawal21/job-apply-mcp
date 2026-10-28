@@ -49,6 +49,34 @@ jobs:
           uv run python -m job_apply_mcp version
           uv run job-apply-mcp init --yes
           uv run job-apply-mcp doctor --offline --json
+  browser:
+    # Local-fixture browser tests (no real sites, no network beyond 127.0.0.1). They skip without a browser, so the
+    # matrix above never runs them; this job installs one and FAILS if any of them is skipped for lack of a browser.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra dev --extra browser --python 3.12
+      - name: Install headless Chromium (+ system deps)
+        run: uv run playwright install --with-deps chromium
+      - name: Google Chrome for channel="chrome" fixtures
+        run: |
+          if ! command -v google-chrome >/dev/null; then uv run playwright install --with-deps chrome; fi
+          google-chrome --version
+      - name: Browser fixture tests (must not skip for lack of a browser)
+        env:
+          JOB_APPLY__APPLY__APPROVAL_MODE: agent
+          JOB_APPLY__DRY_RUN: "false"
+        run: |
+          files=$(grep -l "no local browser" tests/*.py | sort)
+          echo "$files"
+          set -o pipefail
+          uv run pytest -q -rs $files 2>&1 | tee "$RUNNER_TEMP/browser-tests.log"
+          if grep -q "no local browser" "$RUNNER_TEMP/browser-tests.log"; then
+            echo "::error::browser fixture tests were skipped: no local browser"; exit 1
+          fi
   package:
     runs-on: ubuntu-latest
     steps:
