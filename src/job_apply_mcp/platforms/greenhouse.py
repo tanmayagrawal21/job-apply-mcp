@@ -1,10 +1,14 @@
 """Greenhouse: public Job Board API (boards-api.greenhouse.io/v1). Submission needs a per-board API key."""
 from __future__ import annotations
 
+import asyncio
+import html
 import re
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+import httpx
 
 from ..core.models import ApplicationForm, FieldKind, FormField, Posting, SubmitResult
 from ..core.registry import platforms
@@ -19,14 +23,108 @@ _KINDS = {"input_text": FieldKind.text, "textarea": FieldKind.textarea, "input_f
           "multi_value_single_select": FieldKind.select, "multi_value_multi_select": FieldKind.multiselect,
           "input_hidden": FieldKind.unknown}
 
+# ADR-0072: board token for a company-hosted ?gh_jid= page. Page content is untrusted data: only a strictly formed
+# token is ever taken from it, and every candidate is checked against the public jobs API before it is used.
+_BOARD_TOKEN = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+_PAGE_BOARD = (
+    # embed script / iframe: (job-)boards.greenhouse.io/embed/job_board[/js]?for=<board> or embed/job_app?...for=<board>
+    re.compile(r"(?:job-)?boards\.greenhouse\.io/embed/job_(?:board(?:/js)?|app)\?(?:[^\"'<>\s]*&)?for=([A-Za-z0-9-]+)"),
+    # a link to the hosted posting: (job-)boards.greenhouse.io/<board>/jobs/<id>
+    re.compile(r"(?:job-)?boards\.greenhouse\.io/([A-Za-z0-9-]+)/jobs/\d+"),
+)
+_SITE_NAME = re.compile(r"<meta[^>]+(?:property|name)=[\"']og:site_name[\"'][^>]*>", re.IGNORECASE)
+_CONTENT = re.compile(r"content=[\"']([^\"'<>]{1,80})[\"']", re.IGNORECASE)
+_HOST_AFFIXES = ("with", "join", "work", "careers", "career", "jobs", "team", "go", "get", "hello", "meet")
+_MAX_PAGE_CHARS = 2_000_000
+_MAX_CANDIDATES = 6
+
+
+def _token(raw: str) -> str | None:
+    t = raw.strip().lower()
+    return t if _BOARD_TOKEN.fullmatch(t) else None
+
+
+def page_board_candidates(page: str) -> list[str]:
+    """Board tokens named by a company careers page (ADR-0072): the Greenhouse embed script or iframe `for=` param,
+    a hosted-posting link, then the og:site_name as a slug. Strictly validated; order = confidence."""
+    page = html.unescape(page[:_MAX_PAGE_CHARS])
+    out: list[str] = []
+    for rx in _PAGE_BOARD:
+        out += [t for m in rx.finditer(page) if (t := _token(m.group(1)))]
+    if (meta := _SITE_NAME.search(page)) and (c := _CONTENT.search(meta.group(0))):
+        out += [t for t in (_token(re.sub(r"[^A-Za-z0-9]+", "", c.group(1))),
+                            _token(re.sub(r"[^A-Za-z0-9]+", "-", c.group(1)).strip("-"))) if t]
+    return list(dict.fromkeys(out))
+
+
+def host_board_candidates(host: str) -> list[str]:
+    """Board guesses from a careers host ("careers.withbrand.example" -> "withbrand", "brand"); the registrable label
+    first (the historic guess), then that label without a common careers prefix or suffix."""
+    labels = [x for x in host.lower().split(":")[0].split(".") if x]
+    base = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+    out = [base]
+    for a in _HOST_AFFIXES:
+        if base.startswith(a) and len(base) > len(a) + 1:
+            out.append(base[len(a):].strip("-"))
+        if base.endswith(a) and len(base) > len(a) + 1:
+            out.append(base[: -len(a)].strip("-"))
+    return list(dict.fromkeys(t for x in out if (t := _token(x))))
+
 
 @platforms.register("greenhouse")
 class GreenhouseAdapter(BaseAdapter):
     name = "greenhouse"
     hosts = ("greenhouse.io",)
 
+    def __init__(self, *a: Any, **kw: Any):
+        super().__init__(*a, **kw)
+        self._host_boards: dict[str, str] = {}   # company host -> verified board token (in-process, ADR-0072)
+        self._host_locks: dict[str, asyncio.Lock] = {}   # get_posting + get_form run concurrently: one lookup per host
+
     def matches(self, url: str) -> bool:
         return super().matches(url) or "gh_jid=" in url
+
+    @staticmethod
+    def _company_gh_page(url: str) -> tuple[str, str] | None:
+        """(host, gh_jid) for a company-hosted careers page carrying ?gh_jid=; None for anything else."""
+        if not url.startswith(("http://", "https://")):
+            return None
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        jid = (parse_qs(p.query).get("gh_jid") or [""])[0]
+        if not host or host == "greenhouse.io" or host.endswith(".greenhouse.io") or not jid.isdigit():
+            return None
+        if _URL.search(url) or "for" in parse_qs(p.query):
+            return None
+        return host, jid
+
+    async def _job_exists(self, board: str, jid: str) -> bool:
+        try:
+            await self.http.get_json(f"{API}/{board}/jobs/{jid}")
+            return True
+        except (HttpError, httpx.HTTPError, ValueError):   # 404, other HTTP or transport error: not verified
+            return False
+
+    async def _resolve_job(self, url_or_ref: str) -> tuple[str, str]:
+        """_need_job, but a company ?gh_jid= page gets its board from the page itself (ADR-0072): candidates from the
+        embed script / iframe / og:site_name, then from the host, each verified against the public jobs API; the
+        historic host guess only when none verifies. Verified boards are cached per host."""
+        page = self._company_gh_page(url_or_ref)
+        if not page:
+            return self._need_job(url_or_ref)
+        host, jid = page
+        async with self._host_locks.setdefault(host, asyncio.Lock()):
+            if board := self._host_boards.get(host):
+                return board, jid
+            try:
+                found = page_board_candidates(await self.http.get_text(url_or_ref))
+            except (HttpError, httpx.HTTPError, UnicodeError):   # unreachable page: the host still yields candidates
+                found = []
+            for cand in list(dict.fromkeys(found + host_board_candidates(host)))[:_MAX_CANDIDATES]:
+                if await self._job_exists(cand, jid):
+                    self._host_boards[host] = cand
+                    return cand, jid
+        return self._need_job(url_or_ref)
 
     def _parse_url(self, url: str) -> tuple[str, str | None]:
         p = urlparse(url)
@@ -119,7 +217,7 @@ class GreenhouseAdapter(BaseAdapter):
             yield p
 
     async def get_posting(self, url_or_ref: str, *, with_description: bool = False) -> Posting:
-        board, jid = self._need_job(url_or_ref)
+        board, jid = await self._resolve_job(url_or_ref)
         return self._to_posting(board, await self._get(f"{API}/{board}/jobs/{jid}"), with_description=with_description)
 
     async def _get(self, url: str, params: dict | None = None) -> Any:
@@ -135,7 +233,7 @@ class GreenhouseAdapter(BaseAdapter):
 
     # ------------------------------------------------------------------ form
     async def get_form(self, url_or_ref: str) -> ApplicationForm:
-        board, jid = self._need_job(url_or_ref)
+        board, jid = await self._resolve_job(url_or_ref)
         d = await self._questions(board, jid)
         fields: list[FormField] = []
         for q in (d.get("questions") or []) + (d.get("location_questions") or []):
