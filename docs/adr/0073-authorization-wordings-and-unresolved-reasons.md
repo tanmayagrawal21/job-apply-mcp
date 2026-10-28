@@ -136,7 +136,11 @@ office N days a week", or "(with | requiring) N days a week (in office | onsite 
   that state must be the profile's region. A bare city name is a homonym risk (Portland ME / OR, Cambridge MA /
   UK). It counts only when a posting location with that city is confirmed in the profile's region and country
   (`residence_match`). With no posting location, or one the parser cannot confirm, the answer depends on
-  relocation, so the rule fails closed. Anything else is unresolved
+  relocation, so the rule fails closed. Every qualifier the label gives right after the city (a state, a region
+  or a country, as in "Springfield, IL, USA" or "Cambridge, United Kingdom") must be the profile's. A US state
+  also needs a US profile. A qualifier that is not the profile's means the city is not local, even when another
+  posting location confirms the profile city. A country qualifier alone still needs the posting to confirm the
+  city. Anything else is unresolved
   (`unknown_fact`, with a reason that names the facts), and a missing fact is a profile gap. The rule never
   answers No, because a mixed profile cannot be split (the same as the conditional office rule of the #122
   follow-up, #124).

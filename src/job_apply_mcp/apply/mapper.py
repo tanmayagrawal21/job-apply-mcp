@@ -1864,7 +1864,9 @@ def _state_names(v: str) -> set[str]:
 def _ack_place_fit(profile: ProfileLike, named: Sequence[str], locations: Sequence[str] = ()) -> bool:
     """The profile's [contact] city is one of the acknowledged places. A region / state match alone is not commuting
     distance ("Chicago, IL" for a Springfield, IL profile; "New York" for an upstate NY profile), so it never counts.
-    When the label qualifies the city with a state ("Springfield, MO"), that state must be the profile's region."""
+    When the label qualifies the city with a state, region or country ("Springfield, MO", "Cambridge, United
+    Kingdom"), each qualifier must be the profile's (a US state also needs a US profile). A city with no state or
+    region qualifier counts only when a posting location confirms it (residence_match)."""
     city = normalize(str(profile.lookup("contact:city") or "").strip())
     if not city:
         return False
@@ -1875,11 +1877,36 @@ def _ack_place_fit(profile: ProfileLike, named: Sequence[str], locations: Sequen
     same = [loc for loc in locations
             if (lc := _loc_region(str(loc))[0]) is not None and _CITY_ALIAS.get(lc, lc) == want]
     bare_ok = bool(same) and residence_match(profile, same) is True
+    # a qualifier the label gives right after the city (state, region or country) must be the profile's; a
+    # qualifier that is not the profile's ("Cambridge, United Kingdom" for a Cambridge, MA, US profile) is not local
+    home = country_iso(profile.lookup("country") or "")
+    my_region = normalize(str(profile.lookup("contact:region") or ""))
+    regions = {normalize(r) for loc in locations if (r := _loc_region(str(loc))[1])} | ({my_region} - {""})
     for i, ph in enumerate(named):
         if ph != city:
             continue
-        nxt = _state_names(named[i + 1]) if i + 1 < len(named) else set()
-        if (nxt and nxt & mine) or (not nxt and bare_ok):
+        quals = []
+        for q in named[i + 1:i + 3]:          # "Springfield, IL", "Springfield, IL, USA", "Cambridge, United Kingdom"
+            st = _state_names(q)              # first: country_iso("il") would read Israel
+            if st:
+                quals.append(("state", st, q))
+            elif q in regions:
+                quals.append(("region", None, q))
+            elif country_iso(q):
+                quals.append(("country", country_iso(q), q))
+            else:
+                break                         # another place of the list ("Springfield or Chicago")
+        ok, named_state = True, False
+        for kind, val, q in quals:
+            if kind == "state":
+                named_state = True
+                ok &= home == "US" and bool(val & mine)
+            elif kind == "region":
+                named_state = True
+                ok &= bool(my_region) and q == my_region
+            else:
+                ok &= home is not None and val == home
+        if ok and (named_state or bare_ok):
             return True
     return False
 
