@@ -286,3 +286,48 @@ async def test_greenhouse_native_eeoc_selects(drv):
     assert st["sel:gender"] == "Male" and st["sel:race"] == "White (Not Hispanic or Latino)"
     assert st["sel:veteran_status"] == "I am a protected veteran"
     assert st["sel:disability_status"] == "Yes, I have a disability (or previously had a disability)"
+
+
+# ADR-0070 amendment: is_veteran="Yes" with a veteran_status decline on a PROTECTED-only veteran select
+def _vet_html(opts, required):
+    """Required: a Greenhouse native EEOC select (inverted rule). Optional: Lever's voluntary .eeo-section."""
+    o = "".join(f"<option>{t}</option>" for t in opts)
+    req = " required" if required else ""
+    box = "eeoc__container" if required else "eeo-section"
+    return (f"""<html><body><form id=application-form>
+<label for=first_name>First Name</label><input id=first_name name=first_name>
+<div class="{box}"><h2>Voluntary Self-Identification</h2>
+<label for=veteran_status>Veteran Status{" *" if required else ""}</label><select id=veteran_status{req}>
+<option value="">Please select</option>{o}</select></div>
+<button type=submit>Submit application</button></form><script>__REPORT__</script></body></html>"""
+            .replace("__REPORT__", REPORT))
+
+
+PROTECTED_ONLY = ["I identify as one or more of the classifications of protected veteran",
+                  "I am not a protected veteran", "I don't wish to answer"]
+
+
+@pytest.mark.parametrize("answers,required,want", [
+    ({"demographic:veteran": "Decline to self-identify"}, True, "I don't wish to answer"),
+    ({"demographic:veteran": "Decline to self-identify"}, False, "I don't wish to answer"),   # owner's own decline
+    ({}, True, "I don't wish to answer"),           # required, nothing on protected status: decline table
+    ({}, False, ""),                                # optional, nothing on protected status: blank
+])
+async def test_served_veteran_on_protected_only_select_declines_never_protected(drv, answers, required, want):
+    srv, posts = _serve(_vet_html(PROTECTED_ONLY, required))
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/53", FORM_NATIVE,
+                                    {"first_name": "Sam", "demographic:is_veteran": "Yes", **answers}, {},
+                                    dry_run=True)
+    st = _state(posts)
+    assert st["sel:veteran_status"] == want, (res.status, res.detail)
+    assert "protected veteran" not in st["sel:veteran_status"]
+    if want:
+        assert res.status == "dry_run" and not res.unresolved, (res.detail, res.unresolved)
+
+
+async def test_served_veteran_without_a_decline_option_stays_blank(drv):
+    srv, posts = _serve(_vet_html(PROTECTED_ONLY[:2], True))
+    res = await drv.fill_and_submit(f"http://127.0.0.1:{srv.server_port}/initech/jobs/53", FORM_NATIVE,
+                                    {"first_name": "Sam", "demographic:is_veteran": "Yes",
+                                     "demographic:veteran": "Decline to self-identify"}, {}, dry_run=True)
+    assert _state(posts)["sel:veteran_status"] == "" and res.status == "incomplete", res.detail
