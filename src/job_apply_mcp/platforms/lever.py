@@ -9,9 +9,11 @@ from urllib.parse import urlparse
 from ..core.models import ApplicationForm, FieldKind, Posting, SubmitResult
 from ..core.registry import platforms
 from .base import AdapterError, BaseAdapter, PostingClosed, iso_date, not_before
-from .http import HttpError
+from .http import MAX_TEXT_BYTES, HttpError
 from .lever_cards import parse_cards
 from .textflags import html_to_text
+
+APPLY_PAGE_MAX_BYTES = MAX_TEXT_BYTES   # the apply page is read up to this cap; a longer page fails get_form
 
 API = "https://api.lever.co/v0/postings"
 _URL = re.compile(r"lever\.co/([^/?#]+)(?:/([0-9a-f]{8}-[0-9a-f-]{27}))?", re.IGNORECASE)
@@ -114,19 +116,26 @@ class LeverAdapter(BaseAdapter):
                                  ("urls[LinkedIn]", "LinkedIn", F.text, False), ("urls[GitHub]", "GitHub", F.text, False),
                                  ("comments", "Additional information", F.textarea, False),
                                  ("resume", "Resume", F.file, True))
-        html = await self._apply_page(board, pid)
+        html, truncated = await self._apply_page(board, pid)
+        if truncated:
+            # ADR-0072: cards past the text cap would vanish silently and an API submit would omit a required
+            # answer; fail closed rather than report a partial form as complete
+            raise AdapterError(f"tool_gap: the Lever apply page is larger than the {APPLY_PAGE_MAX_BYTES} byte text "
+                               "cap, so custom questions may be missing; the form is not reported")
         if html:                       # optional standard inputs this posting's page does not render are dropped
             fields = [f for f in fields if f.required or f'name="{f.key}"' in html]
         fields += [f for f in parse_cards(html) if f.key not in {x.key for x in fields}]
         return ApplicationForm(ref=self.ref(board, pid), fields=fields,
                                submit_via=["api", "browser"] if self.api_key(board) else ["browser"])
 
-    async def _apply_page(self, board: str, pid: str) -> str:
-        """The hosted apply page's HTML (custom-question cards, ADR-0031). Any failure just means no extra fields."""
+    async def _apply_page(self, board: str, pid: str) -> tuple[str, bool]:
+        """(HTML, truncated) of the hosted apply page (custom-question cards, ADR-0031). A fetch failure just means
+        no extra fields; a page cut at the text cap is reported (ADR-0072)."""
         try:
-            return await self.http.get_text(f"https://jobs.lever.co/{board}/{pid}/apply")
+            return await self.http.get_text_capped(f"https://jobs.lever.co/{board}/{pid}/apply",
+                                                   max_bytes=APPLY_PAGE_MAX_BYTES)
         except Exception:  # noqa: BLE001 - HTTP/transport errors must never break get_form
-            return ""
+            return "", False
 
     async def submit(self, form: ApplicationForm, answers: dict[str, Any], files: dict[str, str],
                      *, dry_run: bool = True) -> SubmitResult:

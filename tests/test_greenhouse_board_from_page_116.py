@@ -108,3 +108,31 @@ async def test_refs_and_greenhouse_urls_never_fetch_a_page(http):
     assert (await a.get_posting("greenhouse:initech:101")).ref == "greenhouse:initech:101"
     assert (await a.get_posting("https://job-boards.greenhouse.io/initech/jobs/101")).ref == "greenhouse:initech:101"
     assert all(c.request.url.host == "boards-api.greenhouse.io" for c in respx.calls)
+
+
+@respx.mock
+async def test_second_gh_jid_on_same_host_on_another_board_is_not_skipped(http):
+    """PR #117 review: the cache used to be keyed by host only, so a second job on a different board got a 404."""
+    page2 = "https://careers.withinitech.example/jobs/designer?gh_jid=202"
+    respx.get(PAGE).respond(text='<script src="https://boards.greenhouse.io/embed/job_board/js?for=initech">')
+    respx.get(page2).respond(text='<script src="https://boards.greenhouse.io/embed/job_board/js?for=initech-labs">')
+    respx.get(f"{API}/initech/jobs/101").respond(json=job("initech"))
+    miss = respx.get(f"{API}/initech/jobs/202").respond(404)
+    respx.get(f"{API}/initech-labs/jobs/202").respond(json={**job("initech-labs"), "id": 202, "absolute_url": page2})
+    a = GreenhouseAdapter(http, env={})
+    assert await a._resolve_job(PAGE) == ("initech", "101")
+    assert await a._resolve_job(page2) == ("initech-labs", "202")
+    assert miss.call_count == 1                        # the cached board is checked once, not again as a candidate
+    assert await a._resolve_job(PAGE) == ("initech", "101")   # exact (host, gh_jid) hit, no page refetch
+
+
+@respx.mock
+async def test_second_gh_jid_on_same_board_reuses_host_board_without_page_fetch(http):
+    page2 = "https://careers.withinitech.example/jobs/designer?gh_jid=202"
+    respx.get(PAGE).respond(text='<script src="https://boards.greenhouse.io/embed/job_board/js?for=initech">')
+    p2 = respx.get(page2).respond(text="")
+    respx.get(f"{API}/initech/jobs/101").respond(json=job("initech"))
+    respx.get(f"{API}/initech/jobs/202").respond(json={**job("initech"), "id": 202})
+    a = GreenhouseAdapter(http, env={})
+    await a._resolve_job(PAGE)
+    assert await a._resolve_job(page2) == ("initech", "202") and not p2.called

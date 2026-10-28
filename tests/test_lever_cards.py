@@ -94,3 +94,25 @@ def test_saved_yesno_answer_never_lands_in_preferred_name_field():
     assert r.answers == []
     assert prof.answer_for("Were you referred by an employee?") == "No"
     assert prof.answer_for("What is your preferred name?") is None
+
+
+@respx.mock
+async def test_truncated_apply_page_fails_get_form_closed(http, monkeypatch):
+    """PR #124 review: a page cut at the text cap must not yield a form that looks complete (cards past the cut
+    would vanish and an API submit would omit a required answer)."""
+    import pytest
+
+    from job_apply_mcp.platforms import lever
+    from job_apply_mcp.platforms.base import AdapterError
+    html = page(with_json=False)
+    cut = html.index(f'name="{key(2)}"')               # the second required card lies past the cap
+    monkeypatch.setattr(lever, "APPLY_PAGE_MAX_BYTES", cut)
+    respx.get(f"https://jobs.lever.co/democo/{LEVER_ID}/apply").respond(text=html)
+    post = respx.post(url__regex=r".*").respond(json={"ok": True})
+    a = LeverAdapter(http, env={})
+    with pytest.raises(AdapterError, match="tool_gap.*text cap"):
+        await a.get_form(f"lever:democo:{LEVER_ID}")
+    assert not post.called                             # nothing was submitted
+    monkeypatch.setattr(lever, "APPLY_PAGE_MAX_BYTES", len(html.encode()))   # exactly at the cap: not truncated
+    form = await a.get_form(f"lever:democo:{LEVER_ID}")
+    assert key(2) in [f.key for f in form.fields]

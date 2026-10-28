@@ -1814,6 +1814,38 @@ def pref_template(label: str, places: frozenset[str] | None = None) -> tuple[str
     return None
 
 
+# ADR-0073 amendment (#122 review): a hybrid template that asks for five office days a week is on site (the ADR-0055
+# office rule already reads it this way).
+_DAY_NUM = r"(?:[1-5]|one|two|three|four|five)"
+_DAY_RANGE_TO_FIVE = re.compile(rf"\b{_DAY_NUM} (?:to|or) (?:5|five) (?:days?|x) (?:a|per|each) week\b")
+_FIVE_DAYS = re.compile(r"\b(?:5|five) (?:days?|x) (?:a|per|each) week\b")
+_FULL_TIME = re.compile(r"\bfull time\b")
+
+
+def schedule_fact(kind: str, label: str) -> tuple[str | None, str]:
+    """(fact key, reason) for a label that matched a hybrid / onsite template; the key is None when the schedule is
+    ambiguous. "hybrid ... 5 days a week" is on site (open_to_onsite); for a hybrid template, a range that reaches
+    five days or "hybrid ... full time" (employment or office time?) is the owner's. Onsite templates keep
+    open_to_onsite."""
+    n = normalize(label)
+    if kind != "hybrid":
+        return "open_to_onsite", ""
+    if _DAY_RANGE_TO_FIVE.search(n):
+        return None, ("the schedule is a range that reaches five office days a week: hybrid or on site is "
+                      "ambiguous, so the owner answers it")
+    if _FIVE_DAYS.search(n):
+        return "open_to_onsite", ""
+    if _FULL_TIME.search(n):
+        return None, ("\"hybrid ... full time\" may mean full-time employment or full time in the office: the "
+                      "owner answers it")
+    return "open_to_hybrid", ""
+
+
+def if_not_local(label: str) -> bool:
+    """The label starts with a residence condition ("If you are not local to <place>, ..."), see _IF_NOT_HERE."""
+    return bool(_IF_NOT_HERE.match(_HINT_TAIL.sub("", label.strip())))
+
+
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
                   job_country: str | None, gap: Any) -> Any | None:
     n = normalize(f.label)
@@ -1985,14 +2017,39 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
                     "preference wording outside the closed positive templates (it may be negated, conditional or "
                     "compound): the owner answers it")})
             return True, None
-        v = profile.lookup(ck)
+        fact = ck
+        if tpl[0] in ("hybrid", "onsite"):
+            fact, why = schedule_fact(tpl[0], f.label)       # ADR-0073 amendment: five office days is on site
+            if fact is None:
+                if reasons is not None:
+                    reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": why})
+                return True, None
+            if if_not_local(f.label):
+                # "If you are not local to <place>, are you comfortable working onsite?": a Yes needs the schedule
+                # fact AND willing_to_relocate; anything else is the owner's (ADR-0073 amendment)
+                sv = _truth(profile.lookup(fact))
+                rv = _truth(profile.lookup("willing_to_relocate"))
+                if sv is True and rv is True:
+                    return True, profile.lookup(fact)
+                if gaps is not None:
+                    for k, val in ((fact, sv), ("willing_to_relocate", rv)):
+                        if val is None:
+                            gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(k, k),
+                                         "key": f.key, "profile_fact": True})
+                if reasons is not None:
+                    reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
+                        "a conditional office question (\"if you are not local ...\") is answered Yes only when the "
+                        f"profile has both {_PREF_FIELD.get(fact, fact)} and willing_to_relocate true; otherwise "
+                        "the owner answers it")})
+                return True, None
+        v = profile.lookup(fact)
         if tpl[1] and _truth(v) is not True:         # "based in X, or ready to relocate?": only a Yes is decidable
             if v is None and gaps is not None:
                 gaps.append({"country": None, "fact": "preferences.willing_to_relocate", "key": f.key,
                              "profile_fact": True})
             return True, None
         if v is None and gaps is not None:                    # ADR-0053: [preferences] fact missing
-            gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(ck, ck), "key": f.key,
+            gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(fact, fact), "key": f.key,
                          "profile_fact": True})
         return (False, None) if v is None else (True, v)
     if ck == "knows_employee":
