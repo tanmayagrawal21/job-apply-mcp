@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS intake_items(
   why TEXT,
   company TEXT,
   title TEXT,
-  approval_id TEXT
+  approval_id TEXT,
+  captcha TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_items_run ON intake_items(run_id);
 CREATE TABLE IF NOT EXISTS intake_mail(
@@ -85,6 +86,8 @@ class IntakeStore:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.executescript(_SCHEMA)
             cols = {r["name"] for r in self._db.execute("PRAGMA table_info(intake_feedback)")}
+            if "captcha" not in {r["name"] for r in self._db.execute("PRAGMA table_info(intake_items)")}:
+                self._db.execute("ALTER TABLE intake_items ADD COLUMN captcha TEXT")   # ADR-0071
             for c, ddl in (("delivered_at", "TEXT"), ("origin", "TEXT NOT NULL DEFAULT 'client'"),
                            ("confirmed_by", "TEXT")):
                 if c not in cols:
@@ -134,10 +137,10 @@ class IntakeStore:
     async def add_items(self, run_id: str, rows: list[dict[str, Any]]) -> None:
         def f():
             self._db.executemany(
-                "INSERT INTO intake_items(run_id, ref, url, source, status, why, company, title, approval_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO intake_items(run_id, ref, url, source, status, why, company, title, approval_id, captcha) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 [(run_id, r["ref"], r.get("url"), r["source"], r["status"], r.get("why"), r.get("co"),
-                  r.get("title"), r.get("approval_id")) for r in rows])
+                  r.get("title"), r.get("approval_id"), r.get("captcha")) for r in rows])
         await self._a(f)
 
     async def items(self, run_id: str) -> list[dict[str, Any]]:

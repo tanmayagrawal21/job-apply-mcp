@@ -488,7 +488,8 @@ class Services:
     def _submit_row(self, r: Any, st: Any = None, t: Any = None) -> dict[str, Any]:
         row = {"ref": r.ref, "status": r.status, "via": r.via, "confirmation": r.confirmation, "detail": r.detail,
                "pending_id": r.pending_id, "state": st["state"] if st else None, "t": t,
-               "client_tasks": getattr(r, "client_tasks", None), "unresolved": getattr(r, "unresolved", None)}
+               "client_tasks": getattr(r, "client_tasks", None), "unresolved": getattr(r, "unresolved", None),
+               "captcha": getattr(r, "captcha", None), "captcha_mode": getattr(r, "captcha_mode", None)}  # ADR-0071
         if st and st["state"] in ("submitting", "unknown", "submitted", "handoff"):   # ADR-0025
             row["reconcile_in_min"] = (self.settings.ingest.reconcile_delays_min or [None])[0]
         return self._guided({k: v for k, v in row.items() if v}, state=st["state"] if st else None)
@@ -526,6 +527,9 @@ class Services:
         rows = await self.engine.apply_batch(refs, dry_run, max_parallel)
         out: dict[str, Any] = {"results": [self._guided(r, state=self._state_of(r.get("ref"))) if isinstance(r, dict)
                                            else r for r in rows]}
+        from .core.captcha_report import counts as captcha_counts
+        if cc := captcha_counts(rows):          # ADR-0071: filter rows by captcha_mode (none / implicit / ...)
+            out["captcha_counts"] = cc
         from .accounts.runtime import RUN_REPORT  # ADR-0046: login flags for this run (never secrets)
         if flags := RUN_REPORT.compact():
             out["account_flags"] = flags
