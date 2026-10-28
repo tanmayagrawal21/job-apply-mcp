@@ -2535,8 +2535,9 @@ class PlaywrightDriver(VerificationMixin):
         for f, v in rows:
             if f.kind == FieldKind.boolean:
                 state = await self._bool_state(page, f, await self._locate(page, f))
-                if (state is None and ats is not None and ats.name == "ashby") or \
-                        (state is not None and state != bool(v)):
+                # follow-up to #129: an unknown state (no visible checkbox, no pressed Yes/No) fails on EVERY ATS. A
+                # hidden backing checkbox can neither prove nor refute the answer, so "unknown" is never a pass.
+                if state is None or state != bool(v):
                     bad.append(f.key)
                 continue
             if f.kind == FieldKind.location:
