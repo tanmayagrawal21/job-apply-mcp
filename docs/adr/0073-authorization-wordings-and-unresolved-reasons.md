@@ -125,25 +125,22 @@ located) (in | at | out of) <places>". After that comes nothing, or one of two o
 (will | would) be (required | expected | asked) to (come | go | commute | be) (into | to | in) (the | our | an)
 office N days a week", or "(with | requiring) N days a week (in office | onsite | in person)".
 - `_OFFICE_NEG` runs on the whole label first, and no condition clause is accepted. `<places>` is a list joined by
-  "and", "or" or "and/or". Every word must pass `_place_ok()` against `known_places()`. A reference ("the area")
-  anywhere in the list ("Chicago or the area"), or any other word, leaves the question unresolved, so a compound
-  tail ("and agree to a background check") fails.
+  "and", "or" or "and/or". Every word must pass `_place_ok()` against `known_places()`, and a two-letter state
+  code counts only in capitals ("OR", never the word "or" or "me"). A reference ("the area") anywhere in the list
+  ("Chicago or the area"), a dangling conjunction, or any other word leaves the question unresolved, so a
+  compound tail ("and agree to a background check") fails.
 - The fact comes from `schedule_fact()`: hybrid reads `open_to_hybrid`, five days reads `open_to_onsite`, a range
   that reaches five days is the owner's, and onsite / in office / in person reads `open_to_onsite`.
-- The answer is Yes only when that fact is true AND either the profile's [contact] city is one of the named places,
-  or `willing_to_relocate` is true. A region or state match alone is not commuting distance ("Chicago, IL" for
-  another Illinois city), so it never counts. When the label qualifies the city with a state ("Springfield, MO"),
-  that state must be the profile's region. A bare city name is a homonym risk (Portland ME / OR, Cambridge MA /
-  UK). It counts only when a posting location with that city is confirmed in the profile's region and country
-  (`residence_match`). With no posting location, or one the parser cannot confirm, the answer depends on
-  relocation, so the rule fails closed. Every qualifier the label gives right after the city (a state, a region
-  or a country, as in "Springfield, IL, USA" or "Cambridge, United Kingdom") must be the profile's. A US state
-  also needs a US profile. A qualifier that is not the profile's means the city is not local, even when another
-  posting location confirms the profile city. A country qualifier alone still needs the posting to confirm the
-  city. Anything else is unresolved
-  (`unknown_fact`, with a reason that names the facts), and a missing fact is a profile gap. The rule never
+- The answer is Yes only when that fact AND `willing_to_relocate` are true. Anything else is unresolved
+  (`unknown_fact`, with a reason that names both facts), and a missing fact is a profile gap. The rule never
   answers No, because a mixed profile cannot be split (the same as the conditional office rule of the #122
   follow-up, #124).
+- Being local is never inferred. Review found five holes in turn in a residence path ("the profile city is a named
+  place"): a state qualifier taken as residence, a reference inside a list, bare-city homonyms (Springfield IL /
+  MO, Portland ME / OR, Cambridge MA / UK), a country qualifier ignored when another posting location confirmed
+  the city, and a region code read from a conjunction ("Portland or Seattle" for an Oregon profile). So that path
+  was removed. Coverage loss: an applicant who lives in a named city but has `willing_to_relocate` false or
+  missing now gets this question as an owner task.
 - An acknowledgement whose tail says "our office" does not take the ADR-0055 office rule, which could answer No.
 
 ## Consequences
@@ -159,9 +156,10 @@ still block every authorization rule.
    with Yes, No and mixed fictional profiles (hybrid five days answers from `open_to_onsite`; ranges and
    "full time" stay unresolved; a conditional office question answers Yes only with `willing_to_relocate`).
 0b. Amendment (#125): `uv run pytest -q tests/test_hybrid_ack_125.py` checks the posting's wording with Yes, No and
-   mixed fictional profiles, plus negated, compound and unknown-place variants. Every one that is not Yes stays
-   unresolved. Then run a dry run (never live) on a posting with this question and check in the evidence text that
-   it is filled Yes.
+   mixed fictional profiles, plus negated, compound, unknown-place, homonym, qualifier and lowercase-code variants.
+   Every one that is not Yes stays unresolved, and no local case answers without `willing_to_relocate`. Then run a
+   dry run (never live) on a posting with this question, with `willing_to_relocate` true, and check in the
+   evidence text that it is filled Yes.
 1. `uv run pytest -q tests/test_auth_wordings_121.py` covers every wording from the issue, the negatives,
    determinism and the plan-level reason. Then run the full `uv run pytest -q`, including
    `tests/test_live_blockers_2.py::test_explicit_country_question_on_an_unconfirmed_job`, which pins the

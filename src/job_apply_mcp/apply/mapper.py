@@ -1836,6 +1836,9 @@ def ack_template(label: str, places: frozenset[str] | None = None) -> tuple[str,
     ("Do you acknowledge that this is a hybrid role based in <known places> ..."), else None. The negation /
     aversion backstop runs on the whole label first (no condition clause is accepted here)."""
     places = places if places is not None else known_places(None)
+    # a two-letter state code ("or", "me", "in") counts only when written in capitals (_place_ok), never as a word
+    # a profile or posting region added to known_places
+    places = frozenset(p for p in places if not (len(p) == 2 and p.upper() in US_STATES))
     raw = _HINT_TAIL.sub("", label.strip())
     n = normalize(raw)
     if not n or _OFFICE_NEG.search(n):
@@ -1844,71 +1847,14 @@ def ack_template(label: str, places: frozenset[str] | None = None) -> tuple[str,
     if not m:
         return None
     slot = _ack_slot(m.group("p"))
+    if re.search(r"^or\b|\bor$|\bor or\b", slot) and not re.search(r"\bOR\b", raw):
+        return None     # a dangling or doubled conjunction ("Portland, or") names no place list; "OR" is Oregon
     if any(re.search(rf"\b{re.escape(r)}\b", slot) for r in _PLACE_REFS) or not _place_ok(slot, raw, places):
         return None     # a reference ("the area") anywhere in the list stays unresolved
     named = _place_phrases(slot, raw, places)
     if not named:
         return None
     return ("hybrid" if m.group("mode") == "hybrid" else "onsite"), named
-
-
-def _state_names(v: str) -> set[str]:
-    """A US state as its normalized code and name ("IL" / "Illinois" -> {"il", "illinois"}); empty when not a state."""
-    n = normalize(v)
-    for code, name in US_STATES.items():
-        if n in (code.lower(), normalize(name)):
-            return {code.lower(), normalize(name)}
-    return set()
-
-
-def _ack_place_fit(profile: ProfileLike, named: Sequence[str], locations: Sequence[str] = ()) -> bool:
-    """The profile's [contact] city is one of the acknowledged places. A region / state match alone is not commuting
-    distance ("Chicago, IL" for a Springfield, IL profile; "New York" for an upstate NY profile), so it never counts.
-    When the label qualifies the city with a state, region or country ("Springfield, MO", "Cambridge, United
-    Kingdom"), each qualifier must be the profile's (a US state also needs a US profile). A city with no state or
-    region qualifier counts only when a posting location confirms it (residence_match)."""
-    city = normalize(str(profile.lookup("contact:city") or "").strip())
-    if not city:
-        return False
-    mine = _state_names(str(profile.lookup("contact:region") or ""))
-    # a bare city name is a homonym risk (Portland ME / OR, Cambridge MA / UK): it counts only when a posting
-    # location with that city is confirmed in the profile's region / country (residence_match); fail closed
-    want = _CITY_ALIAS.get(city, city)
-    same = [loc for loc in locations
-            if (lc := _loc_region(str(loc))[0]) is not None and _CITY_ALIAS.get(lc, lc) == want]
-    bare_ok = bool(same) and residence_match(profile, same) is True
-    # a qualifier the label gives right after the city (state, region or country) must be the profile's; a
-    # qualifier that is not the profile's ("Cambridge, United Kingdom" for a Cambridge, MA, US profile) is not local
-    home = country_iso(profile.lookup("country") or "")
-    my_region = normalize(str(profile.lookup("contact:region") or ""))
-    regions = {normalize(r) for loc in locations if (r := _loc_region(str(loc))[1])} | ({my_region} - {""})
-    for i, ph in enumerate(named):
-        if ph != city:
-            continue
-        quals = []
-        for q in named[i + 1:i + 3]:          # "Springfield, IL", "Springfield, IL, USA", "Cambridge, United Kingdom"
-            st = _state_names(q)              # first: country_iso("il") would read Israel
-            if st:
-                quals.append(("state", st, q))
-            elif q in regions:
-                quals.append(("region", None, q))
-            elif country_iso(q):
-                quals.append(("country", country_iso(q), q))
-            else:
-                break                         # another place of the list ("Springfield or Chicago")
-        ok, named_state = True, False
-        for kind, val, q in quals:
-            if kind == "state":
-                named_state = True
-                ok &= home == "US" and bool(val & mine)
-            elif kind == "region":
-                named_state = True
-                ok &= bool(my_region) and q == my_region
-            else:
-                ok &= home is not None and val == home
-        if ok and (named_state or bare_ok):
-            return True
-    return False
 
 
 def pref_template(label: str, places: frozenset[str] | None = None) -> tuple[str, bool] | None:
@@ -2152,24 +2098,22 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
             ack = ack_template(f.label, known_places(profile, job_locations))
             if ack is not None:
                 # ADR-0073 amendment (#125): "Do you acknowledge that this is a hybrid role based in <places> ...?" is
-                # Yes only when the schedule fact is true AND (the profile city is a named place, ADR-0073, OR
-                # willing_to_relocate is true). Never No: a mixed profile is the owner's.
+                # Yes only when the schedule fact AND willing_to_relocate are true. Being local is never inferred
+                # (city homonyms and region codes made every residence rule leak). Never No: the owner's.
                 sv = _truth(profile.lookup(fact))
-                fit = _ack_place_fit(profile, ack[1], job_locations)
-                rv = None if fit else _truth(profile.lookup("willing_to_relocate"))
-                if sv is True and (fit or rv is True):
+                rv = _truth(profile.lookup("willing_to_relocate"))
+                if sv is True and rv is True:
                     return True, profile.lookup(fact)
                 if gaps is not None:
-                    for k, val in ((fact, sv), *((("willing_to_relocate", rv),) if not fit else ())):
+                    for k, val in ((fact, sv), ("willing_to_relocate", rv)):
                         if val is None:
                             gaps.append({"country": None, "fact": "preferences." + _PREF_FIELD.get(k, k),
                                          "key": f.key, "profile_fact": True})
                 if reasons is not None:
                     reasons.setdefault(f.key, {"category": UNKNOWN_FACT, "reason": (
                         f"an acknowledgement of a {'hybrid' if fact == 'open_to_hybrid' else 'on-site'} role in "
-                        f"{', '.join(ack[1])} is answered Yes only when the profile has {fact} true and its "
-                        "[contact] city is one of those places (with the profile's state, or confirmed by the "
-                        "posting's location) or willing_to_relocate is true; otherwise the owner answers it")})
+                        f"{', '.join(ack[1])} is answered Yes only when the profile has both {fact} and "
+                        "willing_to_relocate true (being local is not inferred); otherwise the owner answers it")})
                 return True, None
             if if_not_local(f.label):
                 # "If you are not local to <place>, are you comfortable working onsite?": a Yes needs the schedule
