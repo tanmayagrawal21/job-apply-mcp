@@ -1668,15 +1668,13 @@ _OFFICE_PICK = re.compile(r"\b(?:which|what|preferred|prefer|preference)\b.*\b(?
 # clause (and, do, don't, want, ...) keeps it, and then no template matches.
 _IF_NOT_HERE = re.compile(r"^\s*if you(?: are|'re|’re| re) not (?:currently )?(?:local|located|based|living|residing)"
                           r"(?P<rest>(?: (?:in|near|to|around))?(?: [^,?]{1,60})?),\s*", re.IGNORECASE)
-_PLACE_WORDS = frozenset(["the", "a", "an", "area", "areas", "bay", "city", "metro", "metropolitan", "greater",
-                          "region", "downtown", "office", "offices", "hq", "headquarters", "of", "or", "listed",
-                          "location", "locations", "posted", "this", "these", "one", "main", "campus", "s"])
 _OFFICE_NEG = re.compile(r"\b(?:not|no|never|unable|unwilling|cannot|refuse\w*|avoid\w*|rather|instead|except|mind|"
                          r"dislike\w*|hate\w*|resent\w*|object\w*|resist\w*|oppos\w*|hesitat\w*|struggl\w*|"
                          r"against|reluctant\w*|hardly|barely|only|nowhere|neither|nor|without|unless|"
                          r"no longer|difficult\w*|problem\w*|concern\w*|averse|aversion|unhappy|uncomfortable|"
                          r"uneasy|dread\w*|hostile|disinclin\w*|declin\w*|rule out|ruled out|deal ?breaker\w*|"
-                         r"unlikely|unsure|doubt\w*)\b|\bn t\b")
+                         r"unlikely|unsure|doubt\w*|quit\w*|show ?stopper\w*|walk away|deal ?killer\w*|"
+                         r"turn\w* down|prefer\w*|tolerat\w*|over)\b|\bn t\b")
 
 _ADJ = r"(?:willing|open|able|comfortable|ready|prepared|willing and able)"
 _BE = r"(?:(?:are you|would you be|will you be|are you currently) )"
@@ -1726,30 +1724,92 @@ _PREF_TEMPLATES: list[tuple[str, re.Pattern[str], bool]] = [(k, re.compile(p + "
 _HINT_TAIL = re.compile(r"\s*\(?\s*(?:yes\s*/\s*no|y\s*/\s*n|yes or no)\s*\)?\s*[?.!:]*\s*$", re.IGNORECASE)
 
 
-def _place_ok(text: str, raw: str) -> bool:
-    """Every word of a free place slot is a proper noun in the raw label (capitalized wherever it appears), a code
-    such as NYC, a number, or a generic place word."""
-    lower = {t.lower() for t in re.findall(r"[A-Za-z]+", raw) if not t[0].isupper()}
-    return all(w in _PLACE_WORDS or w.isdigit() or w not in lower for w in text.split())
+# ADR-0073 (control): a place slot must resolve to a KNOWN place: the posting's own location / office strings, the
+# profile's city / region / country, or this small gazetteer (US states, countries, major metros). Generic words
+# ("the", "greater", "area", "office", "HQ", "campus") may surround it; "or" may join two places.
+_METROS = frozenset([
+    "bay area", "sf bay area", "san francisco bay area", "silicon valley", "sf", "la", "nyc", "dc", "washington dc",
+    "washington", "san jose", "oakland", "berkeley", "palo alto", "menlo park", "mountain view", "sunnyvale",
+    "santa clara", "cupertino", "redwood city", "san mateo", "south san francisco", "san francisco", "los angeles",
+    "santa monica", "torrance", "irvine", "san diego", "sacramento", "portland", "seattle", "bellevue", "redmond",
+    "new york", "new york city", "manhattan", "brooklyn", "jersey city", "hoboken", "boston", "cambridge",
+    "somerville", "chicago", "austin", "dallas", "houston", "san antonio", "denver", "boulder", "atlanta",
+    "philadelphia", "pittsburgh", "phoenix", "tucson", "salt lake city", "miami", "tampa", "orlando",
+    "minneapolis", "detroit", "ann arbor", "nashville", "raleigh", "durham", "research triangle", "charlotte",
+    "baltimore", "columbus", "cleveland", "cincinnati", "indianapolis", "st louis", "saint louis", "kansas city",
+    "milwaukee", "madison", "las vegas", "albuquerque", "omaha", "new orleans", "richmond", "arlington",
+    "reston", "honolulu", "toronto", "vancouver", "montreal", "ottawa", "waterloo", "london", "dublin", "paris",
+    "berlin", "munich", "amsterdam", "zurich", "stockholm", "barcelona", "madrid", "lisbon", "tel aviv",
+    "bangalore", "bengaluru", "hyderabad", "pune", "singapore", "tokyo", "sydney", "melbourne", "mexico city",
+    "sao paulo"])
+_US_PLACE_NAMES = frozenset(["us", "usa", "united states", "america", "the us", "the united states"])
+_PLACE_FILLER = frozenset(["the", "greater", "area", "metro", "metropolitan", "office", "offices", "hq",
+                           "headquarters", "campus", "region", "downtown", "or"])
+# the posting's own place, named by reference ("If you are not local to the area, ...")
+_PLACE_REFS = frozenset(["the area", "this area", "the listed location", "this location", "the location"])
 
 
-def pref_template(label: str) -> tuple[str, bool] | None:
+def known_places(profile: ProfileLike | None, locations: Sequence[str] = ()) -> frozenset[str]:
+    """Normalized place phrases a slot may name: the gazetteer, the posting's location parts and the profile's
+    city / region / country."""
+    out = set(_METROS) | _US_PLACE_NAMES | {normalize(v) for v in US_STATES.values()} | set(_COUNTRY_PATTERNS)
+    for loc in locations:
+        for part in re.split(r"[,;|()]|\s[-–]\s", str(loc or "")):
+            if (p := normalize(_LOC_NOISE.sub(" ", normalize(part)))) and p not in _PLACE_FILLER:
+                out.add(re.sub(r"\s+", " ", p).strip())
+    if profile is not None:
+        for k in ("contact:city", "contact:region", "country"):
+            if (v := normalize(str(profile.lookup(k) or ""))):
+                out.add(v)
+    return frozenset(out)
+
+
+def _place_ok(text: str, raw: str, places: frozenset[str]) -> bool:
+    """Every word of the slot belongs to a known place phrase or is a generic place word, and at least one place is
+    named (or the slot is a reference to the posting's place). A two-letter state code counts only in capitals."""
+    t = re.sub(r"\s+", " ", text).strip()
+    if not t or t in _PLACE_REFS:
+        return bool(t)
+    codes = {c.lower() for c in re.findall(r"\b[A-Z]{2}\b", raw) if c in US_STATES}
+    toks = t.split()
+    best: list[int | None] = [0] + [None] * len(toks)          # places named in the best segmentation of toks[:i]
+    for i in range(len(toks)):
+        if best[i] is None:
+            continue
+        if toks[i] in _PLACE_FILLER:
+            best[i + 1] = max(best[i + 1] or 0, best[i])
+        for j in range(i + 1, min(len(toks), i + 5) + 1):
+            ph = " ".join(toks[i:j])
+            if ph in places or (j == i + 1 and ph in codes):
+                best[j] = max(best[j] or 0, best[i] + 1)
+    return bool(best[-1])
+
+
+_IF_NOT_PREFIX = re.compile(r"^if you (?:are|re) not ")
+
+
+def pref_template(label: str, places: frozenset[str] | None = None) -> tuple[str, bool] | None:
     """ADR-0073 (control): (kind, positive_only) when the WHOLE preference question matches one closed positive
-    template (relocate / hybrid / onsite), else None. Any extra or unknown word, negation or aversion -> None."""
-    raw = label.strip()
+    template (relocate / hybrid / onsite), else None. Any extra or unknown word, negation or aversion anywhere in
+    the label (the condition clause included), or a place slot that is not a known place -> None."""
+    places = places if places is not None else known_places(None)
+    raw = _HINT_TAIL.sub("", label.strip())          # a trailing "(Yes/No)" answer hint is not a negation
+    # control: the negation / aversion backstop runs on the whole label first; only the "not" of a leading
+    # "If you are not ..." condition is exempt
+    if _OFFICE_NEG.search(_IF_NOT_PREFIX.sub("", normalize(raw))):
+        return None
     m = _IF_NOT_HERE.match(raw)
     if m:
-        rest = m.group("rest")
-        if not _place_ok(normalize(re.sub(r"^\s*(?:in|near|to|around)\b", "", rest)), raw):
+        rest = normalize(re.sub(r"^\s*(?:in|near|to|around)\b", "", m.group("rest")))
+        if not _place_ok(rest, raw, places):
             return None
         raw = raw[m.end():]
-    raw = _HINT_TAIL.sub("", raw)
     n = normalize(raw)
-    if not n or _OFFICE_NEG.search(n):
+    if not n:
         return None
     for kind, rx, pos in _PREF_TEMPLATES:
         hit = rx.match(n)
-        if hit and all(_place_ok(v, raw) for k, v in hit.groupdict().items() if v):
+        if hit and all(_place_ok(v, raw, places) for v in hit.groupdict().values() if v and v.strip()):
             return kind, pos
     return None
 
@@ -1757,7 +1817,7 @@ def pref_template(label: str) -> tuple[str, bool] | None:
 def _office_value(f: FormField, ck: str, profile: ProfileLike, locations: Sequence[str],
                   job_country: str | None, gap: Any) -> Any | None:
     n = normalize(f.label)
-    if pref_template(f.label) is None:   # ADR-0073 (control): only a closed positive office template is answered
+    if pref_template(f.label, known_places(profile, locations)) is None:   # ADR-0073 (control): closed templates only
         return None
     key = ("open_to_hybrid" if _HYBRID_DAYS.search(n) and not _RES_ONSITE.search(n)
            else "open_to_onsite" if _RES_ONSITE.search(n) or ck == "open_to_onsite" else "open_to_hybrid")
@@ -1888,9 +1948,9 @@ _CITIZEN_Q_VOCAB = frozenset(["are", "you", "a", "an", "the", "of", "us", "u", "
 def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_languages: int,
               company_aliases: Sequence[str] = (), job_country: str | None = None,
               gaps: list[dict[str, Any]] | None = None,
-              reasons: dict[str, dict[str, str]] | None = None, coupled: bool = False) -> tuple[bool, Any]:
-    """(handled, value). handled=False -> continue with the generic profile lookup. `coupled`: a residence-coupled
-    field (ADR-0055) whose residence options were removed."""
+              reasons: dict[str, dict[str, str]] | None = None,
+              job_locations: Sequence[str] = ()) -> tuple[bool, Any]:
+    """(handled, value). handled=False -> continue with the generic profile lookup."""
     n = normalize(f.label)
     if ck == "located_in_us":
         return True, _residence_answer(f, profile)
@@ -1916,11 +1976,8 @@ def _semantic(f: FormField, ck: str, profile: ProfileLike, company: str, top_lan
     if ck in ("relocation_support", "open_to_hybrid", "open_to_onsite", "willing_to_relocate"):
         if not _YESNO_STYLE.search(n):
             return True, None
-        tpl = pref_template(f.label) if ck != "relocation_support" else ("support", False)
-        if tpl is None and coupled and ck != "willing_to_relocate" and not _OFFICE_NEG.search(n):
-            # ADR-0055 residence-coupled field: its label was already checked by is_residence_coupled() and only
-            # the options that state no residence remain; the polarity check still applies
-            tpl = ("coupled", False)
+        tpl = (pref_template(f.label, known_places(profile, job_locations)) if ck != "relocation_support"
+               else ("support", False))
         if tpl is None or (ck == "willing_to_relocate") != (tpl[0] == "relocate"):
             # ADR-0073 (control): only a closed positive template is answered; anything else is the owner's
             if reasons is not None:
@@ -2728,7 +2785,7 @@ def map_fields(fields: list[FormField], profile: ProfileLike, *, referral_prefer
             continue
         if ck in _SEMANTIC_KEYS:
             handled, sv = _semantic(f, ck, profile, company, top_languages, company_aliases, job_country, gaps,
-                                    reasons, coupled=f.key in originals)
+                                    reasons, job_locations)
             if handled:
                 if sv is None or sv == "":
                     res.unresolved.append(f)

@@ -60,17 +60,31 @@ Deterministic rules only. No model ever sees these questions (ADR-0040 never-LLM
     "... open to working out of / from our <place> office / HQ (N days a week)", "can you (<adverb>) work from
     our <place> office / HQ (N days a week)" with the closed adverb list.
 
-  These are normalized first: punctuation and case, a trailing "(Yes/No)" hint, and a leading bare condition
-  ("If you are not local / located / based (in | near | to) <place>,"). Every word of a free place slot or a
-  condition must be a proper noun in the raw label, a number or a generic place word, so "and do not want to"
-  can never sit in one. "Are you based in <place>, or ready to relocate?" decides only Yes. Anything else is
-  unresolved (`unknown_fact`, "preference wording outside the closed positive templates"). `_OFFICE_NEG` (not,
-  never, mind, averse, unhappy, uncomfortable, dread, hostile, disinclined, decline, rule out, deal-breaker, ...)
-  is also checked as a backstop. One exception: an ADR-0055 residence-coupled field (its label is already checked
-  by `is_residence_coupled()`, and only the options that state no residence remain) still takes the preference
-  when `_OFFICE_NEG` finds nothing. Coverage: every preference wording the test suite answered on main before this
-  PR is still answered (15 wordings, probed by instrumenting the full suite). Anything outside the templates is
-  now the owner's.
+  These are normalized first: punctuation, case and a trailing "(Yes/No)" hint. `_OFFICE_NEG` is a backstop that
+  runs on the WHOLE label before any clause is stripped. Only the "not" of a leading "If you are not ..."
+  condition is exempt. The list: not, never, mind, averse, unhappy, uncomfortable, dread, hostile, disinclined,
+  decline, rule out, deal-breaker, deal killer, showstopper, quit, walk away, turn down, prefer, tolerate,
+  over, ...
+
+  A leading bare condition ("If you are not local / located / based (in | near | to) <place>,") is dropped, and so
+  is nothing else. Every place slot, and the condition's place, must resolve to a KNOWN place (`known_places()`):
+  - the posting's own location and office strings;
+  - the profile's city, region and country;
+  - a small gazetteer of US states, countries and about 120 major metros (Bay Area, SF, LA, NYC, DC, ...);
+  - a two-letter state code, but only when written in capitals.
+
+  Generic words (the, greater, area, metro, office, HQ, campus, region, downtown) may surround a place, and "or"
+  may join two places. "The area" and "this location" refer to the posting's place. Any other words ("Over My
+  Dead Body", "Anywhere But New York", "Impossible", "New York Sadly") leave the question unresolved.
+
+  "Are you based in <place>, or ready to relocate?" decides only Yes. Anything else is unresolved (`unknown_fact`,
+  "preference wording outside the closed positive templates"). There is no exception for residence-coupled fields.
+
+  Coverage, from instrumenting the non-browser suite on origin/main and on this branch: 14 of the 15 preference
+  wordings that main answered still answer. The one that no longer answers is the long ADR-0055 prose question
+  "This role is tied to the office location ... Are you currently based in the listed location and able to work
+  in person 3 days per week?", and `test_based_here_needs_the_hybrid_preference` now expects it to be unresolved.
+  Real-world wordings outside the templates, or with an unknown place, are now the owner's.
 - **Citizen fact**: answers only a plain "Are you a US citizen?" (every word is citizen-question wording, and
   there is no "not" or "or"). A
   certification ("I certify that I am a US citizen and will provide proof"), an export-control note or any

@@ -220,10 +220,10 @@ BAY = "Are you currently based in the Riverside Area, or ready to relocate?"
 
 def test_office_hq_days_question_from_preferences():
     p = view(prefs={"open_to_hybrid": True, "willing_to_relocate": True})
-    assert run(HQ, p, options=[], kind=FieldKind.text, locations=["Shelbyville, OR"])[0] == "Yes"
-    assert run(HQ, p, locations=["Shelbyville, OR"])[0] == "Yes"
-    assert run(HQ, view(prefs={"open_to_hybrid": False}), locations=["Shelbyville, OR"])[0] == "No"
-    why = unresolved(HQ, view(), locations=["Shelbyville, OR"])
+    assert run(HQ, p, options=[], kind=FieldKind.text, locations=["Riverside, OR"])[0] == "Yes"
+    assert run(HQ, p, locations=["Riverside, OR"])[0] == "Yes"
+    assert run(HQ, view(prefs={"open_to_hybrid": False}), locations=["Riverside, OR"])[0] == "No"
+    why = unresolved(HQ, view(), locations=["Riverside, OR"])
     assert "preferences.open_to_hybrid" in why["reason"]
 
 
@@ -240,7 +240,7 @@ def test_office_hq_days_question_from_preferences():
 def test_office_question_with_a_negation_is_not_answered(label):
     # reviewer: the free slot before "work" never absorbs a negation (wrong polarity)
     p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
-    v, _ = run(label, p, locations=["Shelbyville, OR"])
+    v, _ = run(label, p, locations=["Riverside, OR"])
     assert v is None
 
 
@@ -253,7 +253,7 @@ AVERSE = ["mind", "dislike", "hate", "resent", "object to", "resist", "oppose", 
                                   "Can you {w} work from our Riverside office (4 days a week)?"])
 def test_office_slot_is_a_closed_list(word, form):
     p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
-    assert run(form.format(w=word), p, locations=["Shelbyville, OR"])[0] is None
+    assert run(form.format(w=word), p, locations=["Riverside, OR"])[0] is None
 
 
 @pytest.mark.parametrize("label", ["Are you not able to work onsite?", "Are you unable to work on site?",
@@ -271,7 +271,7 @@ def test_negated_preference_questions_stay_with_the_owner(label):
                                     "occasionally", "sometimes", "comfortably", "reliably"])
 def test_whitelisted_adverbs_still_answer(adverb):
     p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
-    assert run(f"Can you {adverb} work from our Riverside HQ?", p, locations=["Shelbyville, OR"])[0] == "Yes"
+    assert run(f"Can you {adverb} work from our Riverside HQ?", p, locations=["Riverside, OR"])[0] == "Yes"
     assert run("Are you able to work onsite?", p)[0] == "Yes"
 
 
@@ -290,12 +290,12 @@ def test_scope_word_company_name_is_never_stripped():
 
 def test_office_question_slot_still_takes_plain_words():
     p = view(prefs={"open_to_onsite": True, "open_to_hybrid": True, "willing_to_relocate": True})
-    assert run("Could you regularly work from our Riverside HQ?", p, locations=["Shelbyville, OR"])[0] == "Yes"
+    assert run("Could you regularly work from our Riverside HQ?", p, locations=["Riverside, OR"])[0] == "Yes"
 
 
 def test_based_or_ready_to_relocate_from_preferences():
-    assert run(BAY, view(prefs={"willing_to_relocate": True}), options=[], kind=FieldKind.text)[0] == "Yes"
-    why = unresolved(BAY, view(), options=[], kind=FieldKind.text)
+    assert run(BAY, view(prefs={"willing_to_relocate": True}), options=[], kind=FieldKind.text, locations=["Riverside, CA"])[0] == "Yes"
+    why = unresolved(BAY, view(), options=[], kind=FieldKind.text, locations=["Riverside, CA"])
     assert "willing_to_relocate" in why["reason"]
 
 
@@ -377,9 +377,48 @@ def test_preference_wording_outside_the_templates_is_unresolved(label):
     ("Can you work from our Riverside HQ (4 days a week)?", "Yes"),
 ])
 def test_common_positive_preference_wordings_still_answer(label, want):
-    assert run(label, view(prefs=PREFS), locations=["Shelbyville, OR"])[0] == want
+    locs = ["Riverside, OR", "Union Square, New York City"]
+    assert run(label, view(prefs=PREFS), locations=locs)[0] == want
 
 
 def test_based_or_ready_to_relocate_only_decides_yes():
     label = "Are you currently based in the Riverside Area, or ready to relocate?"
     assert run(label, view(prefs={"willing_to_relocate": False}))[0] is None   # may still be based there
+
+
+# ---------------------------------------------------------------- control round: whole-label backstop, known places
+NO_PREFS = {"open_to_onsite": False, "open_to_hybrid": False, "willing_to_relocate": False}
+LOCS = ["Riverside, OR"]
+
+
+@pytest.mark.parametrize("prefs", [PREFS, NO_PREFS])
+@pytest.mark.parametrize("label", [
+    "If you are not local to New York And Unwilling, are you willing to relocate?",
+    "Would you quit over a hybrid schedule?", "Is a hybrid schedule a showstopper for you?",
+    "Would you walk away from an onsite role?", "Is relocating a deal killer?",
+    "Would you turn down a hybrid role?", "Do you prefer remote over hybrid?",
+    "Would you tolerate working onsite?", "Are you willing to relocate to Over My Dead Body?",
+    "Are you willing to relocate to Anywhere But New York?", "Are you willing to relocate to Impossible?",
+    "Are you willing to relocate to New York Sadly?", "Can you work from our Impossible HQ?",
+    "If you are not local to Nowhere Special, are you willing to relocate?",
+])
+def test_control_examples_stay_unresolved(label, prefs):
+    assert run(label, view(prefs=prefs), locations=LOCS)[0] is None
+
+
+@pytest.mark.parametrize("label", [
+    "Are you willing to relocate to New York?", "Are you willing to relocate to the Bay Area?",
+    "Are you willing to relocate to Riverside?", "Are you willing to relocate to Springfield?",   # profile city
+    "If you are not located in Chicago or NY, are you open to relocating?",
+    "If you are not local to the area, are you willing to relocate?",
+    "Can you work from our San Francisco HQ (4 days a week)?", "Can you work from our Riverside office?",
+])
+def test_known_places_answer_with_yes_and_no_profiles(label):
+    assert run(label, view(prefs=PREFS), locations=LOCS)[0] == "Yes"
+    assert run(label, view(prefs=NO_PREFS), locations=LOCS)[0] == "No"
+
+
+def test_unknown_place_without_the_posting_location_is_unresolved():
+    assert run("Are you willing to relocate to Riverside?", view(prefs=PREFS), locations=[])[0] is None
+    assert run("Are you willing to relocate to OR?", view(prefs=PREFS), locations=[])[0] == "Yes"   # state code
+    assert run("Are you willing to relocate to or?", view(prefs=PREFS), locations=[])[0] is None

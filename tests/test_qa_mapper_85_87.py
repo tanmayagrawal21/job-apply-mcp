@@ -74,8 +74,10 @@ def test_relocate_option_needs_willing_to_relocate_true():
 
 def test_based_here_needs_the_hybrid_preference():
     p = view(prefs=Preferences(willing_to_relocate=True, open_to_hybrid=False, open_to_onsite=False))
-    # never "based here and able to work from the office"; the remote-only option is the truthful one
-    assert run(HYB_Q, FieldKind.select, HYB_OPTS, p=p, locs=["Springfield, IL"]) == (HYB_OPTS[2], "rule:open_to_hybrid")
+    # never "based here and able to work from the office". ADR-0073 (control): the long prose wording matches no
+    # closed positive preference template, so even the remote-only option is left to the owner
+    assert run(HYB_Q, FieldKind.select, HYB_OPTS, p=p, locs=["Springfield, IL"]) is None
+    assert run.unresolved[0].options == HYB_OPTS
 
 
 def test_open_to_hybrid_alone_never_claims_residence():   # the #85 wrong answer
