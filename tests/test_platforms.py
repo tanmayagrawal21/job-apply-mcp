@@ -116,6 +116,7 @@ async def test_lever(http):
 @respx.mock
 async def test_lever_api_submit_never_leaks_key(http, tmp_path):
     a = LeverAdapter(http, env={"JOB_APPLY_KEY_LEVER_DEMOCO": "k123"})
+    respx.get(f"https://jobs.lever.co/democo/{fx.LEVER_ID}/apply").respond(text="<html><form></form></html>")  # ADR-0074
     form = await a.get_form(f"lever:democo:{fx.LEVER_ID}")
     cv = tmp_path / "cv.pdf"
     cv.write_bytes(b"x")

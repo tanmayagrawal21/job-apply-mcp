@@ -83,6 +83,9 @@ def categorize(status: str | None, detail: Any, settings: Any = None, *, unresol
         return HARD_LIMIT
     if (c := _structural(unresolved, client_tasks)) is not None:
         return c
+    first = detail[0] if isinstance(detail, (list, tuple)) and detail else detail
+    if str(first or "").startswith("tool_gap:"):   # ADR-0074: a reason the tool itself tagged as its own gap
+        return TOOL_GAP
     if st in _UNKNOWN_STATUSES:
         return UNKNOWN_FACT
     if _UNKNOWN.search(text):                # wording fallback for rows without structure (run reports)

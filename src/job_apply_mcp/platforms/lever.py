@@ -129,13 +129,21 @@ class LeverAdapter(BaseAdapter):
                                submit_via=["api", "browser"] if self.api_key(board) else ["browser"])
 
     async def _apply_page(self, board: str, pid: str) -> tuple[str, bool]:
-        """(HTML, truncated) of the hosted apply page (custom-question cards, ADR-0031). A fetch failure just means
-        no extra fields; a page cut at the text cap is reported (ADR-0072)."""
+        """(HTML, truncated) of the hosted apply page (custom-question cards, ADR-0031). A page cut at the text cap
+        is reported (ADR-0072). A failed fetch fails closed (ADR-0074): a 404 means the posting is gone
+        (PostingClosed); any other HTTP error after the client's bounded retries, a timeout or any other exception
+        is a tool_gap AdapterError, because the custom questions (some may be required) could not be read."""
+        url = f"https://jobs.lever.co/{board}/{pid}/apply"
         try:
-            return await self.http.get_text_capped(f"https://jobs.lever.co/{board}/{pid}/apply",
-                                                   max_bytes=APPLY_PAGE_MAX_BYTES)
-        except Exception:  # noqa: BLE001 - HTTP/transport errors must never break get_form
-            return "", False
+            return await self.http.get_text_capped(url, max_bytes=APPLY_PAGE_MAX_BYTES)
+        except HttpError as e:
+            if e.status in (404, 410):
+                raise PostingClosed("apply page not found (closed or moved)") from e
+            why = f"HTTP {e.status}"
+        except Exception as e:  # noqa: BLE001 - transport errors, timeouts, decoding: never a complete form
+            why = type(e).__name__
+        raise AdapterError(f"tool_gap: could not read the Lever apply page ({why}), so its custom questions are "
+                           "unknown; the form is not reported")
 
     async def submit(self, form: ApplicationForm, answers: dict[str, Any], files: dict[str, str],
                      *, dry_run: bool = True) -> SubmitResult:

@@ -16,7 +16,7 @@ correctly reported `incomplete`, but nothing mapped them, so every Lever job wit
 - Driver: a radio/checkbox group sharing one name is filled by clicking the member whose value matches (best_option) and
   verified by reading `checked` back; selects and text reuse the existing paths.
 - Engine: an LLM short answer of "null"/"none"/"n/a" is treated as no answer (it was being typed into optional boxes).
-- Any failure fetching the page yields the standard fields only (previous behaviour).
+- Any failure fetching the page yields the standard fields only (previous behaviour). Superseded by ADR-0074: a failed fetch now fails closed (tool_gap), and a 404 is PostingClosed.
 
 ## Consequences
 One more request per Lever form. Field order index relies on Lever keeping `fieldN` = position in the card JSON.

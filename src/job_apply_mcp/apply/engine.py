@@ -39,7 +39,7 @@ from ..core.models import (
 from ..core.output import full_label
 from ..core.secrets import redact
 from ..llm.base import LLM_TIMINGS
-from ..platforms.base import PostingClosed
+from ..platforms.base import AdapterError, NotSupported, PostingClosed
 from ..writing import checks
 from . import attest, autonomy, essays
 from .approvals import ApprovalBook, evidence_path
@@ -189,6 +189,7 @@ class PlanOut(BaseModel):
     timings: dict[str, int] = Field(default_factory=dict)
     skipped_voluntary: dict[str, str] = Field(default_factory=dict)   # key -> label (ADR-0040)
     profile_gaps: list[dict[str, Any]] = Field(default_factory=list)  # per-country facts to ask the owner (ADR-0040)
+    gap: str | None = None   # ADR-0074: the form could not be read; "tool_gap: ..." reason
 
     def compact(self) -> dict[str, Any]:
         d: dict[str, Any] = {"ref": self.plan.ref, "gate": self.plan.gate.decision.value}
@@ -216,6 +217,8 @@ class PlanOut(BaseModel):
             d["approval_id"] = self.approval_id
         if self.timings:
             d["t"] = self.timings
+        if self.gap:
+            d["reason"], d["category"] = self.gap, "tool_gap"
         return d
 
 
@@ -274,10 +277,26 @@ class _Ctx:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+class FetchGap(AdapterError):
+    """ADR-0074: the posting or its form could not be read (HTTP error after retries, timeout, unreadable page).
+    `reason` always starts with "tool_gap:". plan / submit / batches turn it into a categorised result."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def tool_gap_reason(e: BaseException) -> str:
+    msg = str(e) or type(e).__name__
+    return (msg if msg.startswith("tool_gap:") else f"tool_gap: {msg}")[:300]
+
+
 def _batch_error(ref: str, e: BaseException) -> dict[str, Any]:
     """One failed ref of a batch. A missing optional component is needs_human with its reason (ADR-0059)."""
     if isinstance(e, ComponentMissing):
         return {"ref": ref, "status": "needs_human", "detail": f"component missing: {e}"[:200]}
+    if isinstance(e, FetchGap):                    # ADR-0074 (plan normally returns it as a result)
+        return {"ref": ref, "status": "needs_human", "detail": e.reason, "reason": e.reason, "category": "tool_gap"}
     return {"ref": ref, "status": "error", "detail": str(e)[:160]}
 
 
@@ -364,8 +383,13 @@ class ApplyEngine:
     async def _context(self, ref: str) -> _Ctx:
         adapter = self._resolve(ref)
         with self._stage(ref, "fetch"):  # posting + form concurrently
-            posting, form = await asyncio.gather(adapter.get_posting(ref, with_description=True),
-                                                 adapter.get_form(ref))
+            try:
+                posting, form = await asyncio.gather(adapter.get_posting(ref, with_description=True),
+                                                     adapter.get_form(ref))
+            except (PostingClosed, NotSupported):
+                raise
+            except AdapterError as e:   # ADR-0074: fail closed, categorised by the callers (never a partial form)
+                raise FetchGap(tool_gap_reason(e)) from e
         return _Ctx(adapter, posting, form, summarize_posting(posting.description, self.s.apply.context_chars))
 
     def _stop_hits(self, form: ApplicationForm) -> list[str]:
@@ -419,6 +443,9 @@ class ApplyEngine:
             except PostingClosed as e:                  # ADR-0056: the API says closed -> skipped, not an error
                 return PlanOut(plan=ApplicationPlan(ref=ref, gate=GateResult(decision=Decision.skip,
                                                                              reasons=[f"closed: {e}"])))
+            except FetchGap as e:                       # ADR-0074: a categorised tool_gap, not a raw tool error
+                return PlanOut(plan=ApplicationPlan(ref=ref, gate=GateResult(decision=Decision.needs_human,
+                                                                             reasons=[e.reason])), gap=e.reason)
             return await self._plan_ctx(ref, ctx)
 
     @contextmanager
@@ -1387,7 +1414,10 @@ class ApplyEngine:
             if cached and cached.adapter is not None:
                 ctx = _Ctx(cached.adapter, cached.posting, cached.form, cached.summary)  # no refetch
             else:
-                ctx = await self._context(ref)
+                try:
+                    ctx = await self._context(ref)
+                except FetchGap as e:                   # ADR-0074: same categorised result as plan
+                    return SubmitResult(ref=ref, status="needs_human", detail=e.reason)
             if not dry and not self.s.apply.auto_approve_active:
                 _, err = self.approvals.check(approval_id, ref, self._url(ctx))
                 if err:
@@ -1736,7 +1766,7 @@ class ApplyEngine:
             if g.decision != Decision.submit:
                 closed = bool(g.reasons) and g.reasons[0].startswith("closed:")      # ADR-0056
                 return {"ref": ref, "status": "skipped" if closed else g.decision.value, "why": g.reasons,
-                        "t": out.timings}
+                        "t": out.timings, **({"reason": out.gap, "category": "tool_gap"} if out.gap else {})}
             if out.plan.unresolved:
                 human = any(t.get("needs_human") for t in out.client_tasks)
                 return {"ref": ref, "status": "needs_human" if human else "needs_input", "unresolved": out.plan.unresolved,

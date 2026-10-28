@@ -241,7 +241,9 @@ class GreenhouseAdapter(BaseAdapter):
         except HttpError as e:
             if e.status == 404:
                 raise PostingClosed("job not found (closed or moved)") from e
-            raise AdapterError(str(e)) from e
+            raise AdapterError(f"tool_gap: could not read the Greenhouse API ({e})") from e
+        except httpx.HTTPError as e:   # timeout / transport error after the client's retries (ADR-0074): fail closed
+            raise AdapterError(f"tool_gap: could not read the Greenhouse API ({type(e).__name__})") from e
 
     async def _questions(self, board: str, jid: str) -> dict:
         return await self._get(f"{API}/{board}/jobs/{jid}", params={"questions": "true"})

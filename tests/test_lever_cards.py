@@ -67,10 +67,14 @@ async def test_get_form_appends_cards_after_standard_fields(http):
 
 
 @respx.mock
-async def test_get_form_survives_apply_page_failure(http):
+async def test_get_form_fails_closed_on_apply_page_failure(http):
+    """ADR-0074 (#127): unread custom questions may be required, so a failed fetch is a tool_gap, not a short form."""
+    import pytest
+
+    from job_apply_mcp.platforms.base import AdapterError
     respx.get(f"https://jobs.lever.co/democo/{LEVER_ID}/apply").respond(status_code=503)
-    form = await LeverAdapter(http, env={}).get_form(f"lever:democo:{LEVER_ID}")
-    assert {"name", "email", "resume"} <= {f.key for f in form.fields} and len(form.fields) == 8
+    with pytest.raises(AdapterError, match="^tool_gap: could not read the Lever apply page"):
+        await LeverAdapter(http, env={}).get_form(f"lever:democo:{LEVER_ID}")
 
 
 def test_llm_null_string_is_never_an_answer():

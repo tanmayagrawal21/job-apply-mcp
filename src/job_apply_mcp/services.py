@@ -418,14 +418,19 @@ class Services:
 
     async def get_form(self, ref_or_url: str) -> dict[str, Any]:
         from .apply.closed import challenge_label, closed_reason
-        from .apply.engine import OPTIONS_MAX
+        from .apply.engine import OPTIONS_MAX, tool_gap_reason
         from .core.output import full_label
-        from .platforms import PostingClosed
+        from .platforms import NotSupported, PostingClosed
         a = self.resolve(ref_or_url)
         try:
             f = await a.get_form(ref_or_url)
         except PostingClosed as e:                     # ADR-0056: closed per the platform API
             return {"ref": ref_or_url, "status": "skipped", "closed": f"closed: {e}"}
+        except NotSupported:
+            raise
+        except AdapterError as e:                      # ADR-0074: unreadable form -> categorised tool_gap, never partial
+            return self._guided({"ref": ref_or_url, "status": "needs_human", "reason": tool_gap_reason(e),
+                                 "category": "tool_gap"})
         rows = []
         for x in f.fields:
             r: dict[str, Any] = {"k": x.key, "l": full_label(x.label), "t": x.kind.value}   # ADR-0061
@@ -505,7 +510,7 @@ class Services:
         """Category (ADR-0067) + next-step guidance (ADR-0059) for one status row."""
         from .core.handoff import categorize, category_hint, in_window
         cfg = getattr(self, "settings", None)
-        cat = categorize(row.get("status"), row.get("detail") or row.get("why"), cfg,
+        cat = categorize(row.get("status"), row.get("detail") or row.get("why") or row.get("reason"), cfg,
                          unresolved=row.get("unresolved"), client_tasks=row.get("client_tasks"))
         from .core.next_steps import NO_RETRY, POST_CLICK
         blocked = ({row.get("status"), state} & NO_RETRY       # may be sent / filled in an open tab: never "retry"
